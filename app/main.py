@@ -24,7 +24,6 @@ app.add_middleware(
 )
 
 # Include Authentication Routes
-# Tinanggal natin yung prefix="/auth" dito dahil nandoon na iyon sa loob ng auth_routes.router
 app.include_router(auth_routes.router)
 app.include_router(shop_routes.router)
 
