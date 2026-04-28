@@ -48,7 +48,7 @@ class User(Base):
     # Relationships
     shop = relationship("Shop", back_populates="users")
     
-    # One-to-One relationship with the Customer Profile
+    # One-to-One relationship with the Customer Profilea
     customer_profile = relationship("CustomerProfile", back_populates="user", uselist=False)
 
 class CustomerProfile(Base):
