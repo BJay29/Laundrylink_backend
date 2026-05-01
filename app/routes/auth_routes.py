@@ -9,59 +9,37 @@ router = APIRouter(
     tags=["Authentication"]
 )
 
-# --- CUSTOMER REGISTRATION (Mobile App) ---
-@router.post("/register/customer", response_model=schemas.UserResponse)
-def register_customer(user: schemas.CustomerCreate, db: Session = Depends(get_db)):
-    """
-    Endpoint for new customer sign-up. 
-    Initializes a User account and a linked CustomerProfile.
-    """
-    return auth_controller.create_customer(db, user)
-
-# --- OWNER REGISTRATION (Admin/Web) ---
+# --- BACKEND-ONLY REGISTRATION (Hidden from UI) ---
 @router.post("/register/owner", response_model=schemas.UserResponse)
 def register_owner(user: schemas.OwnerCreate, db: Session = Depends(get_db)):
     """
-    Endpoint for shop owner registration. 
-    Creates the Shop and the Owner account linked to it.
+    Endpoint for creating shop owner accounts via Thunder Client.
+    This is used to populate the database without needing a frontend registration form.
     """
     return auth_controller.create_owner(db, user)
 
-# --- UNIVERSAL LOGIN ---
+# --- UNIVERSAL LOGIN (Web & Mobile) ---
 @router.post("/login", response_model=schemas.LoginResponse)
 def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
     """
-    Authenticates both Owners and Customers.
-    Returns an access token and the unified user object.
+    Primary authentication endpoint for both React (Web) and Flutter (Mobile).
+    Validates credentials and returns the shop context (ID, Name, and Address).
     """
     return auth_controller.authenticate_user(db, user_credentials)
 
-# --- GET USER PROFILE (Dashboard Fetching) ---
-@router.get("/profile/{user_id}")
-def get_user_profile(user_id: int, db: Session = Depends(get_db)):
+# --- SESSION DATA FETCHING ---
+@router.get("/profile/{user_id}", response_model=schemas.UserResponse)
+def get_user_session_data(user_id: int, db: Session = Depends(get_db)):
     """
-    Retrieves user details (First Name, Last Name, Role, etc.) by ID.
-    Used for automatic data fetching on the Dashboard and Profile screens.
+    Retrieves essential session details by User ID.
+    Used to persist shop information on the Dashboard after a successful login.
     """
-    return auth_controller.get_current_user_profile(db, user_id)
-
-# --- PROFILE UPDATE (Mobile/Web) ---
-@router.put("/profile/update/{user_id}", response_model=schemas.UserResponse)
-def update_user_profile(
-    user_id: int, 
-    profile_data: schemas.UserUpdate, 
-    db: Session = Depends(get_db)
-):
-    """
-    Updates personal details in the customer_profiles table.
-    Ensures that only users with the 'customer' role are modified.
-    """
-    updated_user = auth_controller.update_user_profile(db, user_id=user_id, profile_data=profile_data)
+    user_data = auth_controller.get_current_user_profile(db, user_id)
     
-    if not updated_user:
+    if not user_data:
         raise HTTPException(
-            status_code=404, 
-            detail="Customer profile not found or user is not a customer"
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="User session data not found"
         )
         
-    return updated_user
+    return user_data

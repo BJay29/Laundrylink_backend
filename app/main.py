@@ -3,60 +3,63 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine
 from app import models
-from app.routes import auth_routes, shop_routes
+from app.routes import auth_routes
 
-# 1. Modern Lifespan Manager: Kapalit ng @app.on_event("startup")
+# 1. Lifespan Manager: Replaces the deprecated @app.on_event("startup")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Dito ilalagay ang code na tatakbo pagka-start ng server
+    # This block executes when the server starts
     print("========================================")
     print("LaundryLink Backend started successfully")
-    print("Architecture: Routes and Controllers Split")
+    print("Architecture: Clean Routes/Controllers Split")
     
-    # Database Sync: Ginagawa ang tables sa PostgreSQL (Aiven)
+    # Database Synchronization: Automatically creates tables in Aiven PostgreSQL
     try:
         models.Base.metadata.create_all(bind=engine)
-        print("PostgreSQL Tables Synced!")
+        print("PostgreSQL Tables Synced Successfully!")
     except Exception as e:
         print(f"Database Sync Error: {e}")
         
-    print("Multi-Shop Support: Enabled")
+    print("System Mode: Profit Optimization Ready")
     print("========================================")
     
-    yield  # Dito tumatakbo ang FastAPI app
+    yield  # The FastAPI application runs here
     
-    # Dito naman ilalagay ang code kung may gagawin bago mag-shutdown (optional)
+    # This block executes before the server shuts down
     print("Shutting down LaundryLink Backend...")
 
-# 2. FastAPI Instance with Lifespan
+# 2. FastAPI Instance Configuration
 app = FastAPI(
     title="LaundryLink API",
-    description="Backend API for Laundry Management System",
+    description="Backend API for Laundry Income Optimization System",
     version="1.0.0",
     lifespan=lifespan
 )
 
-# 3. CORS Configuration: Mahalaga para sa Flutter at React integration
+# 3. CORS Configuration: Essential for Flutter (Mobile) and React (Web) integration
+# During the 10-day sprint, origins are set to "*" for easier testing
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Payagan ang lahat ng origins sa development/testing
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 4. Include Routes
+# 4. Include Authentication Routes
+# Focused only on auth_routes to prioritize the login flow
 app.include_router(auth_routes.router)
-app.include_router(shop_routes.router)
 
-# 5. Root Endpoint
+# 5. Root Endpoint for Status Verification
 @app.get("/")
 def read_root():
     """
-    Root endpoint to verify the API status and database connectivity.
+    Root endpoint to verify API status and database connectivity.
+    Used for initial health checks during deployment.
     """
     return {
         "status": "Online",
-        "message": "LaundryLink API is running with Clean Architecture!",
-        "database": "PostgreSQL Connected"
+        "system": "LaundryLink Optimization Engine",
+        "database": "PostgreSQL (Aiven) Connected",
+        "environment": "Development Sprint"
     }

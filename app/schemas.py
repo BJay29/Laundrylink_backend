@@ -3,77 +3,49 @@ from typing import Optional
 
 # --- REGISTRATION SCHEMAS ---
 
-class CustomerCreate(BaseModel):
-    """ 
-    Schema for mobile app registration (Customers).
-    Inalis na ang address dito para hindi na kailangan i-input sa sign-up.
-    """
-    first_name: str
-    last_name: str
-    email: EmailStr
-    password: str
-    phone_number: str
-
 class OwnerCreate(BaseModel):
-    """ Schema for web dashboard registration (Shop Owners) """
+    """
+    Schema for internal/backend registration of Shop Owners.
+    Used via Thunder Client to populate the database without a frontend form.
+    """
     shop_name: str
+    address: str
     email: EmailStr
     password: str
 
 # --- AUTHENTICATION SCHEMAS ---
 
 class UserLogin(BaseModel):
-    """ Standard login credentials for all users """
+    """ 
+    Standard login credentials for both Web and Mobile.
+    Used to authenticate Owners and Staff against the PostgreSQL database.
+    """
     email: EmailStr
     password: str
 
-# --- UPDATE SCHEMAS ---
-
-class UserUpdate(BaseModel):
-    """ 
-    Dito na papasok ang address. 
-    Gagamitin ito sa 'Edit Profile' screen ng Mobile App.
-    """
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    phone_number: Optional[str] = None
-    address: Optional[str] = None
-
-class ShopUpdate(BaseModel):
-    """ For updating Laundry Shop information (Owner only) """
-    shop_name: Optional[str] = None
-    address: Optional[str] = None
-
-# --- DATA REPRESENTATION SCHEMAS ---
+# --- DATA REPRESENTATION (RESPONSE) SCHEMAS ---
 
 class UserResponse(BaseModel):
     """ 
-    Unified response schema for the 'user' object.
-    Dahil sa exclude_none=True, hindi lalabas ang 'null' fields sa Thunder Client.
+    Simplified user response focused on shop identification.
+    Returns only the essential data needed for the dashboard context.
     """
-    id: int
     email: str
-    role: str
     
-    # Shop fields (Visible only if User is an Owner)
+    # Shop-specific details required for the frontend
     shop_id: Optional[int] = None
     shop_name: Optional[str] = None
-    
-    # Profile fields (Visible only if User is a Customer)
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    phone_number: Optional[str] = None
     address: Optional[str] = None
 
     model_config = ConfigDict(
         from_attributes=True,
-        exclude_none=True # Ito ang magtatanggal ng 'address' field sa JSON kung ito ay null.
+        exclude_none=True 
     )
 
 class LoginResponse(BaseModel):
     """
-    Final JSON response structure for React and Flutter.
-    Matches authService.js requirements.
+    The final JSON structure sent to the React and Flutter frontends.
+    Contains the bearer token and the simplified user/shop object.
     """
     access_token: str
     token_type: str = "bearer"
