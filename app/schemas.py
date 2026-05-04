@@ -7,7 +7,7 @@ from datetime import datetime
 class OwnerCreate(BaseModel):
     """
     Schema for internal/backend registration of Shop Owners.
-    Used via Thunder Client to populate the database without a frontend form.
+    Used via Thunder Client to populate the initial database.
     """
     shop_name: str
     address: str
@@ -19,16 +19,16 @@ class OwnerCreate(BaseModel):
 class UserLogin(BaseModel):
     """ 
     Standard login credentials for both Web and Mobile.
-    Used to authenticate Owners and Staff against the PostgreSQL database.
+    Authenticates against the PostgreSQL users table.
     """
     email: EmailStr
     password: str
 
-# --- MACHINE SCHEMAS (For Machine Hub & Monitoring) ---
+# --- MACHINE SCHEMAS ---
 
 class MachineBase(BaseModel):
     """
-    Base attributes for laundry units.
+    Base attributes for hardware units.
     Matches the 'Live Status' requirement for the monitoring grid.
     """
     machine_type: str # 'Washer' or 'Dryer'
@@ -37,33 +37,28 @@ class MachineBase(BaseModel):
 
 class MachineCreate(MachineBase):
     """
-    Schema for creating new laundry units in the database.
-    Links the machine to a specific shop.
+    Used for onboarding new hardware into a specific shop.
     """
     shop_id: int
 
 class MachineUpdate(BaseModel):
     """
-    Schema used specifically for updating machine status or toggling maintenance.
+    Schema used for toggling maintenance or manual timer overrides.
     """
     status: Optional[str] = None
     remaining_time: Optional[int] = None
 
 class MachineResponse(MachineBase):
     """
-    Full machine data including operational metrics for the Machine Hub table.
-    Matches the columns: Machine ID, Type, Status, Cycles Run, and Avg Costs.
+    Full machine telemetry for the Machine Hub table.
+    Includes performance metrics and real-time countdown data.
     """
     id: int
     shop_id: int
     total_cycles: int
-    
-    # Cost Metrics per Figma Design (image_a84f44.png)
     avg_detergent: float
     avg_electricity: float
     avg_water: float
-    
-    # Real-time data for Monitoring Grid
     remaining_time: int
 
     model_config = ConfigDict(from_attributes=True)
@@ -72,8 +67,8 @@ class MachineResponse(MachineBase):
 
 class BookingCreate(BaseModel):
     """
-    Schema to validate new orders from the React frontend.
-    Handles both Smart and Manual mode inputs.
+    Validation for new laundry transactions from the frontend.
+    Handles the machine assignment IDs required for the status-sync logic.
     """
     customer_name: str
     service_type: str
@@ -83,19 +78,19 @@ class BookingCreate(BaseModel):
     total_price: float
     booking_mode: str # 'smart' or 'manual'
     
-    # Machine Assignments
-    # These link to the Machine table primary keys to trigger status updates
+    # Linked hardware IDs to trigger 'Busy' status in backend
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # Add-on Toggles
+    # Feature Toggles
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
 class BookingResponse(BaseModel):
     """
-    Schema for displaying orders in the Service Terminal.
+    Detailed order data for the Service Terminal and Dashboard.
+    Provides nested machine info for clear UI status labeling.
     """
     id: int
     customer_name: str
@@ -108,7 +103,7 @@ class BookingResponse(BaseModel):
     booking_mode: str
     created_at: datetime
     
-    # Assigned hardware details
+    # Assigned IDs
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
@@ -118,13 +113,11 @@ class BookingResponse(BaseModel):
 
 class UserResponse(BaseModel):
     """ 
-    Simplified user response focused on shop identification.
-    Returns the essential data needed for the React dashboard context.
+    Standard user profile returned upon successful authentication.
+    Supplies the shop_id used as a global filter for all frontend requests.
     """
     email: str
     role: str
-    
-    # Shop-specific details required for frontend persistence
     shop_id: Optional[int] = None
     shop_name: Optional[str] = None
     address: Optional[str] = None
@@ -136,8 +129,8 @@ class UserResponse(BaseModel):
 
 class LoginResponse(BaseModel):
     """
-    The final JSON structure sent to the React and Flutter frontends.
-    Contains the bearer token and the simplified user/shop object.
+    The final payload for React/Flutter login handlers.
+    Includes the JWT Bearer token and user/shop context.
     """
     access_token: str
     token_type: str = "bearer"
