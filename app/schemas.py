@@ -32,6 +32,13 @@ class MachineBase(BaseModel):
     status: str = "Available" # 'Available', 'Active', 'Maintenance'
     is_available: bool = True
 
+class MachineCreate(MachineBase):
+    """
+    Schema for creating new laundry units in the database.
+    This was the missing component causing the deployment failure.
+    """
+    shop_id: int
+
 class MachineUpdate(BaseModel):
     """
     Schema used specifically for updating machine status or toggling maintenance.
