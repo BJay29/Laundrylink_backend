@@ -27,15 +27,18 @@ class UserLogin(BaseModel):
 # --- MACHINE SCHEMAS (For Machine Hub & Monitoring) ---
 
 class MachineBase(BaseModel):
+    """
+    Base attributes for laundry units.
+    Matches the 'Live Status' requirement for the monitoring grid.
+    """
     machine_type: str # 'Washer' or 'Dryer'
     machine_number: int
-    status: str = "Available" # 'Available', 'Active', 'Maintenance'
-    is_available: bool = True
+    status: str = "Available" # 'Available', 'Busy', 'Maintenance'
 
 class MachineCreate(MachineBase):
     """
     Schema for creating new laundry units in the database.
-    This was the missing component causing the deployment failure.
+    Links the machine to a specific shop.
     """
     shop_id: int
 
@@ -44,17 +47,24 @@ class MachineUpdate(BaseModel):
     Schema used specifically for updating machine status or toggling maintenance.
     """
     status: Optional[str] = None
-    is_available: Optional[bool] = None
+    remaining_time: Optional[int] = None
 
 class MachineResponse(MachineBase):
     """
-    Full machine data including profitability metrics for the Machine Hub.
+    Full machine data including operational metrics for the Machine Hub table.
+    Matches the columns: Machine ID, Type, Status, Cycles Run, and Avg Costs.
     """
     id: int
     shop_id: int
     total_cycles: int
-    profitability_score: float
-    estimated_cost_per_cycle: float
+    
+    # Cost Metrics per Figma Design (image_a84f44.png)
+    avg_detergent: float
+    avg_electricity: float
+    avg_water: float
+    
+    # Real-time data for Monitoring Grid
+    remaining_time: int
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -74,9 +84,9 @@ class BookingCreate(BaseModel):
     booking_mode: str # 'smart' or 'manual'
     
     # Machine Assignments
-    # These IDs refer to the Machine table primary keys
-    selected_washer_id: Optional[int] = None
-    selected_dryer_id: Optional[int] = None
+    # These link to the Machine table primary keys to trigger status updates
+    washer_id: Optional[int] = None
+    dryer_id: Optional[int] = None
     
     # Add-on Toggles
     add_detergent: bool = False
@@ -98,8 +108,9 @@ class BookingResponse(BaseModel):
     booking_mode: str
     created_at: datetime
     
-    # Includes machine details if assigned
-    machine_id: Optional[int] = None
+    # Assigned hardware details
+    washer_id: Optional[int] = None
+    dryer_id: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -108,11 +119,12 @@ class BookingResponse(BaseModel):
 class UserResponse(BaseModel):
     """ 
     Simplified user response focused on shop identification.
-    Returns only the essential data needed for the dashboard context.
+    Returns the essential data needed for the React dashboard context.
     """
     email: str
+    role: str
     
-    # Shop-specific details required for the frontend
+    # Shop-specific details required for frontend persistence
     shop_id: Optional[int] = None
     shop_name: Optional[str] = None
     address: Optional[str] = None

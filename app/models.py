@@ -7,6 +7,7 @@ class Shop(Base):
     """
     Represents a laundry business entity. 
     Stores business-wide data like the shop name and its physical location.
+    Citing: Used for multi-tenant data isolation.
     """
     __tablename__ = "shops"
 
@@ -16,9 +17,11 @@ class Shop(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    users = relationship("User", back_populates="shop")
+    # Cascade "all, delete-orphan" ensures that if a Shop is deleted, 
+    # all its users, machines, and bookings are removed from the database.
+    users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
     machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
-    bookings = relationship("Booking", back_populates="shop")
+    bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
 
 class User(Base):
     """
@@ -42,7 +45,8 @@ class User(Base):
 class Machine(Base):
     """
     Represents hardware units (Washers/Dryers).
-    Updated to support the Machine Hub table view (image_b6637f.png).
+    Sync Logic: When a machine is added or deleted here, it immediately reflects 
+    in both the Machine Hub table and the Monitoring Grid.
     """
     __tablename__ = "machines"
 
@@ -50,31 +54,33 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False) # e.g., 1, 2, 3
     
-    # Status levels: 'Available', 'Busy', 'Maintenance'
+    # Live Status: 'Available', 'Busy', 'Maintenance'
+    # Used by Monitoring Grid to determine color coding (Green, Emerald, Rose)
     status = Column(String, default="Available")
     
-    # Performance Metrics for Machine Hub Table
+    # Performance Metrics for Machine Hub Table (Figma image_a84f44.png)
     total_cycles = Column(Integer, default=0)
-    avg_detergent = Column(Float, default=0.0)  # Calculated as: total_detergent_cost / total_cycles
-    avg_electricity = Column(Float, default=0.0) # Calculated as: total_elec_cost / total_cycles
-    avg_water = Column(Float, default=0.0)       # Calculated as: total_water_cost / total_cycles
+    avg_detergent = Column(Float, default=0.0)  # total_detergent_cost / total_cycles
+    avg_electricity = Column(Float, default=0.0) # total_elec_cost / total_cycles
+    avg_water = Column(Float, default=0.0)       # total_water_cost / total_cycles
     
-    # Real-time Monitoring
-    remaining_time = Column(Integer, default=0) # Countdown in minutes
+    # Real-time Monitoring Countdown
+    remaining_time = Column(Integer, default=0) # Remaining minutes for active cycle
     
     shop_id = Column(Integer, ForeignKey("shops.id"))
 
     # Relationships
     shop = relationship("Shop", back_populates="machines")
     
-    # Linked to bookings (Multiple bookings can be associated with a machine over time)
+    # Linked to bookings: Allows checking if a unit is currently occupied by an active order
     washer_bookings = relationship("Booking", foreign_keys="[Booking.washer_id]", back_populates="washer")
     dryer_bookings = relationship("Booking", foreign_keys="[Booking.dryer_id]", back_populates="dryer")
 
 class Booking(Base):
     """
     Stores all laundry transactions.
-    Updated to link to specific Washer and Dryer units to automate status updates.
+    Hardware Link: Directly references Machine IDs to automate the 'Busy' status 
+    trigger in the Machine Hub and Monitoring Grid.
     """
     __tablename__ = "bookings"
 
@@ -82,25 +88,25 @@ class Booking(Base):
     customer_name = Column(String, nullable=False)
     
     # Service Details
-    service_type = Column(String, nullable=False) # e.g., 'Full Service'
+    service_type = Column(String, nullable=False) # e.g., 'Full Service', 'Wash Only'
     category = Column(String, nullable=False)      # e.g., 'Clothes', 'Linens'
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
-    # Pricing & Mode
+    # Pricing & Operational Mode
     total_price = Column(Float, nullable=False)
     booking_mode = Column(String, nullable=False) # 'smart' or 'manual'
     
-    # Add-ons
+    # Add-on Toggles
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
-    # Status: 'Pending', 'In Progress', 'Ready', 'Claimed'
+    # Workflow Status: 'Pending', 'In Progress', 'Ready', 'Claimed'
     status = Column(String, default="Pending")
     
     # Hardware Assignment
-    # Linking to both allows the controller to set both machines to 'Busy' simultaneously
+    # Linking these allows the Controller to toggle machine availability in real-time
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
