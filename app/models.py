@@ -17,7 +17,7 @@ class Shop(Base):
 
     # Relationships
     users = relationship("User", back_populates="shop")
-    machines = relationship("Machine", back_populates="shop")
+    machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="shop")
 
 class User(Base):
@@ -42,35 +42,39 @@ class User(Base):
 class Machine(Base):
     """
     Represents hardware units (Washers/Dryers).
-    Supports 12-unit fixed display and real-time status monitoring.
+    Updated to support the Machine Hub table view (image_b6637f.png).
     """
     __tablename__ = "machines"
 
     id = Column(Integer, primary_key=True, index=True)
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
-    machine_number = Column(Integer, nullable=False) # 1, 2, 3, 4, 5, 6 per type
+    machine_number = Column(Integer, nullable=False) # e.g., 1, 2, 3
     
-    # Status levels: 'Available', 'Active', 'Maintenance'
-    # 'Active' is triggered when a booking is assigned to this machine_id
+    # Status levels: 'Available', 'Busy', 'Maintenance'
     status = Column(String, default="Available")
     
-    # Usage and Profitability Metrics for the Dashboard (image_b8a4b9.png)
-    total_cycles = Column(Integer, default=0) # Increments on completion
-    profitability_score = Column(Float, default=0.0) # Percentage usage
-    estimated_cost_per_cycle = Column(Float, default=0.0) 
-    remaining_time = Column(Integer, default=0) # Real-time countdown in minutes
+    # Performance Metrics for Machine Hub Table
+    total_cycles = Column(Integer, default=0)
+    avg_detergent = Column(Float, default=0.0)  # Calculated as: total_detergent_cost / total_cycles
+    avg_electricity = Column(Float, default=0.0) # Calculated as: total_elec_cost / total_cycles
+    avg_water = Column(Float, default=0.0)       # Calculated as: total_water_cost / total_cycles
+    
+    # Real-time Monitoring
+    remaining_time = Column(Integer, default=0) # Countdown in minutes
     
     shop_id = Column(Integer, ForeignKey("shops.id"))
 
     # Relationships
     shop = relationship("Shop", back_populates="machines")
-    # Link to current booking to pull customer info to the dashboard card
-    bookings = relationship("Booking", back_populates="assigned_machine")
+    
+    # Linked to bookings (Multiple bookings can be associated with a machine over time)
+    washer_bookings = relationship("Booking", foreign_keys="[Booking.washer_id]", back_populates="washer")
+    dryer_bookings = relationship("Booking", foreign_keys="[Booking.dryer_id]", back_populates="dryer")
 
 class Booking(Base):
     """
     Stores all laundry transactions.
-    Linked to Machine IDs to automate the 'Active' monitoring status.
+    Updated to link to specific Washer and Dryer units to automate status updates.
     """
     __tablename__ = "bookings"
 
@@ -78,8 +82,8 @@ class Booking(Base):
     customer_name = Column(String, nullable=False)
     
     # Service Details
-    service_type = Column(String, nullable=False) # E.g., 'Full Service'
-    category = Column(String, nullable=False) # E.g., 'Clothes', 'Linens'
+    service_type = Column(String, nullable=False) # e.g., 'Full Service'
+    category = Column(String, nullable=False)      # e.g., 'Clothes', 'Linens'
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
@@ -95,12 +99,15 @@ class Booking(Base):
     # Status: 'Pending', 'In Progress', 'Ready', 'Claimed'
     status = Column(String, default="Pending")
     
-    # Hardware Assignment logic
-    # Once a machine_id is saved here, the controller must set Machine.status to 'Active'
-    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
+    # Hardware Assignment
+    # Linking to both allows the controller to set both machines to 'Busy' simultaneously
+    washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
+    dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
+    
     shop_id = Column(Integer, ForeignKey("shops.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     shop = relationship("Shop", back_populates="bookings")
-    assigned_machine = relationship("Machine", back_populates="bookings")
+    washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings")
+    dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings")

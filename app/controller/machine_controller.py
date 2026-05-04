@@ -1,12 +1,13 @@
 from sqlalchemy.orm import Session
 from app.models import Machine
+from app.schemas import MachineCreate
 from fastapi import HTTPException, status
 import random
 
 def get_all_machines(db: Session, shop_id: int):
     """
-    Retrieves all 12 machines for a specific shop.
-    Ordered by type (Washers first) and then number (1-6) to maintain grid consistency.
+    Retrieves all machines for a specific shop.
+    Ordered by type (Washers first) and then number to maintain consistency in the Machine Hub table.
     """
     return db.query(Machine).filter(Machine.shop_id == shop_id).order_by(
         Machine.machine_type.desc(), 
@@ -25,44 +26,72 @@ def get_machine_by_id(db: Session, machine_id: int, shop_id: int):
         )
     return machine
 
+def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
+    """
+    Manually adds a new machine to the shop. 
+    Triggered by the 'Add Machine' button in the Machine Hub (image_b6637f.png).
+    """
+    new_machine = Machine(
+        machine_type=machine_data.machine_type,
+        machine_number=machine_data.machine_number,
+        status="Available",
+        total_cycles=0,
+        avg_detergent=0.0,
+        avg_electricity=0.0,
+        avg_water=0.0,
+        remaining_time=0,
+        shop_id=shop_id
+    )
+    db.add(new_machine)
+    db.commit()
+    db.refresh(new_machine)
+    return new_machine
+
+def delete_machine(db: Session, machine_id: int, shop_id: int):
+    """
+    Permanently removes a machine from the shop.
+    Triggered by the red delete icon in the Machine Hub table.
+    """
+    machine = get_machine_by_id(db, machine_id, shop_id)
+    db.delete(machine)
+    db.commit()
+    return {"message": f"Machine {machine.machine_type} {machine.machine_number} deleted successfully"}
+
 def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
     """
     Toggles the maintenance state of a machine.
-    When set to Maintenance, the unit is blocked from being selected in the Booking Modal.
+    Units in 'Maintenance' are blocked from selection in the Booking Modal.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     
     if machine.status == "Maintenance":
-        # Return to Available state
         machine.status = "Available"
         machine.remaining_time = 0
     else:
-        # Set to Maintenance state
         machine.status = "Maintenance"
-        machine.remaining_time = 0 # Timers are irrelevant during maintenance
+        machine.remaining_time = 0 
 
     db.commit()
     db.refresh(machine)
     return machine
 
-def update_machine_metrics(db: Session, machine_id: int, shop_id: int):
+def update_performance_metrics(db: Session, machine_id: int, shop_id: int):
     """
-    Updates profitability and efficiency scores for a specific machine.
-    Reflects metrics used in the Dashboard and Machine Hub profitability bars.
+    Calculates average resource costs per cycle for the Machine Hub table columns.
+    Uses randomized mock data for costs to simulate operational intelligence.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     
-    # Logic: Profitability based on cycle count vs an efficiency target of 500 cycles
-    target_efficiency_limit = 500
-    calculated_score = (machine.total_cycles / target_efficiency_limit) * 100
-    machine.profitability_score = min(round(calculated_score, 2), 100.0)
-    
-    # Utility overhead configuration
-    # Washers typically incur higher water/power costs per cycle compared to dryers
-    if machine.machine_type == "Washer":
-        machine.estimated_cost_per_cycle = 45.0 
-    else:
-        machine.estimated_cost_per_cycle = 52.0
+    if machine.total_cycles > 0:
+        # Simulate cost calculation (In a real app, these would come from utility sensors/bills)
+        if machine.machine_type == "Washer":
+            machine.avg_detergent = round(random.uniform(0.15, 0.25), 2)
+            machine.avg_electricity = round(random.uniform(0.45, 0.60), 2)
+            machine.avg_water = round(random.uniform(0.30, 0.40), 2)
+        else: # Dryers don't use detergent or water
+            machine.avg_detergent = 0.00
+            machine.avg_electricity = round(random.uniform(0.50, 0.70), 2)
+            machine.avg_water = 0.00
 
     db.commit()
     db.refresh(machine)
@@ -70,10 +99,9 @@ def update_machine_metrics(db: Session, machine_id: int, shop_id: int):
 
 def initialize_shop_machines(db: Session, shop_id: int):
     """
-    Automatically populates a new shop with the required 12-machine setup.
-    Includes 6 Washers and 6 Dryers with default profitability metrics.
+    Default setup for a new shop. Deploys 6 Washers and 6 Dryers.
+    Used for initial hardware configuration.
     """
-    # Check if the shop already has machines to prevent duplicates
     existing_check = db.query(Machine).filter(Machine.shop_id == shop_id).first()
     if existing_check:
         return {"message": "Shop hardware is already initialized"}
@@ -88,9 +116,9 @@ def initialize_shop_machines(db: Session, shop_id: int):
                 machine_number=i, 
                 status="Available", 
                 total_cycles=0,
-                profitability_score=0.0,
-                remaining_time=0,
-                estimated_cost_per_cycle=45.0,
+                avg_detergent=0.0,
+                avg_electricity=0.0,
+                avg_water=0.0,
                 shop_id=shop_id
             )
         )
@@ -103,9 +131,9 @@ def initialize_shop_machines(db: Session, shop_id: int):
                 machine_number=i, 
                 status="Available", 
                 total_cycles=0,
-                profitability_score=0.0,
-                remaining_time=0,
-                estimated_cost_per_cycle=50.0,
+                avg_detergent=0.0,
+                avg_electricity=0.0,
+                avg_water=0.0,
                 shop_id=shop_id
             )
         )
