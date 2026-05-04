@@ -27,8 +27,10 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     db.refresh(new_shop)
 
     # 3. Create the Owner account linked to the new shop
-    # Hash the password using bcrypt for secure storage
-    hashed_pass = bcrypt.hashpw(user.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    hashed_pass = bcrypt.hashpw(
+        user.password.encode('utf-8'), 
+        bcrypt.gensalt()
+    ).decode('utf-8')
     
     new_user = models.User(
         email=user.email,
@@ -40,7 +42,7 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     db.commit()
     db.refresh(new_user)
 
-    # 4. Attach shop details to the user object for the response
+    # 4. Attach shop details for the response
     new_user.shop_name = new_shop.shop_name
     new_user.address = new_shop.address
     
@@ -49,30 +51,43 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
 def authenticate_user(db: Session, credentials: schemas.UserLogin):
     """
     Authenticates administrative users (Owners/Staff) via email and password.
-    Returns a unified payload for both React and Flutter including user and shop details.
+    Returns a unified payload for both React and Flutter.
     """
     
-    # 1. Fetch user by email from the PostgreSQL database
-    user = db.query(models.User).filter(models.User.email == credentials.email).first()
+    # 1. Fetch user by email
+    user = db.query(models.User).filter(
+        models.User.email == credentials.email
+    ).first()
 
-    # 2. Verify password security
-    if not user or not bcrypt.checkpw(credentials.password.encode('utf-8'), user.password_hash.encode('utf-8')):
+    # 2. Verify password
+    if not user or not bcrypt.checkpw(
+        credentials.password.encode('utf-8'), 
+        user.password_hash.encode('utf-8')
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="Invalid email or password"
         )
 
-    # 3. Construct the response payload
+    # 3. Check if user is active
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is inactive. Contact your administrator."
+        )
+
+    # 4. Build response payload
+    # FIX: Dinagdag ang 'role' — kinukuha ito ng UserResponse schema
     user_payload = {
         "email": user.email,
+        "role": user.role,                                  
         "shop_id": user.shop_id,
         "shop_name": user.shop.shop_name if user.shop else None,
-        "address": user.shop.address if user.shop else None
+        "address": user.shop.address if user.shop else None,
     }
 
-    # 4. Final Response structure
     return {
-        "access_token": "token_placeholder", 
+        "access_token": "token_placeholder",  # TODO: palitan ng real JWT
         "token_type": "bearer",
         "user": user_payload
     }
@@ -80,9 +95,7 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
 def get_current_user_profile(db: Session, user_id: int):
     """
     Fetches basic shop and user info for the current session.
-    Used for data persistence in the Dashboard after login.
     """
-    
     user = db.query(models.User).filter(models.User.id == user_id).first()
     
     if not user:
@@ -93,7 +106,8 @@ def get_current_user_profile(db: Session, user_id: int):
 
     return {
         "email": user.email,
+        "role": user.role,
         "shop_id": user.shop_id,
         "shop_name": user.shop.shop_name if user.shop else None,
-        "address": user.shop.address if user.shop else None
+        "address": user.shop.address if user.shop else None,
     }

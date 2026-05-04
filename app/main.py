@@ -5,16 +5,13 @@ from app.database import engine
 from app import models
 from app.routes import auth_routes, booking_routes, machine_routes
 
-# 1. Lifespan Manager: Replaces the deprecated @app.on_event("startup")
+# 1. Lifespan Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # This block executes when the server starts
     print("========================================")
     print("LaundryLink Backend started successfully")
     print("Architecture: Clean Routes/Controllers Split")
     
-    # Database Synchronization: Automatically creates/updates tables
-    # This will now include the new Booking and Machine tables
     try:
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Tables Synced Successfully!")
@@ -24,12 +21,11 @@ async def lifespan(app: FastAPI):
     print("System Mode: Profit Optimization Ready")
     print("========================================")
     
-    yield  # The FastAPI application runs here
+    yield  
     
-    # This block executes before the server shuts down
     print("Shutting down LaundryLink Backend...")
 
-# 2. FastAPI Instance Configuration
+# 2. FastAPI Instance
 app = FastAPI(
     title="LaundryLink API",
     description="Backend API for Laundry Income Optimization System",
@@ -37,28 +33,31 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 3. CORS Configuration: Essential for Flutter (Mobile) and React (Web) integration
+# 3. CORS Fix:
+# HINDI pwedeng sabay ang allow_origins=["*"] at allow_credentials=True
+# Kaya specific origins na lang ang ilalagay
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:3000",
+        # Dagdag mo dito yung production URL mo pag nag-deploy ka ng frontend
+        # "https://your-frontend.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 4. Include Application Routes
-# Including the core modules for Auth, Bookings, and Machines
+# 4. Include Routes
 app.include_router(auth_routes.router)
 app.include_router(booking_routes.router)
 app.include_router(machine_routes.router)
 
-# 5. Root Endpoint for Status Verification
+# 5. Health Check
 @app.get("/")
 def read_root():
-    """
-    Root endpoint to verify API status and database connectivity.
-    Used for initial health checks during deployment.
-    """
     return {
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
