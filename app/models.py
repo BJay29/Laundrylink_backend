@@ -42,38 +42,35 @@ class User(Base):
 class Machine(Base):
     """
     Represents hardware units (Washers/Dryers).
-    Updated to support the Machine Hub monitoring, profitability tracking, 
-    and maintenance status logic.
+    Supports 12-unit fixed display and real-time status monitoring.
     """
     __tablename__ = "machines"
 
     id = Column(Integer, primary_key=True, index=True)
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
-    machine_number = Column(Integer, nullable=False) # Fixed units: 1, 2, 3, 4, 5, 6
+    machine_number = Column(Integer, nullable=False) # 1, 2, 3, 4, 5, 6 per type
     
     # Status levels: 'Available', 'Active', 'Maintenance'
-    # 'Maintenance' blocks the machine from being selected in the Booking Modal
-    status = Column(String, default="Available") 
+    # 'Active' is triggered when a booking is assigned to this machine_id
+    status = Column(String, default="Available")
     
-    # Availability flag for frontend filtering
-    is_available = Column(Boolean, default=True) 
-    
-    # Usage and Profitability Metrics
-    total_cycles = Column(Integer, default=0) # Increments every time a booking is completed
-    profitability_score = Column(Float, default=0.0) # Percentage based on usage vs overhead
-    estimated_cost_per_cycle = Column(Float, default=0.0) # Utility overhead (electricity/water)
+    # Usage and Profitability Metrics for the Dashboard (image_b8a4b9.png)
+    total_cycles = Column(Integer, default=0) # Increments on completion
+    profitability_score = Column(Float, default=0.0) # Percentage usage
+    estimated_cost_per_cycle = Column(Float, default=0.0) 
+    remaining_time = Column(Integer, default=0) # Real-time countdown in minutes
     
     shop_id = Column(Integer, ForeignKey("shops.id"))
 
     # Relationships
     shop = relationship("Shop", back_populates="machines")
-    # Link to bookings to track real-time machine assignment
-    active_bookings = relationship("Booking", back_populates="assigned_machine")
+    # Link to current booking to pull customer info to the dashboard card
+    bookings = relationship("Booking", back_populates="assigned_machine")
 
 class Booking(Base):
     """
     Stores all laundry transactions.
-    Updated to link directly with Machine IDs to trigger 'Active' status.
+    Linked to Machine IDs to automate the 'Active' monitoring status.
     """
     __tablename__ = "bookings"
 
@@ -98,12 +95,12 @@ class Booking(Base):
     # Status: 'Pending', 'In Progress', 'Ready', 'Claimed'
     status = Column(String, default="Pending")
     
-    # Hardware Assignment
-    # Selecting this ID in the modal should update the Machine status to 'Active'
+    # Hardware Assignment logic
+    # Once a machine_id is saved here, the controller must set Machine.status to 'Active'
     machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     shop_id = Column(Integer, ForeignKey("shops.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     shop = relationship("Shop", back_populates="bookings")
-    assigned_machine = relationship("Machine", back_populates="active_bookings")
+    assigned_machine = relationship("Machine", back_populates="bookings")
