@@ -6,13 +6,12 @@ from datetime import datetime, timezone
 
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
-    Handles the creation of a new laundry transaction.
-    Links the booking to assigned hardware and updates machine states to 'Busy'.
-    This ensures synchronization between the Service Terminal and Monitoring Grid.
+    Creates a new laundry transaction.
+    Links booking to assigned hardware and updates machine states to 'Busy'.
+    FIX: Uses joinedload re-fetch after commit so washer/dryer 
+    objects are populated in the response (not null).
     """
-    
-    # 1. Initialize the Booking instance
-    # washer_id and dryer_id are received from the frontend selection grid.
+
     new_booking = Booking(
         customer_name=booking_data.customer_name,
         service_type=booking_data.service_type,
@@ -24,56 +23,66 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
         is_rush=booking_data.is_rush,
-        status="In Progress", # New bookings default to 'In Progress' state
+        status="In Progress",
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
-        # Uses UTC now to ensure exact booking time regardless of server location
-        created_at=datetime.now(timezone.utc) 
+        created_at=datetime.now(timezone.utc)
     )
 
-    # 2. Identify hardware to be updated based on the assignment
-    machine_ids = [m_id for m_id in [new_booking.washer_id, new_booking.dryer_id] if m_id is not None]
+    # Collect assigned machine IDs
+    machine_ids = [
+        m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
+        if m_id is not None
+    ]
 
-    # 3. Validate and update machine availability
+    # Validate and update machine statuses
     for m_id in machine_ids:
         machine = db.query(Machine).filter(
-            Machine.id == m_id, 
+            Machine.id == m_id,
             Machine.shop_id == shop_id
         ).first()
-        
+
         if not machine:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Machine ID {m_id} not found."
             )
-
-        # Safety Check: Prevent booking if machine is broken or already in use
         if machine.status == "Maintenance":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"{machine.machine_type} {machine.machine_number} is currently under maintenance."
             )
-
         if machine.status == "Busy":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"{machine.machine_type} {machine.machine_number} is already occupied."
             )
 
-        # Update Machine State for Dashboard Real-time Monitoring
+        # Set machine to Busy and update stats
         machine.status = "Busy"
-        machine.total_cycles += 1 # Auto-increment performance stats for analytics
-        
-        # Default countdown (45 mins). Can be adjusted based on service_type in the future.
-        machine.remaining_time = 45 
+        machine.total_cycles += 1
+        machine.remaining_time = 45
 
     try:
         db.add(new_booking)
         db.commit()
-        # Eagerly load the washer/dryer relationships so they are available in the response
-        db.refresh(new_booking)
-        return new_booking
+
+        # FIX: db.refresh() does NOT load relationships.
+        # Must re-query with joinedload to get washer/dryer objects
+        # populated in the response. Without this, booking.washer = None
+        # and frontend shows "Unassigned".
+        result = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer)
+            )
+            .filter(Booking.id == new_booking.id)
+            .first()
+        )
+        return result
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -81,57 +90,81 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
             detail=f"Transaction Failed: {str(e)}"
         )
 
+
 def get_active_bookings(db: Session, shop_id: int):
     """
-    Fetches all current laundry orders that are not yet 'Claimed'.
-    Used to populate the Service Terminal table.
-    Uses joinedload to ensure washer/dryer info is included for "W1/D1" labels.
+    Fetches all non-Claimed bookings for the Service Terminal.
+    FIX: joinedload ensures washer/dryer machine_number is included
+    in each booking so the frontend can display W1, D3, etc.
     """
-    return db.query(Booking).options(
-        joinedload(Booking.washer),
-        joinedload(Booking.dryer)
-    ).filter(
-        Booking.shop_id == shop_id, 
-        Booking.status != "Claimed"
-    ).order_by(Booking.created_at.desc()).all()
+    return (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.washer),
+            joinedload(Booking.dryer)
+        )
+        .filter(
+            Booking.shop_id == shop_id,
+            Booking.status != "Claimed"
+        )
+        .order_by(Booking.created_at.desc())
+        .all()
+    )
+
 
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
-    Updates a booking's lifecycle (e.g., 'In Progress' -> 'Ready' -> 'Claimed').
-    Automatically releases linked machines back to 'Available' once process completes.
+    Updates booking lifecycle status.
+    Releases machines back to Available when status is Ready or Claimed.
+    FIX: Re-fetches with joinedload after commit so response includes
+    washer/dryer objects (needed by frontend for machine label display).
     """
     booking = db.query(Booking).filter(
-        Booking.id == booking_id, 
+        Booking.id == booking_id,
         Booking.shop_id == shop_id
     ).first()
-    
+
     if not booking:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Booking record not found."
         )
 
     booking.status = new_status
 
-    # Logic: Release machines once the laundry is finished or claimed
+    # Release machines when laundry cycle is done
     if new_status in ["Ready", "Claimed"]:
-        assigned_ids = [m_id for m_id in [booking.washer_id, booking.dryer_id] if m_id is not None]
-        
+        assigned_ids = [
+            m_id for m_id in [booking.washer_id, booking.dryer_id]
+            if m_id is not None
+        ]
+
         if assigned_ids:
             related_machines = db.query(Machine).filter(
                 Machine.id.in_(assigned_ids)
             ).all()
-            
+
             for machine in related_machines:
-                # Do not revert to Available if unit was manually flagged for Maintenance
+                # Don't override manual Maintenance flag
                 if machine.status != "Maintenance":
                     machine.status = "Available"
-                    machine.remaining_time = 0 # Reset countdown on Dashboard UI
+                    machine.remaining_time = 0
 
     try:
         db.commit()
-        db.refresh(booking)
-        return booking
+
+        # FIX: Re-fetch with joinedload — db.refresh() does NOT load relationships
+        result = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer)
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+        return result
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
