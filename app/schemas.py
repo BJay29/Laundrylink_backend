@@ -61,15 +61,17 @@ class BookingCreate(BaseModel):
     total_price: float
     booking_mode: str
 
-    # FIX: Frontend sends selected_washer_id / selected_dryer_id
-    # Aliases map those keys to washer_id / dryer_id internally
-    washer_id: Optional[int] = Field(None, alias="selected_washer_id")
-    dryer_id: Optional[int] = Field(None, alias="selected_dryer_id")
+    # FIX: Uses validation alias to accept both 'selected_washer_id' from frontend 
+    # and 'washer_id' from internal logic. 
+    # This solves the 422 error by ensuring the input is mapped to an Optional[int].
+    washer_id: Optional[int] = Field(None, validation_alias="selected_washer_id")
+    dryer_id: Optional[int] = Field(None, validation_alias="selected_dryer_id")
 
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
+    # populate_by_name allows creating the object using 'washer_id' directly in the backend
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingResponse(BaseModel):
