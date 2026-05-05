@@ -12,6 +12,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     objects are populated in the response (not null).
     """
 
+    # Initialize new booking object
     new_booking = Booking(
         customer_name=booking_data.customer_name,
         service_type=booking_data.service_type,
@@ -24,13 +25,14 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         add_delivery=booking_data.add_delivery,
         is_rush=booking_data.is_rush,
         status="In Progress",
+        # Ang washer_id at dryer_id dito ay dapat Integer na galing sa validated schema
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
         created_at=datetime.now(timezone.utc)
     )
 
-    # Collect assigned machine IDs
+    # Collect assigned machine IDs para sa validation
     machine_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
         if m_id is not None
@@ -48,30 +50,32 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Machine ID {m_id} not found."
             )
+        
         if machine.status == "Maintenance":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"{machine.machine_type} {machine.machine_number} is currently under maintenance."
             )
+        
         if machine.status == "Busy":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"{machine.machine_type} {machine.machine_number} is already occupied."
             )
 
-        # Set machine to Busy and update stats
+        # Update machine state
         machine.status = "Busy"
         machine.total_cycles += 1
+        # Default cycle time (pwedeng palitan base sa service type)
         machine.remaining_time = 45
 
     try:
         db.add(new_booking)
         db.commit()
 
-        # FIX: db.refresh() does NOT load relationships.
-        # Must re-query with joinedload to get washer/dryer objects
-        # populated in the response. Without this, booking.washer = None
-        # and frontend shows "Unassigned".
+        # FIX: Sa SQLAlchemy, ang db.refresh() ay kumukuha lang ng column data.
+        # Kailangan ng panibagong query na may joinedload para makuha ang nested
+        # Machine objects (W1, D3) na kailangan ng ServiceTerminal UI.
         result = (
             db.query(Booking)
             .options(
@@ -115,9 +119,7 @@ def get_active_bookings(db: Session, shop_id: int):
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
     Updates booking lifecycle status.
-    Releases machines back to Available when status is Ready or Claimed.
-    FIX: Re-fetches with joinedload after commit so response includes
-    washer/dryer objects (needed by frontend for machine label display).
+    Releases machines back to Available kapag ang status ay Ready o Claimed na.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -132,7 +134,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # Release machines when laundry cycle is done
+    # Kapag natapos na ang labada o kinuha na, gawing Available ulit ang mga machines
     if new_status in ["Ready", "Claimed"]:
         assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
@@ -145,7 +147,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             ).all()
 
             for machine in related_machines:
-                # Don't override manual Maintenance flag
+                # Huwag i-override kung ang machine ay manually nilagay sa Maintenance
                 if machine.status != "Maintenance":
                     machine.status = "Available"
                     machine.remaining_time = 0
@@ -153,7 +155,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
     try:
         db.commit()
 
-        # FIX: Re-fetch with joinedload — db.refresh() does NOT load relationships
+        # Re-fetch with joinedload para hindi mawala ang machine labels sa UI pagkatapos ng update
         result = (
             db.query(Booking)
             .options(

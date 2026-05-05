@@ -41,7 +41,7 @@ class MachineResponse(MachineBase):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- MACHINE NESTED (used inside BookingResponse) ---
+# --- MACHINE NESTED (ginagamit para sa Display sa Booking Table) ---
 class MachineNested(BaseModel):
     id: int
     machine_type: str
@@ -61,17 +61,15 @@ class BookingCreate(BaseModel):
     total_price: float
     booking_mode: str
 
-    # FIX: Uses validation alias to accept both 'selected_washer_id' from frontend 
-    # and 'washer_id' from internal logic. 
-    # This solves the 422 error by ensuring the input is mapped to an Optional[int].
-    washer_id: Optional[int] = Field(None, validation_alias="selected_washer_id")
-    dryer_id: Optional[int] = Field(None, validation_alias="selected_dryer_id")
+    # FIX: Tinanggal ang validation_alias dahil "washer_id" na ang pinapasa ng frontend mo 
+    # base sa image_026bbd.png. Ginawa nating Optional[int] para siguradong Number ang tanggap.
+    washer_id: Optional[int] = Field(None)
+    dryer_id: Optional[int] = Field(None)
 
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
-    # populate_by_name allows creating the object using 'washer_id' directly in the backend
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingResponse(BaseModel):
@@ -89,7 +87,7 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Nested machine objects — frontend uses machine_number for W1/D3 display
+    # Eto ang kailangan para hindi mag-"UNASSIGNED" sa table (image_02737f.png)
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 

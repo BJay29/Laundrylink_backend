@@ -71,15 +71,15 @@ class Machine(Base):
     shop = relationship("Shop", back_populates="machines")
     
     # Link to bookings: Essential for identifying which machines are tied to active orders.
-    # Updated back_populates to match the relationship names in the Booking model.
+    # Note: Using string-based foreign keys in relationship for stability.
     washer_bookings = relationship(
         "Booking", 
-        foreign_keys="[Booking.washer_id]", 
+        foreign_keys="Booking.washer_id", 
         back_populates="washer"
     )
     dryer_bookings = relationship(
         "Booking", 
-        foreign_keys="[Booking.dryer_id]", 
+        foreign_keys="Booking.dryer_id", 
         back_populates="dryer"
     )
 
@@ -112,7 +112,7 @@ class Booking(Base):
     status = Column(String, default="Pending")
     
     # Hardware Assignment Links
-    # Note: These refer to the 'id' in the 'machines' table
+    # References the primary key 'id' in 'machines' table
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -123,14 +123,17 @@ class Booking(Base):
     shop = relationship("Shop", back_populates="bookings")
     
     # Hardware assignments
-    # Using back_populates to connect to the Machine model relationships defined above
+    # 'lazy="joined"' sinisiguro nito na kapag kinuha ang Booking, kasama na agad ang Machine data.
+    # Ito ang solusyon para makita ng frontend ang machine_number (W1, D3).
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
-        back_populates="washer_bookings"
+        back_populates="washer_bookings",
+        lazy="joined"
     )
     dryer = relationship(
         "Machine", 
         foreign_keys=[dryer_id], 
-        back_populates="dryer_bookings"
+        back_populates="dryer_bookings",
+        lazy="joined"
     )
