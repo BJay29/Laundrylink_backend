@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
 from typing import Optional, List
 from datetime import datetime
 
@@ -42,17 +42,10 @@ class MachineResponse(MachineBase):
     model_config = ConfigDict(from_attributes=True)
 
 # --- MACHINE NESTED (used inside BookingResponse) ---
-# FIX: This is the nested object returned with each booking
-# so the frontend can display W1, D3, etc. correctly
 class MachineNested(BaseModel):
-    """
-    Minimal machine info embedded inside a BookingResponse.
-    Gives the frontend the machine_number to display (W1, D3, etc.)
-    instead of relying on the raw foreign key integer.
-    """
     id: int
-    machine_type: str       # 'Washer' or 'Dryer'
-    machine_number: int     # This is what the frontend uses to display W1, D2, etc.
+    machine_type: str
+    machine_number: int
     status: str
 
     model_config = ConfigDict(from_attributes=True)
@@ -68,19 +61,18 @@ class BookingCreate(BaseModel):
     total_price: float
     booking_mode: str
 
-    washer_id: Optional[int] = None
-    dryer_id: Optional[int] = None
+    # FIX: Frontend sends selected_washer_id / selected_dryer_id
+    # Aliases map those keys to washer_id / dryer_id internally
+    washer_id: Optional[int] = Field(None, alias="selected_washer_id")
+    dryer_id: Optional[int] = Field(None, alias="selected_dryer_id")
 
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
+    model_config = ConfigDict(populate_by_name=True)
+
 class BookingResponse(BaseModel):
-    """
-    Full booking response sent to the frontend.
-    FIX: Includes nested washer/dryer objects so the Service Terminal
-    can display the correct machine label (W1, D3) instead of raw IDs.
-    """
     id: int
     customer_name: str
     service_type: str
@@ -92,12 +84,10 @@ class BookingResponse(BaseModel):
     booking_mode: str
     created_at: datetime
 
-    # Raw foreign keys (still included for reference)
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # FIX: Nested machine objects — frontend uses these for display
-    # SQLAlchemy will populate these via the relationship()
+    # Nested machine objects — frontend uses machine_number for W1/D3 display
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
