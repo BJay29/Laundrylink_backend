@@ -19,7 +19,7 @@ class UserLogin(BaseModel):
 # --- MACHINE SCHEMAS ---
 
 class MachineBase(BaseModel):
-    machine_type: str # 'Washer' or 'Dryer'
+    machine_type: str
     machine_number: int
     status: str = "Available"
 
@@ -30,22 +30,30 @@ class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
 
-class MachineMiniResponse(BaseModel):
-    id: int
-    machine_type: str
-    machine_number: int
-
-    model_config = ConfigDict(from_attributes=True)
-
 class MachineResponse(MachineBase):
     id: int
     shop_id: int
-    # Ginawang Optional para hindi mag-error (500) kung wala sa DB
-    total_cycles: Optional[int] = 0
-    avg_detergent: Optional[float] = 0.0
-    avg_electricity: Optional[float] = 0.0
-    avg_water: Optional[float] = 0.0
-    remaining_time: Optional[int] = 0
+    total_cycles: int
+    avg_detergent: float
+    avg_electricity: float
+    avg_water: float
+    remaining_time: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+# --- MACHINE NESTED (used inside BookingResponse) ---
+# FIX: This is the nested object returned with each booking
+# so the frontend can display W1, D3, etc. correctly
+class MachineNested(BaseModel):
+    """
+    Minimal machine info embedded inside a BookingResponse.
+    Gives the frontend the machine_number to display (W1, D3, etc.)
+    instead of relying on the raw foreign key integer.
+    """
+    id: int
+    machine_type: str       # 'Washer' or 'Dryer'
+    machine_number: int     # This is what the frontend uses to display W1, D2, etc.
+    status: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -58,14 +66,21 @@ class BookingCreate(BaseModel):
     weight: float
     loads: int
     total_price: float
-    booking_mode: str 
+    booking_mode: str
+
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
+
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
 class BookingResponse(BaseModel):
+    """
+    Full booking response sent to the frontend.
+    FIX: Includes nested washer/dryer objects so the Service Terminal
+    can display the correct machine label (W1, D3) instead of raw IDs.
+    """
     id: int
     customer_name: str
     service_type: str
@@ -75,19 +90,20 @@ class BookingResponse(BaseModel):
     total_price: float
     status: str
     booking_mode: str
-    created_at: datetime 
+    created_at: datetime
+
+    # Raw foreign keys (still included for reference)
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
-    # Relationship fields
-    washer: Optional[MachineMiniResponse] = None
-    dryer: Optional[MachineMiniResponse] = None
+
+    # FIX: Nested machine objects — frontend uses these for display
+    # SQLAlchemy will populate these via the relationship()
+    washer: Optional[MachineNested] = None
+    dryer: Optional[MachineNested] = None
 
     model_config = ConfigDict(from_attributes=True)
 
-class StatusUpdate(BaseModel):
-    status: str
-
-# --- DATA REPRESENTATION SCHEMAS ---
+# --- USER / AUTH SCHEMAS ---
 
 class UserResponse(BaseModel):
     email: str
@@ -98,7 +114,7 @@ class UserResponse(BaseModel):
 
     model_config = ConfigDict(
         from_attributes=True,
-        exclude_none=True 
+        exclude_none=True
     )
 
 class LoginResponse(BaseModel):
