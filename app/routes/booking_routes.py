@@ -20,9 +20,10 @@ def create_new_booking(
 ):
     """
     Endpoint to create a new laundry booking.
-    Triggers machine status updates if machines are assigned.
+    Links the transaction to specific machines and triggers 'Busy' status 
+    in the Machine Hub and Monitoring Dashboard.
     """
-    # For now, we use a hardcoded shop_id (1) until your Auth is fully linked
+    # Using hardcoded shop_id (1) for development/testing
     shop_id = 1 
     
     return booking_controller.create_booking(
@@ -36,7 +37,9 @@ def read_active_bookings(
     db: Session = Depends(get_db)
 ):
     """
-    Returns all non-claimed bookings for the Service Terminal.
+    Returns all non-claimed bookings.
+    Populates the Service Terminal table and the Dashboard monitoring list.
+    Includes nested machine data for 'W#' or 'D#' labeling.
     """
     shop_id = 1
     return booking_controller.get_active_bookings(db=db, shop_id=shop_id)
@@ -48,10 +51,12 @@ def update_booking_status(
     db: Session = Depends(get_db)
 ):
     """
-    Updates the progress of a booking (e.g., Pending -> Washing -> Ready).
+    Updates the workflow lifecycle (e.g., In Progress -> Ready -> Claimed).
+    Releases assigned machines to 'Available' when status is 'Ready' or 'Claimed'.
     """
     shop_id = 1
-    return booking_controller.update_status(
+    # Updated to match the function name in booking_controller.py
+    return booking_controller.update_booking_status(
         db=db, 
         booking_id=booking_id, 
         new_status=new_status, 

@@ -8,9 +8,11 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
     Handles the creation of a new laundry transaction.
     Links the booking to assigned hardware and updates machine states to 'Busy'.
+    This ensures synchronization between the Service Terminal and Monitoring Grid.
     """
     
     # 1. Initialize the Booking instance with dual-machine support
+    # The washer_id and dryer_id come from the frontend selection grid
     new_booking = Booking(
         customer_name=booking_data.customer_name,
         service_type=booking_data.service_type,
@@ -22,8 +24,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
         is_rush=booking_data.is_rush,
-        status="In Progress",
-        # Link specific machines from the frontend selection
+        status="In Progress", # Default to active state upon booking
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
@@ -60,14 +61,15 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         if machine.status == "Busy":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"{machine.machine_type} {machine.machine_number} is already occupied by another booking."
+                detail=f"{machine.machine_type} {machine.machine_number} is already occupied."
             )
 
         # Update Machine State for Dashboard and Machine Hub synchronization
+        # This will reflect as 'Active/Busy' on your frontend monitoring grid
         machine.status = "Busy"
-        machine.total_cycles += 1 # Increment performance stats
+        machine.total_cycles += 1 # Increment performance stats for analytics
         
-        # Set default countdown time (e.g., 45 mins) for real-time monitoring
+        # Set default countdown time (e.g., 45 mins) for real-time monitoring cards
         machine.remaining_time = 45 
 
     try:
@@ -86,6 +88,7 @@ def get_active_bookings(db: Session, shop_id: int):
     """
     Fetches all current laundry orders that are not yet 'Claimed'.
     Populates the Service Terminal table and the Dashboard monitoring list.
+    SQLAlchemy's 'relationship' will automatically populate nested washer/dryer info.
     """
     return db.query(Booking).filter(
         Booking.shop_id == shop_id, 
@@ -110,10 +113,10 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # Logic: If the laundry is finished or claimed, free the machines for next use
+    # Logic: If the laundry is finished or claimed, free the machines for the next customer
     if new_status in ["Ready", "Claimed"]:
         # Query assigned hardware linked to this specific booking
-        assigned_ids = [id for id in [booking.washer_id, booking.dryer_id] if id is not None]
+        assigned_ids = [m_id for m_id in [booking.washer_id, booking.dryer_id] if m_id is not None]
         
         if assigned_ids:
             related_machines = db.query(Machine).filter(
@@ -124,7 +127,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
                 # Do not revert to Available if the unit was manually flagged for Maintenance
                 if machine.status != "Maintenance":
                     machine.status = "Available"
-                    machine.remaining_time = 0 # Reset monitoring timer
+                    machine.remaining_time = 0 # Reset monitoring timer on the Dashboard UI
 
     try:
         db.commit()

@@ -54,6 +54,7 @@ class Machine(Base):
     machine_number = Column(Integer, nullable=False) # e.g., 1, 2, 3
     
     # Live Status: 'Available', 'Busy', 'Maintenance'
+    # Triggered to 'Busy' when a booking is created with this machine ID
     status = Column(String, default="Available")
     
     # Performance Metrics for Machine Hub Table
@@ -70,8 +71,8 @@ class Machine(Base):
     # Relationships
     shop = relationship("Shop", back_populates="machines")
     
-    # Link to bookings: This allows the system to identify which machines are currently 
-    # tied to an active "In Progress" or "Ready" order.
+    # Link to bookings: Used to identify which machines are tied to active orders.
+    # Essential for displaying assigned machines in the Service Terminal.
     washer_bookings = relationship("Booking", foreign_keys="[Booking.washer_id]", back_populates="washer")
     dryer_bookings = relationship("Booking", foreign_keys="[Booking.dryer_id]", back_populates="dryer")
 
@@ -87,7 +88,7 @@ class Booking(Base):
     customer_name = Column(String, nullable=False)
     
     # Service Configuration
-    service_type = Column(String, nullable=False) # e.g., 'Full Service', 'Wash Only'
+    service_type = Column(String, nullable=False) # e.g., 'Full Service', 'Self-Service'
     category = Column(String, nullable=False)     # e.g., 'Clothes', 'Linens'
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
@@ -105,7 +106,7 @@ class Booking(Base):
     status = Column(String, default="Pending")
     
     # Hardware Assignment Links
-    # Nullable because a 'Wash Only' service might not require a dryer_id
+    # These IDs will display the machine name (e.g., W1, D2) in the Service Terminal
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -115,7 +116,8 @@ class Booking(Base):
     # Relationships
     shop = relationship("Shop", back_populates="bookings")
     
-    # Explicitly link washer and dryer to the Machine table
+    # Explicitly link washer and dryer to the Machine table.
+    # back_populates ensures the Machine knows it is currently in use.
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 

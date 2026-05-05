@@ -14,7 +14,7 @@ router = APIRouter(
 def get_machines(db: Session = Depends(get_db)):
     """
     Fetches the real-time status and performance metrics of all machines.
-    This endpoint feeds both the Machine Hub table and the Monitoring Grid.
+    This endpoint feeds both the Machine Hub table and the Monitoring Grid cards.
     """
     # Hardcoded shop_id=1 for current development/testing phase
     shop_id = 1
@@ -23,9 +23,9 @@ def get_machines(db: Session = Depends(get_db)):
 @router.post("/", response_model=MachineResponse, status_code=status.HTTP_201_CREATED)
 def add_new_machine(machine_data: MachineCreate, db: Session = Depends(get_db)):
     """
-    Adds a new machine unit to the shop's terminal configuration.
-    Triggered by the 'Add Machine' modal in the Machine Hub UI.
-    Adding a unit here will cause it to appear instantly in the Monitoring Grid.
+    Adds a new machine unit to the shop's configuration.
+    Triggered by the 'Add Machine' modal.
+    Adding a unit here causes it to appear instantly in the Monitoring Grid.
     """
     shop_id = 1
     return machine_controller.create_machine(db, machine_data, shop_id)
@@ -34,8 +34,7 @@ def add_new_machine(machine_data: MachineCreate, db: Session = Depends(get_db)):
 def remove_machine(machine_id: int, db: Session = Depends(get_db)):
     """
     Permanently deletes a machine unit from the shop hardware list.
-    Triggered by the red trash icon button in the Machine Hub table.
-    Once deleted, the machine is removed from all real-time tracking views.
+    Triggered by the trash icon in the Machine Hub table.
     """
     shop_id = 1
     return machine_controller.delete_machine(db, machine_id, shop_id)
@@ -44,7 +43,7 @@ def remove_machine(machine_id: int, db: Session = Depends(get_db)):
 def setup_default_machines(db: Session = Depends(get_db)):
     """
     One-time setup route to populate the database with a 12-unit configuration.
-    Deploys 6 Washers and 6 Dryers to initialize the Monitoring Hub quickly.
+    Deploys 6 Washers (W1-W6) and 6 Dryers (D1-D6) to initialize the Hub quickly.
     """
     shop_id = 1
     return machine_controller.initialize_shop_machines(db, shop_id)
@@ -53,8 +52,7 @@ def setup_default_machines(db: Session = Depends(get_db)):
 def toggle_maintenance(machine_id: int, db: Session = Depends(get_db)):
     """
     Toggles the maintenance status of a specific machine unit.
-    When active, the machine status is set to 'Maintenance' in the database, 
-    blocking it from the selection logic in the Booking Modal.
+    Units in 'Maintenance' are blocked from selection in the Booking Modal selection grid.
     """
     shop_id = 1
     return machine_controller.toggle_machine_maintenance(

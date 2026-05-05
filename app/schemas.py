@@ -48,6 +48,17 @@ class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
 
+class MachineMiniResponse(BaseModel):
+    """
+    Reduced machine data for nested responses in the Service Terminal.
+    Provides just enough info (e.g., W1, D2) for UI labeling.
+    """
+    id: int
+    machine_type: str
+    machine_number: int
+
+    model_config = ConfigDict(from_attributes=True)
+
 class MachineResponse(MachineBase):
     """
     Full machine telemetry for the Machine Hub table.
@@ -90,7 +101,7 @@ class BookingCreate(BaseModel):
 class BookingResponse(BaseModel):
     """
     Detailed order data for the Service Terminal and Dashboard.
-    Provides nested machine info for clear UI status labeling.
+    Provides nested machine objects to replace "Pending" with actual machine numbers.
     """
     id: int
     customer_name: str
@@ -106,6 +117,11 @@ class BookingResponse(BaseModel):
     # Assigned IDs
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
+
+    # Nested Machine Data (Populated by SQLAlchemy relationships)
+    # This allows the Service Terminal to show "W1" instead of "Pending"
+    washer: Optional[MachineMiniResponse] = None
+    dryer: Optional[MachineMiniResponse] = None
 
     model_config = ConfigDict(from_attributes=True)
 
