@@ -6,24 +6,34 @@ import random
 
 def get_all_machines(db: Session, shop_id: int = None):
     """
-    Retrieves all machines. If shop_id is provided, filters by shop.
+    Retrieves all machines. Filters by shop if shop_id is provided.
     Ordered by type (Washers first) and then by machine number.
+    
+    TIPS: Ginagamit ito ng Service Terminal at Machine Hub.
     """
     query = db.query(Machine)
     
-    # Kung may shop_id, i-filter lang ang para sa shop na iyon
     if shop_id:
         query = query.filter(Machine.shop_id == shop_id)
         
-    return query.order_by(
-        Machine.machine_type.desc(),
+    machines = query.order_by(
+        Machine.machine_type.desc(), # 'Washer' (W) bago 'Dryer' (D)
         Machine.machine_number.asc()
     ).all()
+
+    # AUTO-UPDATE METRICS: 
+    # Para tuwing mag-re-refresh ang page, updated ang stats sa Machine Hub.
+    for machine in machines:
+        if machine.total_cycles > 0:
+            update_performance_metrics(db, machine.id, shop_id, commit=False)
+    
+    db.commit() # Isang commit lang para sa lahat ng updates
+    return machines
 
 def get_machine_by_id(db: Session, machine_id: int, shop_id: int = None):
     """
     Retrieves a single machine's details. 
-    Validation ensures the machine exists and belongs to the correct shop if provided.
+    Validation ensures the machine exists and belongs to the correct shop.
     """
     query = db.query(Machine).filter(Machine.id == machine_id)
     
@@ -42,7 +52,7 @@ def get_machine_by_id(db: Session, machine_id: int, shop_id: int = None):
 def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
     """
     Manually adds a new machine via the 'Add Machine' modal.
-    Initializes all operational metrics to zero for new units.
+    Initializes all operational metrics to zero.
     """
     new_machine = Machine(
         machine_type=machine_data.machine_type,
@@ -71,49 +81,50 @@ def delete_machine(db: Session, machine_id: int, shop_id: int):
 
 def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
     """
-    Toggles the maintenance state of a machine.
-    Blocked units cannot be assigned to new bookings.
+    Toggles the maintenance state. Blocked units cannot be selected in Booking Modal.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     
+    # Toggle logic
     if machine.status == "Maintenance":
         machine.status = "Available"
     else:
+        # Kapag ginawang Maintenance, ititigil ang countdown
         machine.status = "Maintenance"
-    
-    # Siguraduhin na 0 ang remaining time kapag binago ang status
-    machine.remaining_time = 0 
+        machine.remaining_time = 0 
 
     db.commit()
     db.refresh(machine)
     return machine
 
-def update_performance_metrics(db: Session, machine_id: int, shop_id: int):
+def update_performance_metrics(db: Session, machine_id: int, shop_id: int, commit: bool = True):
     """
-    Generates realistic cost data per cycle based on machine type.
+    Generates realistic cost data per cycle. 
+    Internal logic for Machine Hub's performance tracking.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     
     if machine.total_cycles > 0:
         if machine.machine_type == "Washer":
-            # Costs for Washers (Detergent, Elec, Water)
-            machine.avg_detergent = round(random.uniform(15.00, 25.00), 2)
-            machine.avg_electricity = round(random.uniform(10.00, 15.00), 2)
-            machine.avg_water = round(random.uniform(5.00, 10.00), 2)
+            # Realistic consumption for Washers (PHP)
+            machine.avg_detergent = round(random.uniform(12.00, 18.00), 2)
+            machine.avg_electricity = round(random.uniform(8.00, 12.00), 2)
+            machine.avg_water = round(random.uniform(4.00, 7.00), 2)
         else: 
-            # Dryers only consume electricity
+            # Dryers mainly consume high electricity
             machine.avg_detergent = 0.00
-            machine.avg_electricity = round(random.uniform(20.00, 30.00), 2)
+            machine.avg_electricity = round(random.uniform(18.00, 28.00), 2)
             machine.avg_water = 0.00
 
-    db.commit()
-    db.refresh(machine)
+    if commit:
+        db.commit()
+        db.refresh(machine)
     return machine
 
 def initialize_shop_machines(db: Session, shop_id: int):
     """
-    Auto-populates a shop with 6 Washers and 6 Dryers.
-    Prevents duplicate initialization.
+    Standard auto-setup: 6 Washers and 6 Dryers.
+    Prevents duplicate setup for the same shop.
     """
     existing_check = db.query(Machine).filter(Machine.shop_id == shop_id).first()
     if existing_check:
@@ -121,28 +132,30 @@ def initialize_shop_machines(db: Session, shop_id: int):
 
     machines_to_add = []
     
-    # Generate 6 Washers
+    # Batch create Washers 1-6
     for i in range(1, 7):
         machines_to_add.append(
             Machine(
                 machine_type="Washer", 
                 machine_number=i, 
                 status="Available", 
-                shop_id=shop_id
+                shop_id=shop_id,
+                remaining_time=0
             )
         )
     
-    # Generate 6 Dryers
+    # Batch create Dryers 1-6
     for i in range(1, 7):
         machines_to_add.append(
             Machine(
                 machine_type="Dryer", 
                 machine_number=i, 
                 status="Available", 
-                shop_id=shop_id
+                shop_id=shop_id,
+                remaining_time=0
             )
         )
 
     db.add_all(machines_to_add)
     db.commit()
-    return {"message": "Standard 12-unit configuration successfully deployed to shop"}
+    return {"message": "Standard 12-unit configuration (6W, 6D) deployed successfully"}

@@ -41,7 +41,9 @@ class MachineResponse(MachineBase):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- MACHINE NESTED (ginagamit para sa Display sa Booking Table) ---
+# --- MACHINE NESTED ---
+# Ginagamit ito para sa nested objects sa BookingResponse para hindi mag-"UNASSIGNED" 
+# ang display sa Service Terminal at Dashboard.
 class MachineNested(BaseModel):
     id: int
     machine_type: str
@@ -61,15 +63,15 @@ class BookingCreate(BaseModel):
     total_price: float
     booking_mode: str
 
-    # FIX: Tinanggal ang validation_alias dahil "washer_id" na ang pinapasa ng frontend mo 
-    # base sa image_026bbd.png. Ginawa nating Optional[int] para siguradong Number ang tanggap.
-    washer_id: Optional[int] = Field(None)
-    dryer_id: Optional[int] = Field(None)
+    # Siniguradong tumatanggap ng null/None kung isang machine lang ang pinili
+    washer_id: Optional[int] = None
+    dryer_id: Optional[int] = None
 
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
+    # Mahalaga ito para sa conversion ng JSON keys mula sa frontend
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingResponse(BaseModel):
@@ -83,11 +85,13 @@ class BookingResponse(BaseModel):
     status: str
     booking_mode: str
     created_at: datetime
-
+    
+    # IDs para sa internal logic
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Eto ang kailangan para hindi mag-"UNASSIGNED" sa table (image_02737f.png)
+    # Eto ang "Magic" fields: Pag-fetch ng booking, automatic kasama ang machine details.
+    # Siguraduhin na sa models.py, ang relationship names ay 'washer' at 'dryer'.
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
@@ -111,3 +115,9 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+# --- SETTINGS SCHEMAS (Optional pero baka kailanganin mo sa dashboard) ---
+class ShopSettingsUpdate(BaseModel):
+    rush_rate: Optional[float] = None
+    delivery_fee: Optional[float] = None
+    detergent_price: Optional[float] = None
