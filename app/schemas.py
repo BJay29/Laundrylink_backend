@@ -22,17 +22,19 @@ class MachineBase(BaseModel):
     machine_type: str
     machine_number: int
     status: str = "Available"
+    # Ginawa nating default 1 para laging may value kahit galing sa simpleng request
+    shop_id: int = 1 
 
 class MachineCreate(MachineBase):
-    shop_id: int
+    pass # Inherits everything from MachineBase including shop_id
 
 class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
+    shop_id: Optional[int] = None
 
 class MachineResponse(MachineBase):
     id: int
-    shop_id: int
     total_cycles: int
     avg_detergent: float
     avg_electricity: float
@@ -42,13 +44,14 @@ class MachineResponse(MachineBase):
     model_config = ConfigDict(from_attributes=True)
 
 # --- MACHINE NESTED ---
-# Ginagamit ito para sa nested objects sa BookingResponse para hindi mag-"UNASSIGNED" 
-# ang display sa Service Terminal at Dashboard.
+# Ginagamit para sa nested objects sa BookingResponse.
+# Sinisiguro nito na hindi mag-error ang display sa Service Terminal at Dashboard.
 class MachineNested(BaseModel):
     id: int
     machine_type: str
     machine_number: int
     status: str
+    shop_id: int # Mahalaga ito para sa validation sa frontend
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -62,6 +65,8 @@ class BookingCreate(BaseModel):
     loads: int
     total_price: float
     booking_mode: str
+    # Default sa 1 para mag-match sa auto-fix logic natin
+    shop_id: int = 1 
 
     # Siniguradong tumatanggap ng null/None kung isang machine lang ang pinili
     washer_id: Optional[int] = None
@@ -71,7 +76,6 @@ class BookingCreate(BaseModel):
     add_delivery: bool = False
     is_rush: bool = False
 
-    # Mahalaga ito para sa conversion ng JSON keys mula sa frontend
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingResponse(BaseModel):
@@ -85,13 +89,13 @@ class BookingResponse(BaseModel):
     status: str
     booking_mode: str
     created_at: datetime
+    shop_id: int # Sinisigurado na laging kasama ang shop reference
     
     # IDs para sa internal logic
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Eto ang "Magic" fields: Pag-fetch ng booking, automatic kasama ang machine details.
-    # Siguraduhin na sa models.py, ang relationship names ay 'washer' at 'dryer'.
+    # Pag-fetch ng booking, automatic kasama ang machine details (nested objects).
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
@@ -116,7 +120,7 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
 
-# --- SETTINGS SCHEMAS (Optional pero baka kailanganin mo sa dashboard) ---
+# --- SETTINGS SCHEMAS ---
 class ShopSettingsUpdate(BaseModel):
     rush_rate: Optional[float] = None
     delivery_fee: Optional[float] = None

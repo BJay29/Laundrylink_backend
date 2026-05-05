@@ -19,6 +19,14 @@ class Shop(Base):
     machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "shop_name": self.shop_name,
+            "address": self.address,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
 class User(Base):
     """
     Central Authentication table.
@@ -35,6 +43,15 @@ class User(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     shop = relationship("Shop", back_populates="users")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "email": self.email,
+            "role": self.role,
+            "shop_id": self.shop_id,
+            "is_active": self.is_active
+        }
 
 class Machine(Base):
     """
@@ -54,7 +71,8 @@ class Machine(Base):
     avg_water = Column(Float, default=0.0)
     remaining_time = Column(Integer, default=0) 
     
-    shop_id = Column(Integer, ForeignKey("shops.id"))
+    # Mahalaga: nullable=True muna para sa migration, pero default=1 sa logic
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
 
     shop = relationship("Shop", back_populates="machines")
 
@@ -68,6 +86,20 @@ class Machine(Base):
         foreign_keys="[Booking.dryer_id]", 
         back_populates="dryer"
     )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "machine_type": self.machine_type,
+            "machine_number": self.machine_number,
+            "status": self.status,
+            "total_cycles": self.total_cycles,
+            "avg_detergent": self.avg_detergent,
+            "avg_electricity": self.avg_electricity,
+            "avg_water": self.avg_water,
+            "remaining_time": self.remaining_time,
+            "shop_id": self.shop_id or 1 # Fallback sa 1 kung null sa DB
+        }
 
 class Booking(Base):
     """
@@ -95,12 +127,11 @@ class Booking(Base):
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
-    shop_id = Column(Integer, ForeignKey("shops.id"))
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     shop = relationship("Shop", back_populates="bookings")
     
-    # RELATIONSHIP FIX:
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
@@ -113,3 +144,20 @@ class Booking(Base):
         back_populates="dryer_bookings",
         lazy="joined"
     )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "customer_name": self.customer_name,
+            "service_type": self.service_type,
+            "category": self.category,
+            "weight": self.weight,
+            "loads": self.loads,
+            "total_price": self.total_price,
+            "booking_mode": self.booking_mode,
+            "status": self.status,
+            "washer_id": self.washer_id,
+            "dryer_id": self.dryer_id,
+            "shop_id": self.shop_id or 1,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
