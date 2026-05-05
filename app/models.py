@@ -58,6 +58,7 @@ class Machine(Base):
     status = Column(String, default="Available")
     
     # Performance Metrics for Machine Hub Table
+    # Note: These columns must exist in your PostgreSQL database to avoid 500 errors
     total_cycles = Column(Integer, default=0)
     avg_detergent = Column(Float, default=0.0)
     avg_electricity = Column(Float, default=0.0)

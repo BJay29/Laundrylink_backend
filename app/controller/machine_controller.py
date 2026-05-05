@@ -11,7 +11,7 @@ def get_all_machines(db: Session, shop_id: int):
     the consistent layout required for the Machine Hub table and Monitoring Grid.
     """
     return db.query(Machine).filter(Machine.shop_id == shop_id).order_by(
-        Machine.machine_type.desc(), # 'Washer' comes before 'Dryer' alphabetically
+        Machine.machine_type.desc(),
         Machine.machine_number.asc()
     ).all()
 
