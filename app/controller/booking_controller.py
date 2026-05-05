@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 from app.models import Booking, Machine
 from app.schemas import BookingCreate
 from fastapi import HTTPException, status
-from datetime import datetime
+from datetime import datetime, timezone
 
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
@@ -11,8 +11,8 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     This ensures synchronization between the Service Terminal and Monitoring Grid.
     """
     
-    # 1. Initialize the Booking instance with dual-machine support
-    # The washer_id and dryer_id come from the frontend selection grid
+    # 1. Initialize the Booking instance
+    # Ang washer_id at dryer_id ay nanggagaling sa selection grid ng iyong frontend modal.
     new_booking = Booking(
         customer_name=booking_data.customer_name,
         service_type=booking_data.service_type,
@@ -24,19 +24,15 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
         is_rush=booking_data.is_rush,
-        status="In Progress", # Default to active state upon booking
+        status="In Progress", # Ang bagong booking ay diretso sa 'In Progress' state
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
-        created_at=datetime.utcnow()
+        created_at=datetime.now(timezone.utc)
     )
 
-    # 2. Identify machines to be updated based on the booking assignment
-    machine_ids = []
-    if new_booking.washer_id:
-        machine_ids.append(new_booking.washer_id)
-    if new_booking.dryer_id:
-        machine_ids.append(new_booking.dryer_id)
+    # 2. Identify machines to be updated
+    machine_ids = [m_id for m_id in [new_booking.washer_id, new_booking.dryer_id] if m_id is not None]
 
     # 3. Validate and update machine availability
     for m_id in machine_ids:
@@ -51,7 +47,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail=f"Machine ID {m_id} not found."
             )
 
-        # Safety Check: Prevent booking if the machine is already in use or broken
+        # Safety Check: Iwasan ang booking kung sira o gamit na ang machine
         if machine.status == "Maintenance":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -64,12 +60,11 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail=f"{machine.machine_type} {machine.machine_number} is already occupied."
             )
 
-        # Update Machine State for Dashboard and Machine Hub synchronization
-        # This will reflect as 'Active/Busy' on your frontend monitoring grid
+        # Update Machine State para sa Dashboard Real-time Monitoring
         machine.status = "Busy"
-        machine.total_cycles += 1 # Increment performance stats for analytics
+        machine.total_cycles += 1 # Auto-increment para sa Machine Hub analytics
         
-        # Set default countdown time (e.g., 45 mins) for real-time monitoring cards
+        # Default countdown (45 mins). Pwedeng i-adjust base sa service_type sa future.
         machine.remaining_time = 45 
 
     try:
@@ -87,8 +82,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 def get_active_bookings(db: Session, shop_id: int):
     """
     Fetches all current laundry orders that are not yet 'Claimed'.
-    Populates the Service Terminal table and the Dashboard monitoring list.
-    SQLAlchemy's 'relationship' will automatically populate nested washer/dryer info.
+    Ginagamit ito para i-populate ang Service Terminal table.
     """
     return db.query(Booking).filter(
         Booking.shop_id == shop_id, 
@@ -98,7 +92,7 @@ def get_active_bookings(db: Session, shop_id: int):
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
     Updates a booking's lifecycle (e.g., 'In Progress' -> 'Ready' -> 'Claimed').
-    Automatically releases linked machines back to 'Available' once the process is complete.
+    Kapag 'Ready' o 'Claimed' na, awtomatikong magiging 'Available' uli ang machines.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id, 
@@ -113,9 +107,8 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # Logic: If the laundry is finished or claimed, free the machines for the next customer
+    # Logic: Kapag tapos na ang labada, i-release na ang machines
     if new_status in ["Ready", "Claimed"]:
-        # Query assigned hardware linked to this specific booking
         assigned_ids = [m_id for m_id in [booking.washer_id, booking.dryer_id] if m_id is not None]
         
         if assigned_ids:
@@ -124,10 +117,10 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             ).all()
             
             for machine in related_machines:
-                # Do not revert to Available if the unit was manually flagged for Maintenance
+                # Huwag gawing 'Available' kung manual itong nilagay sa 'Maintenance'
                 if machine.status != "Maintenance":
                     machine.status = "Available"
-                    machine.remaining_time = 0 # Reset monitoring timer on the Dashboard UI
+                    machine.remaining_time = 0 # Reset countdown sa Dashboard UI
 
     try:
         db.commit()

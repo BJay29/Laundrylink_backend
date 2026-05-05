@@ -1,7 +1,7 @@
 from app.database import Base
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 
 class Shop(Base):
     """
@@ -14,7 +14,7 @@ class Shop(Base):
     id = Column(Integer, primary_key=True, index=True)
     shop_name = Column(String, unique=True, nullable=False)
     address = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     # Cascade delete ensures that removing a shop cleans up all associated data
@@ -36,7 +36,7 @@ class User(Base):
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     shop = relationship("Shop", back_populates="users")
@@ -71,16 +71,15 @@ class Machine(Base):
     # Relationships
     shop = relationship("Shop", back_populates="machines")
     
-    # Link to bookings: Used to identify which machines are tied to active orders.
-    # Essential for displaying assigned machines in the Service Terminal.
+    # Link to bookings: Essential for identifying which machines are tied to active orders.
+    # Note: These use string references to avoid circular import issues in complex projects.
     washer_bookings = relationship("Booking", foreign_keys="[Booking.washer_id]", back_populates="washer")
     dryer_bookings = relationship("Booking", foreign_keys="[Booking.dryer_id]", back_populates="dryer")
 
 class Booking(Base):
     """
     Stores all laundry transactions and customer service details.
-    Directly references Machine IDs to automate status triggers (Busy/Available)
-    within the Machine Hub and Dashboard UI.
+    Directly references Machine IDs to automate status triggers (Busy/Available).
     """
     __tablename__ = "bookings"
 
@@ -106,18 +105,18 @@ class Booking(Base):
     status = Column(String, default="Pending")
     
     # Hardware Assignment Links
-    # These IDs will display the machine name (e.g., W1, D2) in the Service Terminal
+    # These IDs link to the machines table to fetch machine_number for UI
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     shop = relationship("Shop", back_populates="bookings")
     
     # Explicitly link washer and dryer to the Machine table.
-    # back_populates ensures the Machine knows it is currently in use.
+    # This is what allows your ServiceTerminal to call 'booking.washer.machine_number'.
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 

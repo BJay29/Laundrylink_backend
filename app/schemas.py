@@ -74,12 +74,12 @@ class MachineResponse(MachineBase):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- BOOKING SCHEMAS (Matches BookingModal.jsx) ---
+# --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
     """
     Validation for new laundry transactions from the frontend.
-    Handles the machine assignment IDs required for the status-sync logic.
+    Updated to match the expected IDs for backend status-sync logic.
     """
     customer_name: str
     service_type: str
@@ -89,7 +89,7 @@ class BookingCreate(BaseModel):
     total_price: float
     booking_mode: str # 'smart' or 'manual'
     
-    # Linked hardware IDs to trigger 'Busy' status in backend
+    # Machine assignment IDs
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
@@ -101,7 +101,7 @@ class BookingCreate(BaseModel):
 class BookingResponse(BaseModel):
     """
     Detailed order data for the Service Terminal and Dashboard.
-    Provides nested machine objects to replace "Pending" with actual machine numbers.
+    Supports nested machine objects to replace 'Pending' with actual numbers.
     """
     id: int
     customer_name: str
@@ -114,16 +114,22 @@ class BookingResponse(BaseModel):
     booking_mode: str
     created_at: datetime
     
-    # Assigned IDs
+    # Assigned IDs returned as strings/ints to match frontend logic
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
     # Nested Machine Data (Populated by SQLAlchemy relationships)
-    # This allows the Service Terminal to show "W1" instead of "Pending"
+    # Important for the Terminal UI's getMachineLabel function
     washer: Optional[MachineMiniResponse] = None
     dryer: Optional[MachineMiniResponse] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+class StatusUpdate(BaseModel):
+    """
+    Simple schema for updating order status (e.g., Pending -> In Progress).
+    """
+    status: str
 
 # --- DATA REPRESENTATION (RESPONSE) SCHEMAS ---
 
