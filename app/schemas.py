@@ -7,7 +7,7 @@ from datetime import datetime
 class OwnerCreate(BaseModel):
     """
     Schema for internal/backend registration of Shop Owners.
-    Used via Thunder Client to populate the initial database.
+    Used via tools like Thunder Client to populate the initial database.
     """
     shop_name: str
     address: str
@@ -18,8 +18,8 @@ class OwnerCreate(BaseModel):
 
 class UserLogin(BaseModel):
     """ 
-    Standard login credentials for both Web and Mobile.
-    Authenticates against the PostgreSQL users table.
+    Standard login credentials for both Web and Mobile platforms.
+    Authenticates users against the PostgreSQL users table.
     """
     email: EmailStr
     password: str
@@ -28,22 +28,22 @@ class UserLogin(BaseModel):
 
 class MachineBase(BaseModel):
     """
-    Base attributes for hardware units.
-    Matches the 'Live Status' requirement for the monitoring grid.
+    Base attributes for hardware units (Washers/Dryers).
+    Matches the 'Live Status' requirements for the monitoring grid.
     """
     machine_type: str # 'Washer' or 'Dryer'
     machine_number: int
-    status: str = "Available" # 'Available', 'Busy', 'Maintenance'
+    status: str = "Available" # Options: 'Available', 'Busy', 'Maintenance'
 
 class MachineCreate(MachineBase):
     """
-    Used for onboarding new hardware into a specific shop.
+    Schema used for onboarding new hardware into a specific laundry shop.
     """
     shop_id: int
 
 class MachineUpdate(BaseModel):
     """
-    Schema used for toggling maintenance or manual timer overrides.
+    Used for toggling maintenance status or manual timer overrides.
     """
     status: Optional[str] = None
     remaining_time: Optional[int] = None
@@ -51,7 +51,7 @@ class MachineUpdate(BaseModel):
 class MachineMiniResponse(BaseModel):
     """
     Reduced machine data for nested responses in the Service Terminal.
-    Provides just enough info (e.g., W1, D2) for UI labeling.
+    Provides essential info (e.g., machine_number) for UI labeling.
     """
     id: int
     machine_type: str
@@ -62,7 +62,7 @@ class MachineMiniResponse(BaseModel):
 class MachineResponse(MachineBase):
     """
     Full machine telemetry for the Machine Hub table.
-    Includes performance metrics and real-time countdown data.
+    Includes performance metrics and real-time countdown data for the UI.
     """
     id: int
     shop_id: int
@@ -78,8 +78,8 @@ class MachineResponse(MachineBase):
 
 class BookingCreate(BaseModel):
     """
-    Validation for new laundry transactions from the frontend.
-    Updated to match the expected IDs for backend status-sync logic.
+    Validation for new laundry transactions initiated from the frontend.
+    Handles machine assignment IDs required for backend status synchronization.
     """
     customer_name: str
     service_type: str
@@ -89,11 +89,11 @@ class BookingCreate(BaseModel):
     total_price: float
     booking_mode: str # 'smart' or 'manual'
     
-    # Machine assignment IDs
+    # Linked hardware IDs to trigger 'Busy' status in the backend
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # Feature Toggles
+    # Feature Toggles for additional services
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
@@ -101,7 +101,7 @@ class BookingCreate(BaseModel):
 class BookingResponse(BaseModel):
     """
     Detailed order data for the Service Terminal and Dashboard.
-    Supports nested machine objects to replace 'Pending' with actual numbers.
+    Supports nested machine objects to replace 'Pending' with actual machine numbers.
     """
     id: int
     customer_name: str
@@ -112,14 +112,14 @@ class BookingResponse(BaseModel):
     total_price: float
     status: str
     booking_mode: str
-    created_at: datetime
+    created_at: datetime # Used to display the exact booking time in the UI
     
-    # Assigned IDs returned as strings/ints to match frontend logic
+    # Assigned IDs returned for reference
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
     # Nested Machine Data (Populated by SQLAlchemy relationships)
-    # Important for the Terminal UI's getMachineLabel function
+    # Critical for displaying "W1" or "D1" in the Service Terminal table
     washer: Optional[MachineMiniResponse] = None
     dryer: Optional[MachineMiniResponse] = None
 
@@ -127,7 +127,8 @@ class BookingResponse(BaseModel):
 
 class StatusUpdate(BaseModel):
     """
-    Simple schema for updating order status (e.g., Pending -> In Progress).
+    Simplified schema for updating order status throughout its lifecycle.
+    Example: Moving a booking from 'In Progress' to 'Ready'.
     """
     status: str
 
@@ -136,7 +137,7 @@ class StatusUpdate(BaseModel):
 class UserResponse(BaseModel):
     """ 
     Standard user profile returned upon successful authentication.
-    Supplies the shop_id used as a global filter for all frontend requests.
+    Provides the shop_id used as a global filter for multi-tenant data.
     """
     email: str
     role: str

@@ -32,7 +32,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False) 
-    role = Column(String, nullable=False) # 'owner' or 'staff'
+    role = Column(String, nullable=False) # Roles: 'owner' or 'staff'
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
     is_active = Column(Boolean, default=True)
@@ -50,11 +50,11 @@ class Machine(Base):
     __tablename__ = "machines"
 
     id = Column(Integer, primary_key=True, index=True)
-    machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
-    machine_number = Column(Integer, nullable=False) # e.g., 1, 2, 3
+    machine_type = Column(String, nullable=False) # Options: 'Washer' or 'Dryer'
+    machine_number = Column(Integer, nullable=False) # Visual ID: e.g., 1, 2, 3
     
     # Live Status: 'Available', 'Busy', 'Maintenance'
-    # Triggered to 'Busy' when a booking is created with this machine ID
+    # Automatically set to 'Busy' when a booking is created with this machine ID
     status = Column(String, default="Available")
     
     # Performance Metrics for Machine Hub Table
@@ -63,7 +63,7 @@ class Machine(Base):
     avg_electricity = Column(Float, default=0.0)
     avg_water = Column(Float, default=0.0)
     
-    # Real-time Monitoring Countdown (in minutes)
+    # Real-time Monitoring Countdown (value in minutes)
     remaining_time = Column(Integer, default=0) 
     
     shop_id = Column(Integer, ForeignKey("shops.id"))
@@ -72,7 +72,7 @@ class Machine(Base):
     shop = relationship("Shop", back_populates="machines")
     
     # Link to bookings: Essential for identifying which machines are tied to active orders.
-    # Note: These use string references to avoid circular import issues in complex projects.
+    # Uses string references to avoid circular import issues.
     washer_bookings = relationship("Booking", foreign_keys="[Booking.washer_id]", back_populates="washer")
     dryer_bookings = relationship("Booking", foreign_keys="[Booking.dryer_id]", back_populates="dryer")
 
@@ -105,7 +105,7 @@ class Booking(Base):
     status = Column(String, default="Pending")
     
     # Hardware Assignment Links
-    # These IDs link to the machines table to fetch machine_number for UI
+    # These IDs link to the machines table to fetch machine_number for the UI display
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -116,7 +116,7 @@ class Booking(Base):
     shop = relationship("Shop", back_populates="bookings")
     
     # Explicitly link washer and dryer to the Machine table.
-    # This is what allows your ServiceTerminal to call 'booking.washer.machine_number'.
+    # This allows the Service Terminal to access properties like 'booking.washer.machine_number'.
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
