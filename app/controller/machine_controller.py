@@ -19,6 +19,7 @@ def get_all_machines(db: Session, shop_id: int = None):
     ).all()
 
     for machine in machines:
+
         if machine.shop_id is None:
             machine.shop_id = 1
             

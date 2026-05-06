@@ -1,55 +1,26 @@
 class PredictionService:
     """
-    Handles the calculation of machine overhead costs based on cumulative 
-    usage and service-specific duration (Full Service, Titan, etc.).
+    Handles the calculation of machine overhead costs based on independent 
+    usage cycles and machine-specific efficiency rates.
     """
 
-    # --- SERVICE TIME MAPPING (In Minutes) ---
-    # Based on Hann Wash pricing: Wash (38-48m) + Dry (40m)
-    SERVICE_CONFIG = {
-        "Regular Wash": {"time": 38, "water_usage": True},
-        "Titan Wash": {"time": 38, "water_usage": True},
-        "Premium Wash": {"time": 48, "water_usage": True},
-        "Full Service": {"time": 78, "water_usage": True},  # 38m Wash + 40m Dry
-        "Comforter": {"time": 95, "water_usage": True},     # Extra heavy load
-        "Dry Only (20min)": {"time": 20, "water_usage": False},
-        "Dry Only (30min)": {"time": 30, "water_usage": False},
-        "Dry Only (40min)": {"time": 40, "water_usage": False},
-    }
-
     @staticmethod
-    def calculate_booking_consumption(service_type: str):
+    def calculate_metrics(machine, is_busy: bool = False):
         """
-        Estimates the consumption costs for a single booking instance.
-        This is called before saving a booking to update the machine's cumulative totals.
+        Calculates metrics based on a specific machine instance to ensure 
+        independent tracking and realistic cost hierarchy.
         """
-        # --- CALIBRATED RATES (Laundry Industry Standards) ---
-        ELECTRICITY_RATE_PER_MINUTE = 0.25  # Estimated cost per minute of machine operation
-        WATER_COST_PER_LOAD = 4.80         # Fixed cost for water/drainage per wash cycle
-        DETERGENT_COST_PER_LOAD = 11.25     # Cost for standard detergent/softener dose
+        # --- CALIBRATED RATES (Base sa bill ng laundry shop) ---
+        # Electricity is usually the highest expense in laundry operations.
+        ELECTRICITY_RATE_PER_KWH = 12.50  
+        WATER_RATE_PER_LITER = 0.08      
+        DETERGENT_RATE_PER_ML = 0.25     
 
-        config = PredictionService.SERVICE_CONFIG.get(service_type, {"time": 30, "water_usage": True})
-        duration = config["time"]
+        cycle_count = machine.total_cycles
 
-        # Calculate specific costs for this session
-        electricity = duration * ELECTRICITY_RATE_PER_MINUTE
-        water = WATER_COST_PER_LOAD if config["water_usage"] else 0.0
-        detergent = DETERGENT_COST_PER_LOAD if config["water_usage"] else 0.0
-
-        return {
-            "electricity": electricity,
-            "water": water,
-            "detergent": detergent
-        }
-
-    @staticmethod
-    def get_machine_metrics(machine, is_busy: bool = False):
-        """
-        Returns the historical cumulative metrics already stored in the machine model.
-        This ensures the Machine Hub reflects real-world wear and tear.
-        """
-        # If total_cycles is 0, we ensure a clean slate for new hardware
-        if machine.total_cycles <= 0:
+        # If cycle_count is 0, all costs remain 0.00.
+        # This ensures a new machine (e.g., Washer 2) starts with a clean slate.
+        if cycle_count <= 0:
             return {
                 "detergent_cost": 0.00,
                 "electricity_cost": 0.00,
@@ -58,15 +29,23 @@ class PredictionService:
                 "is_active_consumption": is_busy
             }
 
-        # Return the stored cumulative totals from the database
+        # --- INDEPENDENT CALCULATION ---
+        # Uses the specific consumption rates of the machine (from models.py)
+        # to ensure Washer 1 and Washer 2 don't have identical data.
+        
+        # 1. Electricity (Target: Highest Cost)
+        electricity_cost = cycle_count * (machine.avg_electricity * ELECTRICITY_RATE_PER_KWH)
+        
+        # 2. Water (Target: Middle Cost)
+        water_cost = cycle_count * (machine.avg_water * WATER_RATE_PER_LITER)
+        
+        # 3. Detergent (Target: Lowest Cost)
+        detergent_cost = cycle_count * (machine.avg_detergent * DETERGENT_RATE_PER_ML)
+
         return {
-            "detergent_cost": round(machine.total_detergent_cost, 2),
-            "electricity_cost": round(machine.total_electricity_cost, 2),
-            "water_cost": round(machine.total_water_cost, 2),
-            "total_overhead": round(
-                machine.total_detergent_cost + 
-                machine.total_electricity_cost + 
-                machine.total_water_cost, 2
-            ),
+            "detergent_cost": round(detergent_cost, 2),
+            "electricity_cost": round(electricity_cost, 2),
+            "water_cost": round(water_cost, 2),
+            "total_overhead": round(detergent_cost + electricity_cost + water_cost, 2),
             "is_active_consumption": is_busy
         }
