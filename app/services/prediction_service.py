@@ -1,25 +1,25 @@
 class PredictionService:
     """
-    Handles the calculation of machine overhead costs based on usage cycles
-    to provide realistic predictions for the Machine Hub dashboard.
+    Handles the calculation of machine overhead costs based on independent 
+    usage cycles and machine-specific efficiency rates.
     """
 
     @staticmethod
-    def calculate_metrics(cycle_count: int, is_busy: bool = False):
-        # Operational baseline from research/questionnaire data
-        MONTHLY_UTILITIES = 10000.00
-        MONTHLY_SUPPLIES = 40000.00
-        
-        # Estimated throughput (6 machines x 5 cycles/day x 30 days)
-        # Used to derive the standard cost per individual cycle
-        AVG_MONTHLY_CYCLES = 900 
+    def calculate_metrics(machine, is_busy: bool = False):
+        """
+        Calculates metrics based on a specific machine instance to ensure 
+        independent tracking and realistic cost hierarchy.
+        """
+        # --- CALIBRATED RATES (Base sa bill ng laundry shop) ---
+        # Electricity is usually the highest expense in laundry operations.
+        ELECTRICITY_RATE_PER_KWH = 12.50  
+        WATER_RATE_PER_LITER = 0.08      
+        DETERGENT_RATE_PER_ML = 0.25     
 
-        # Calculate unit rates per cycle
-        detergent_rate = MONTHLY_SUPPLIES / AVG_MONTHLY_CYCLES
-        utility_rate = MONTHLY_UTILITIES / AVG_MONTHLY_CYCLES
+        cycle_count = machine.total_cycles
 
-        # If cycle_count is 0, all costs remain 0.00
-        # This ensures consumption 'stops' when the machine is idle
+        # If cycle_count is 0, all costs remain 0.00.
+        # This ensures a new machine (e.g., Washer 2) starts with a clean slate.
         if cycle_count <= 0:
             return {
                 "detergent_cost": 0.00,
@@ -29,10 +29,18 @@ class PredictionService:
                 "is_active_consumption": is_busy
             }
 
-        # Splitting utility_rate: 65% for electricity, 35% for water
-        electricity_cost = cycle_count * (utility_rate * 0.65)
-        water_cost = cycle_count * (utility_rate * 0.35)
-        detergent_cost = cycle_count * detergent_rate
+        # --- INDEPENDENT CALCULATION ---
+        # Uses the specific consumption rates of the machine (from models.py)
+        # to ensure Washer 1 and Washer 2 don't have identical data.
+        
+        # 1. Electricity (Target: Highest Cost)
+        electricity_cost = cycle_count * (machine.avg_electricity * ELECTRICITY_RATE_PER_KWH)
+        
+        # 2. Water (Target: Middle Cost)
+        water_cost = cycle_count * (machine.avg_water * WATER_RATE_PER_LITER)
+        
+        # 3. Detergent (Target: Lowest Cost)
+        detergent_cost = cycle_count * (machine.avg_detergent * DETERGENT_RATE_PER_ML)
 
         return {
             "detergent_cost": round(detergent_cost, 2),

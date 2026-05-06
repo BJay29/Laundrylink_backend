@@ -4,9 +4,8 @@ from typing import List
 from app.database import get_db
 from app.schemas import BookingCreate, BookingResponse
 from app.controller import booking_controller
-# Assuming you have an auth middleware to get the current user/shop
-# from app.utils.auth import get_current_user 
 
+# Route definition para sa laundry transaction lifecycle
 router = APIRouter(
     prefix="/bookings",
     tags=["Bookings"]
@@ -15,15 +14,14 @@ router = APIRouter(
 @router.post("/", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
 def create_new_booking(
     booking_in: BookingCreate, 
-    db: Session = Depends(get_db),
-    # current_user = Depends(get_current_user) # To be enabled once auth is ready
+    db: Session = Depends(get_db)
 ):
     """
-    Endpoint to create a new laundry booking.
-    Links the transaction to specific machines and triggers 'Busy' status 
-    in the Machine Hub and Monitoring Dashboard.
+    Endpoint para sa paggawa ng bagong laundry transaction.
+    Ito ang nagti-trigger para maging 'Busy' ang specific na Washer/Dryer 
+    at mag-increment ng +1 sa cycle count nito para sa independent cost tracking.
     """
-    # Using hardcoded shop_id (1) for development/testing
+    # Kasalukuyang naka-hardcoded sa shop_id 1 para sa development phase
     shop_id = 1 
     
     return booking_controller.create_booking(
@@ -37,9 +35,9 @@ def read_active_bookings(
     db: Session = Depends(get_db)
 ):
     """
-    Returns all non-claimed bookings.
-    Populates the Service Terminal table and the Dashboard monitoring list.
-    Includes nested machine data for 'W#' or 'D#' labeling.
+    Kinukuha ang lahat ng bookings na hindi pa 'Claimed'.
+    Ginagamit ito para i-populate ang Service Terminal table at 
+    Monitoring Dashboard para makita ang real-time progress ng bawat machine.
     """
     shop_id = 1
     return booking_controller.get_active_bookings(db=db, shop_id=shop_id)
@@ -51,11 +49,20 @@ def update_booking_status(
     db: Session = Depends(get_db)
 ):
     """
-    Updates the workflow lifecycle (e.g., In Progress -> Ready -> Claimed).
-    Releases assigned machines to 'Available' when status is 'Ready' or 'Claimed'.
+    Nag-u-update ng status (e.g., In Progress -> Ready -> Claimed).
+    Kapag 'Ready' o 'Claimed' na, awtomatikong magiging 'Available' ang machine 
+    pero mananatili ang cycle count nito sa database para sa accurate data analytics.
     """
     shop_id = 1
-    # Updated to match the function name in booking_controller.py
+    
+    # Siguraduhin na valid ang status na pinapadala mula sa frontend
+    valid_statuses = ["In Progress", "Ready", "Claimed", "Cancelled"]
+    if new_status not in valid_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status. Choose from: {', '.join(valid_statuses)}"
+        )
+
     return booking_controller.update_booking_status(
         db=db, 
         booking_id=booking_id, 

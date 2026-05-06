@@ -57,7 +57,7 @@ class User(Base):
 class Machine(Base):
     """
     Hardware units. The total_cycles field is used by PredictionService 
-    to calculate detergent, electricity, and water overhead.
+    to calculate detergent, electricity, and water overhead independently.
     """
     __tablename__ = "machines"
 
@@ -68,11 +68,15 @@ class Machine(Base):
     # Status drives UI colors (Available=Green, Busy=Blue, Maintenance=Red)
     status = Column(String, default="Available") 
     
-    # Usage metrics
+    # Usage metrics - Starting at 0 for fresh independent tracking
     total_cycles = Column(Integer, default=0)
-    avg_detergent = Column(Float, default=0.0)
-    avg_electricity = Column(Float, default=0.0)
-    avg_water = Column(Float, default=0.0)
+    
+    # INDEPENDENT CONSUMPTION DATA (Adjustable per specific hardware unit)
+    # Default values follow the hierarchy: Electricity (High) > Water > Detergent (Low)
+    avg_electricity = Column(Float, default=1.2)  # kWh per cycle
+    avg_water = Column(Float, default=60.0)       # Liters per cycle
+    avg_detergent = Column(Float, default=45.0)   # ml per cycle
+    
     remaining_time = Column(Integer, default=0) 
     
     # Mandatory relationship to Shop
@@ -103,7 +107,7 @@ class Machine(Base):
             "avg_electricity": self.avg_electricity,
             "avg_water": self.avg_water,
             "remaining_time": self.remaining_time,
-            "shop_id": self.shop_id or 1 # Fallback to shop 1 if null
+            "shop_id": self.shop_id or 1
         }
 
 class Booking(Base):

@@ -22,18 +22,24 @@ class MachineBase(BaseModel):
     machine_type: str
     machine_number: int
     status: str = "Available"
-    # Defaulting to 1 to ensure compatibility with simple requests
     shop_id: int = 1 
+    # Independent usage rates - dito ilalagay ang default values per machine
+    avg_detergent: float = 50.0  # ml per cycle
+    avg_electricity: float = 1.2 # kWh per cycle
+    avg_water: float = 60.0      # Liters per cycle
 
 class MachineCreate(MachineBase):
-    pass # Inherits everything from MachineBase including shop_id
+    pass 
 
 class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
     shop_id: Optional[int] = None
+    # Pwedeng i-update ang efficiency ng machine kung lumang model na
+    avg_detergent: Optional[float] = None
+    avg_electricity: Optional[float] = None
+    avg_water: Optional[float] = None
 
-# New schema to structure the ML/Prediction results
 class PredictionMetrics(BaseModel):
     detergent_cost: float
     electricity_cost: float
@@ -44,24 +50,20 @@ class PredictionMetrics(BaseModel):
 class MachineResponse(MachineBase):
     id: int
     total_cycles: int
-    # These fields can remain for raw averages
-    avg_detergent: float
-    avg_electricity: float
-    avg_water: float
     remaining_time: int
-    # Added metrics to hold the calculated logic from prediction_service.py
+    # Ang 'metrics' na ito ang magdadala ng computed ₱ cost 
+    # base sa total_cycles ng specific machine na ito
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 # --- MACHINE NESTED ---
-# Used for nested objects in BookingResponse to prevent display errors
 class MachineNested(BaseModel):
     id: int
     machine_type: str
     machine_number: int
     status: str
-    shop_id: int # Important for frontend validation
+    shop_id: int 
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -75,10 +77,8 @@ class BookingCreate(BaseModel):
     loads: int
     total_price: float
     booking_mode: str
-    # Default set to 1 to match auto-fix logic
     shop_id: int = 1 
 
-    # Accepts null if only one machine is selected
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
@@ -99,13 +99,11 @@ class BookingResponse(BaseModel):
     status: str
     booking_mode: str
     created_at: datetime
-    shop_id: int # Ensures shop reference is always included
+    shop_id: int 
     
-    # IDs for internal logic
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Automatically includes machine details when fetching booking
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
