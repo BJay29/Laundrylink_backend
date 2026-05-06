@@ -6,9 +6,8 @@ from datetime import datetime, timezone
 
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
-    Creates a new laundry transaction.
-    Independent Tracking: Only the selected washer/dryer will increment cycles.
-    Persistence: Cycle counts are saved to the database and won't reset on restart.
+    Creates a new laundry transaction and links it to specific hardware units.
+    Updates real-time machine status, service type, and financial profitability metrics.
     """
 
     # 1. Initialize new booking object
@@ -30,13 +29,13 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         created_at=datetime.now(timezone.utc)
     )
 
-    # 2. Collect assigned machine IDs (Independent selection from UI)
+    # 2. Collect assigned machine IDs from the terminal selection
     machine_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
         if m_id is not None
     ]
 
-    # 3. Validate and update machine statuses real-time
+    # 3. Validate machines and update real-time telemetry data
     for m_id in machine_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
@@ -61,12 +60,31 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail=f"{machine.machine_type} {machine.machine_number} is already in use."
             )
 
-        # --- PERSISTENCE & INDEPENDENT UPDATE ---
-        # Dito nangyayari ang cumulative tracking. Hindi nadadamay ang ibang machines.
+        # --- REAL-TIME TELEMETRY UPDATE ---
+        # Map the booking details directly to the machine for the Dashboard view
         machine.status = "Busy"
-        machine.total_cycles += 1 # Permanenteng dagdag sa DB record nito
+        machine.current_service_type = booking_data.service_type
+        machine.current_price = booking_data.total_price
+        machine.total_cycles += 1 
         
-        # Smart Time Estimation
+        # --- PROFITABILITY CALCULATION ---
+        # Calculate overhead per cycle based on machine efficiency settings
+        # Note: You can replace these static rates with dynamic settings values
+        electricity_rate = 12.0  # PHP per kWh
+        water_rate = 0.05        # PHP per Liter
+        detergent_rate = 0.10    # PHP per ml
+
+        overhead = (
+            (machine.avg_electricity * electricity_rate) +
+            (machine.avg_water * water_rate) +
+            (machine.avg_detergent * detergent_rate)
+        )
+        
+        # Calculate net profit for this transaction and add to accumulated total
+        net_profit = booking_data.total_price - overhead
+        machine.net_profit_accumulated += net_profit
+
+        # Estimated time logic based on load size
         estimated_time = 45 + (max(0, booking_data.loads - 1) * 5)
         machine.remaining_time = estimated_time
 
@@ -74,7 +92,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.add(new_booking)
         db.commit()
 
-        # RE-FETCH WITH JOINEDLOAD para sa updated Service Terminal view
+        # Re-fetch with joined relations for the terminal and dashboard response
         result = (
             db.query(Booking)
             .options(
@@ -96,7 +114,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
 def get_active_bookings(db: Session, shop_id: int):
     """
-    Fetches all non-Claimed bookings with full machine details for real-time monitoring.
+    Retrieves all ongoing bookings with full hardware details for live monitoring.
     """
     return (
         db.query(Booking)
@@ -115,8 +133,8 @@ def get_active_bookings(db: Session, shop_id: int):
 
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
-    Handles the booking lifecycle.
-    Releases machines back to 'Available' but PRESERVES the cycle count in the DB.
+    Manages the lifecycle of a booking. 
+    Resets real-time machine telemetry when a service is completed.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -131,8 +149,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # RELEASE LOGIC: Ang machine ay nagiging 'Available' ulit para sa susunod na customer.
-    # Ang 'total_cycles' ay HINDI nire-reset para manatili ang history ng gastos.
+    # RELEASE LOGIC: Return machines to 'Available' while preserving lifetime profit/cycles
     if new_status in ["Ready", "Claimed"]:
         assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
@@ -147,7 +164,10 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             for machine in related_machines:
                 if machine.status != "Maintenance":
                     machine.status = "Available"
-                    machine.remaining_time = 0 # Stop timer but keep cycle count
+                    machine.remaining_time = 0 
+                    # Clear real-time service labels for the next customer
+                    machine.current_service_type = "None"
+                    machine.current_price = 0.0
 
     try:
         db.commit()

@@ -56,8 +56,8 @@ class User(Base):
 
 class Machine(Base):
     """
-    Hardware units. The total_cycles field is used by PredictionService 
-    to calculate detergent, electricity, and water overhead independently.
+    Hardware units. Stores both real-time operational state (service, price)
+    and long-term financial performance (accumulated profit).
     """
     __tablename__ = "machines"
 
@@ -65,26 +65,29 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False)
     
-    # Status drives UI colors (Available=Green, Busy=Blue, Maintenance=Red)
+    # Operational Status (Available, Busy, Maintenance)
     status = Column(String, default="Available") 
     
-    # Usage metrics - Starting at 0 for fresh independent tracking
-    total_cycles = Column(Integer, default=0)
+    # --- REAL-TIME TRACKING ---
+    # Stores the specific service and price of the active booking
+    current_service_type = Column(String, default="None")
+    current_price = Column(Float, default=0.0)
+    remaining_time = Column(Integer, default=0) 
     
-    # INDEPENDENT CONSUMPTION DATA (Adjustable per specific hardware unit)
-    # Default values follow the hierarchy: Electricity (High) > Water > Detergent (Low)
+    # --- FINANCIAL PERFORMANCE ---
+    total_cycles = Column(Integer, default=0)
+    # Net profit earned by this specific machine (Revenue - Overhead)
+    net_profit_accumulated = Column(Float, default=0.0)
+    
+    # --- CONSUMPTION METRICS (Adjustable per unit) ---
     avg_electricity = Column(Float, default=1.2)  # kWh per cycle
     avg_water = Column(Float, default=60.0)       # Liters per cycle
     avg_detergent = Column(Float, default=45.0)   # ml per cycle
     
-    remaining_time = Column(Integer, default=0) 
-    
-    # Mandatory relationship to Shop
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
-
     shop = relationship("Shop", back_populates="machines")
 
-    # Tracking which bookings are assigned to this hardware
+    # Tracking bookings linked to this hardware
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -102,7 +105,10 @@ class Machine(Base):
             "machine_type": self.machine_type,
             "machine_number": self.machine_number,
             "status": self.status,
+            "current_service_type": self.current_service_type,
+            "current_price": self.current_price,
             "total_cycles": self.total_cycles,
+            "net_profit_accumulated": self.net_profit_accumulated,
             "avg_detergent": self.avg_detergent,
             "avg_electricity": self.avg_electricity,
             "avg_water": self.avg_water,
@@ -119,22 +125,20 @@ class Booking(Base):
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    service_type = Column(String, nullable=False) 
-    category = Column(String, nullable=False)     
+    service_type = Column(String, nullable=False) # e.g. 'Wash Only', 'Wash & Dry'
+    category = Column(String, nullable=False)     # e.g. 'Clothes', 'Comforter'
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
     total_price = Column(Float, nullable=False)
-    booking_mode = Column(String, nullable=False) # e.g., 'Self Service', 'Full Service'
+    booking_mode = Column(String, nullable=False) # 'Self Service' or 'Full Service'
     
-    # Optional add-ons
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
     status = Column(String, default="Pending") # 'Pending', 'In Progress', 'Ready', 'Claimed'
     
-    # Foreign keys linking to specific Machine IDs
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -143,7 +147,6 @@ class Booking(Base):
 
     shop = relationship("Shop", back_populates="bookings")
     
-    # Joined loading ensures machine data is available when fetching bookings
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 

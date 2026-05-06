@@ -23,7 +23,7 @@ class MachineBase(BaseModel):
     machine_number: int
     status: str = "Available"
     shop_id: int = 1 
-    # Independent usage rates - dito ilalagay ang default values per machine
+    # Independent usage rates - default consumption values per machine cycle
     avg_detergent: float = 50.0  # ml per cycle
     avg_electricity: float = 1.2 # kWh per cycle
     avg_water: float = 60.0      # Liters per cycle
@@ -35,10 +35,13 @@ class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
     shop_id: Optional[int] = None
-    # Pwedeng i-update ang efficiency ng machine kung lumang model na
+    # Fields to update machine efficiency if hardware is upgraded or degraded
     avg_detergent: Optional[float] = None
     avg_electricity: Optional[float] = None
     avg_water: Optional[float] = None
+    # Real-time assignment fields
+    current_service_type: Optional[str] = None
+    current_price: Optional[float] = None
 
 class PredictionMetrics(BaseModel):
     detergent_cost: float
@@ -51,8 +54,14 @@ class MachineResponse(MachineBase):
     id: int
     total_cycles: int
     remaining_time: int
-    # Ang 'metrics' na ito ang magdadala ng computed ₱ cost 
-    # base sa total_cycles ng specific machine na ito
+    # Real-time status display for Dashboard
+    current_service_type: Optional[str] = "None"
+    current_price: float = 0.0
+    # Financial performance metrics
+    profitability_rate: float = 0.0 # Percentage (%)
+    net_profit_accumulated: float = 0.0 # Total ₱ after overhead
+    
+    # This dictionary carries computed ₱ costs based on usage
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
@@ -100,10 +109,8 @@ class BookingResponse(BaseModel):
     booking_mode: str
     created_at: datetime
     shop_id: int 
-    
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
-
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
