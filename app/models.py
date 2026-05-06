@@ -56,8 +56,8 @@ class User(Base):
 
 class Machine(Base):
     """
-    Hardware units. Stores cumulative usage metrics updated after every booking.
-    Calculations are based on service duration (e.g., Full Service vs Regular Wash).
+    Hardware units. The total_cycles field is used by PredictionService 
+    to calculate detergent, electricity, and water overhead independently.
     """
     __tablename__ = "machines"
 
@@ -68,14 +68,14 @@ class Machine(Base):
     # Status drives UI colors (Available=Green, Busy=Blue, Maintenance=Red)
     status = Column(String, default="Available") 
     
-    # Usage metrics - Total number of times the machine has been used
+    # Usage metrics - Starting at 0 for fresh independent tracking
     total_cycles = Column(Integer, default=0)
     
-    # CUMULATIVE CONSUMPTION DATA (Historical totals, not per-cycle)
-    # These values persist and increase with every transaction
-    total_electricity_cost = Column(Float, default=0.0) # Accumulated PHP/kWh cost
-    total_water_cost = Column(Float, default=0.0)       # Accumulated PHP/Liters cost
-    total_detergent_cost = Column(Float, default=0.0)   # Accumulated PHP/ml cost
+    # INDEPENDENT CONSUMPTION DATA (Adjustable per specific hardware unit)
+    # Default values follow the hierarchy: Electricity (High) > Water > Detergent (Low)
+    avg_electricity = Column(Float, default=1.2)  # kWh per cycle
+    avg_water = Column(Float, default=60.0)       # Liters per cycle
+    avg_detergent = Column(Float, default=45.0)   # ml per cycle
     
     remaining_time = Column(Integer, default=0) 
     
@@ -103,9 +103,9 @@ class Machine(Base):
             "machine_number": self.machine_number,
             "status": self.status,
             "total_cycles": self.total_cycles,
-            "total_electricity": round(self.total_electricity_cost, 2),
-            "total_water": round(self.total_water_cost, 2),
-            "total_detergent": round(self.total_detergent_cost, 2),
+            "avg_detergent": self.avg_detergent,
+            "avg_electricity": self.avg_electricity,
+            "avg_water": self.avg_water,
             "remaining_time": self.remaining_time,
             "shop_id": self.shop_id or 1
         }
@@ -113,23 +113,19 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions. Connects customers to specific hardware units.
-    Cost logic: 
-    - Regular/Titan Wash: ~38-48 mins
-    - Full Service: ~78 mins (Wash + Dry)
-    - Comforter: ~95 mins (Titan Wash + Extra Dry)
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    service_type = Column(String, nullable=False) # 'Regular Wash', 'Titan Wash', 'Full Service', 'Comforter'
-    category = Column(String, nullable=False)     # 'Clothes', 'Linens', etc.
+    service_type = Column(String, nullable=False) 
+    category = Column(String, nullable=False)     
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
     total_price = Column(Float, nullable=False)
-    booking_mode = Column(String, nullable=False) # 'Self Service' or 'Full Service'
+    booking_mode = Column(String, nullable=False) # e.g., 'Self Service', 'Full Service'
     
     # Optional add-ons
     add_detergent = Column(Boolean, default=False)

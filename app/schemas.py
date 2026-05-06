@@ -23,11 +23,10 @@ class MachineBase(BaseModel):
     machine_number: int
     status: str = "Available"
     shop_id: int = 1 
-    
-    # Cumulative consumption totals - these reflect the overall usage of the hardware
-    total_electricity: float = 0.0 # Total PHP/kWh consumed
-    total_water: float = 0.0       # Total PHP/Liters consumed
-    total_detergent: float = 0.0     # Total PHP/ml consumed
+    # Independent usage rates - dito ilalagay ang default values per machine
+    avg_detergent: float = 50.0  # ml per cycle
+    avg_electricity: float = 1.2 # kWh per cycle
+    avg_water: float = 60.0      # Liters per cycle
 
 class MachineCreate(MachineBase):
     pass 
@@ -36,16 +35,12 @@ class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
     shop_id: Optional[int] = None
-    # Allows manual adjustment of cumulative costs if maintenance/reset occurs
-    total_electricity: Optional[float] = None
-    total_water: Optional[float] = None
-    total_detergent: Optional[float] = None
+    # Pwedeng i-update ang efficiency ng machine kung lumang model na
+    avg_detergent: Optional[float] = None
+    avg_electricity: Optional[float] = None
+    avg_water: Optional[float] = None
 
 class PredictionMetrics(BaseModel):
-    """
-    Used for real-time cost estimation during the booking process 
-    based on the selected service type (Full Service, Titan, etc.)
-    """
     detergent_cost: float
     electricity_cost: float
     water_cost: float
@@ -56,15 +51,14 @@ class MachineResponse(MachineBase):
     id: int
     total_cycles: int
     remaining_time: int
-    
-    # Provides detailed metrics for charts and the Machine Hub UI
+    # Ang 'metrics' na ito ang magdadala ng computed ₱ cost 
+    # base sa total_cycles ng specific machine na ito
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 # --- MACHINE NESTED ---
 class MachineNested(BaseModel):
-    """Simplified machine view used within Booking responses"""
     id: int
     machine_type: str
     machine_number: int
@@ -77,7 +71,7 @@ class MachineNested(BaseModel):
 
 class BookingCreate(BaseModel):
     customer_name: str
-    service_type: str # Options: 'Full Service', 'Titan Wash', 'Regular Wash', 'Comforter'
+    service_type: str
     category: str
     weight: float
     loads: int
@@ -136,7 +130,6 @@ class LoginResponse(BaseModel):
 
 # --- SETTINGS SCHEMAS ---
 class ShopSettingsUpdate(BaseModel):
-    """Global shop configuration for cost calculation logic"""
     rush_rate: Optional[float] = None
     delivery_fee: Optional[float] = None
     detergent_price: Optional[float] = None
