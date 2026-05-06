@@ -1,15 +1,14 @@
 from sqlalchemy.orm import Session, joinedload
 from app.models import Booking, Machine
 from app.schemas import BookingCreate
-from app.services.prediction_service import PredictionService
 from fastapi import HTTPException, status
 from datetime import datetime, timezone
 
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
-    Creates a new laundry transaction and updates machine cumulative metrics.
-    Independent Tracking: Only the selected washer/dryer will increment cycles and costs.
-    Persistence: Metrics are saved to the DB to reflect historical machine wear and tear.
+    Creates a new laundry transaction.
+    Independent Tracking: Only the selected washer/dryer will increment cycles.
+    Persistence: Cycle counts are saved to the database and won't reset on restart.
     """
 
     # 1. Initialize new booking object
@@ -31,17 +30,13 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         created_at=datetime.now(timezone.utc)
     )
 
-    # 2. Identify assigned machines for status and consumption updates
+    # 2. Collect assigned machine IDs (Independent selection from UI)
     machine_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
         if m_id is not None
     ]
 
-    # 3. Calculate consumption costs based on the specific Service Type
-    # This uses the duration (minutes) defined in PredictionService
-    consumption = PredictionService.calculate_booking_consumption(booking_data.service_type)
-
-    # 4. Validate and update machine data in real-time
+    # 3. Validate and update machine statuses real-time
     for m_id in machine_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
@@ -66,27 +61,20 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail=f"{machine.machine_type} {machine.machine_number} is already in use."
             )
 
-        # --- CUMULATIVE METRIC UPDATES ---
-        # Update physical status
+        # --- PERSISTENCE & INDEPENDENT UPDATE ---
+        # Dito nangyayari ang cumulative tracking. Hindi nadadamay ang ibang machines.
         machine.status = "Busy"
-        machine.total_cycles += 1 
+        machine.total_cycles += 1 # Permanenteng dagdag sa DB record nito
         
-        # Add new consumption costs to the machine's historical running totals
-        machine.total_electricity_cost += consumption["electricity"]
-        machine.total_water_cost += consumption["water"]
-        machine.total_detergent_cost += consumption["detergent"]
-        
-        # Set the timer based on the Service Type configuration
-        service_config = PredictionService.SERVICE_CONFIG.get(
-            booking_data.service_type, {"time": 45}
-        )
-        machine.remaining_time = service_config["time"]
+        # Smart Time Estimation
+        estimated_time = 45 + (max(0, booking_data.loads - 1) * 5)
+        machine.remaining_time = estimated_time
 
     try:
         db.add(new_booking)
         db.commit()
 
-        # RE-FETCH WITH JOINEDLOAD to provide a full UI update for the Service Terminal
+        # RE-FETCH WITH JOINEDLOAD para sa updated Service Terminal view
         result = (
             db.query(Booking)
             .options(
@@ -127,9 +115,8 @@ def get_active_bookings(db: Session, shop_id: int):
 
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
-    Handles the booking lifecycle and hardware release.
-    Status transitions release machines back to 'Available' while preserving 
-    the cumulative data for financial reporting.
+    Handles the booking lifecycle.
+    Releases machines back to 'Available' but PRESERVES the cycle count in the DB.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -144,8 +131,8 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # RELEASE LOGIC: Return machines to available state upon completion or pickup.
-    # We stop the timer but keep the total_cycles and total_costs intact.
+    # RELEASE LOGIC: Ang machine ay nagiging 'Available' ulit para sa susunod na customer.
+    # Ang 'total_cycles' ay HINDI nire-reset para manatili ang history ng gastos.
     if new_status in ["Ready", "Claimed"]:
         assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
@@ -160,7 +147,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             for machine in related_machines:
                 if machine.status != "Maintenance":
                     machine.status = "Available"
-                    machine.remaining_time = 0 
+                    machine.remaining_time = 0 # Stop timer but keep cycle count
 
     try:
         db.commit()
