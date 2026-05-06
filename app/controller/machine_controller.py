@@ -6,34 +6,33 @@ from fastapi import HTTPException, status
 
 def get_all_machines(db: Session, shop_id: int = None):
     """
-    Retrieves all machines for a specific shop. 
-    Includes real-time performance metrics calculation based on independent machine data.
+    Retrieves all hardware units for a specific shop.
+    Calculates real-time financial metrics based on cumulative database tracking.
     """
     target_shop_id = shop_id if shop_id is not None else 1
     
     query = db.query(Machine).filter(Machine.shop_id == target_shop_id)
     
     machines = query.order_by(
-        Machine.machine_type.desc(), # 'Washer' (W) comes before 'Dryer' (D)
+        Machine.machine_type.desc(), # Ensures 'Washer' displays before 'Dryer'
         Machine.machine_number.asc()
     ).all()
 
     for machine in machines:
-        # Data integrity fix
+        # Data integrity fallback for legacy records
         if machine.shop_id is None:
             machine.shop_id = 1
             
-        # INDEPENDENT TRACKING: Ang PredictionService ay gagamit ng unique rates 
-        # at cycle count ng mismong machine instance na ito.
+        # CUMULATIVE TRACKING: Pulls historical overhead costs from the machine instance
         is_busy = machine.status == "Busy"
-        machine.metrics = PredictionService.calculate_metrics(machine, is_busy)
+        machine.metrics = PredictionService.get_machine_metrics(machine, is_busy)
     
     db.commit() 
     return machines
 
 def get_machine_by_id(db: Session, machine_id: int, shop_id: int = None):
     """
-    Retrieves a single machine's details with its specific calculated metrics.
+    Retrieves a single machine's details including its persistent cost metrics.
     """
     target_shop_id = shop_id if shop_id is not None else 1
     
@@ -49,29 +48,25 @@ def get_machine_by_id(db: Session, machine_id: int, shop_id: int = None):
         )
     
     is_busy = machine.status == "Busy"
-    machine.metrics = PredictionService.calculate_metrics(machine, is_busy)
+    machine.metrics = PredictionService.get_machine_metrics(machine, is_busy)
     
     return machine
 
 def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
     """
-    Manually creates a new machine unit.
-    Initializes with specific consumption rates to maintain the cost hierarchy.
+    Manually creates a new machine unit with initialized cumulative totals at zero.
     """
     final_shop_id = shop_id if shop_id else 1
-    
-    # Defaults base sa realistic laundry data
-    # Washer usually uses more water, Dryer uses more electricity
-    is_washer = machine_data.machine_type.lower() == "washer"
     
     new_machine = Machine(
         machine_type=machine_data.machine_type,
         machine_number=machine_data.machine_number,
         status="Available",
-        total_cycles=0, # Independent start
-        avg_electricity=1.2 if is_washer else 3.5, # Dryers consume more kWh
-        avg_water=60.0 if is_washer else 0.0,      # Dryers don't use water
-        avg_detergent=45.0 if is_washer else 0.0,  # Dryers don't use detergent
+        total_cycles=0, 
+        # Initialize historical running totals to 0.00 PHP
+        total_electricity_cost=0.0,
+        total_water_cost=0.0,
+        total_detergent_cost=0.0,
         remaining_time=0,
         shop_id=final_shop_id
     )
@@ -82,7 +77,7 @@ def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
 
 def delete_machine(db: Session, machine_id: int, shop_id: int):
     """
-    Permanently removes a machine record.
+    Permanently removes a machine record from the database.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     db.delete(machine)
@@ -91,7 +86,7 @@ def delete_machine(db: Session, machine_id: int, shop_id: int):
 
 def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
     """
-    Updates the machine status to/from 'Maintenance'.
+    Updates hardware status to/from 'Maintenance' mode.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     
@@ -107,8 +102,8 @@ def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
 
 def initialize_shop_machines(db: Session, shop_id: int):
     """
-    Standard deployment of 12 units (6W, 6D).
-    Sets up independent efficiency rates per type to ensure realistic dashboard metrics.
+    Standard deployment of 12 units (6 Washers, 6 Dryers).
+    Initializes each unit with independent cumulative cost tracking set to zero.
     """
     final_shop_id = shop_id if shop_id else 1
     
@@ -126,9 +121,9 @@ def initialize_shop_machines(db: Session, shop_id: int):
                 machine_number=i, 
                 status="Available", 
                 total_cycles=0,
-                avg_electricity=1.2, # kWh
-                avg_water=60.0,       # L
-                avg_detergent=50.0,   # ml
+                total_electricity_cost=0.0,
+                total_water_cost=0.0,
+                total_detergent_cost=0.0,
                 shop_id=final_shop_id,
                 remaining_time=0
             )
@@ -142,9 +137,9 @@ def initialize_shop_machines(db: Session, shop_id: int):
                 machine_number=i, 
                 status="Available", 
                 total_cycles=0,
-                avg_electricity=3.0, # Mas mataas ang kuryente ng dryer
-                avg_water=0.0,
-                avg_detergent=0.0,
+                total_electricity_cost=0.0,
+                total_water_cost=0.0,
+                total_detergent_cost=0.0,
                 shop_id=final_shop_id,
                 remaining_time=0
             )
@@ -152,4 +147,4 @@ def initialize_shop_machines(db: Session, shop_id: int):
 
     db.add_all(machines_to_add)
     db.commit()
-    return {"message": "Standard configuration (6W, 6D) deployed with realistic rates"}
+    return {"message": "Standard configuration (6W, 6D) deployed with cumulative tracking enabled"}
