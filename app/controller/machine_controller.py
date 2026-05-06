@@ -1,41 +1,44 @@
 from sqlalchemy.orm import Session
 from app.models import Machine
 from app.schemas import MachineCreate
+from app.services.prediction_service import PredictionService
 from fastapi import HTTPException, status
 import random
 
 def get_all_machines(db: Session, shop_id: int = None):
     """
-    Retrieves all machines. Filters by shop if shop_id is provided.
-    Dahil gusto nating i-fix ang data, kung walang shop_id na binigay, 
-    mag-fo-force filter tayo sa shop_id=1.
+    Retrieves all machines for a specific shop. 
+    Defaults to shop_id=1 if no ID is provided to maintain data consistency.
+    Includes real-time performance metrics calculation.
     """
-    # Force default shop_id to 1 if not provided to avoid null issues
     target_shop_id = shop_id if shop_id is not None else 1
     
     query = db.query(Machine).filter(Machine.shop_id == target_shop_id)
         
     machines = query.order_by(
-        Machine.machine_type.desc(), # 'Washer' (W) bago 'Dryer' (D)
+        Machine.machine_type.desc(), # 'Washer' (W) comes before 'Dryer' (D)
         Machine.machine_number.asc()
     ).all()
 
-    # AUTO-UPDATE METRICS & NULL FIX: 
-    # Habang nilo-loop ang machines, sisiguraduhin nating hindi null ang shop_id nila.
+    # Apply data fixes and attach real-time prediction metrics
     for machine in machines:
+        # Data integrity: ensure no machine has a null shop_id
         if machine.shop_id is None:
             machine.shop_id = 1
             
-        if machine.total_cycles > 0:
-            update_performance_metrics(db, machine.id, target_shop_id, commit=False)
+        # Attach calculated metrics based on the PredictionService logic
+        # This replaces the old random uniform calculation
+        is_busy = machine.status == "Busy"
+        machine.metrics = PredictionService.calculate_metrics(machine.total_cycles, is_busy)
     
-    db.commit() # Isang commit lang para sa lahat ng updates at data fixes
+    # Commit any automatic data fixes (like shop_id adjustments)
+    db.commit() 
     return machines
 
 def get_machine_by_id(db: Session, machine_id: int, shop_id: int = None):
     """
     Retrieves a single machine's details. 
-    Validation ensures the machine exists and belongs to the correct shop.
+    Validates ownership by checking the target_shop_id.
     """
     target_shop_id = shop_id if shop_id is not None else 1
     
@@ -49,14 +52,18 @@ def get_machine_by_id(db: Session, machine_id: int, shop_id: int = None):
             status_code=status.HTTP_404_NOT_FOUND, 
             detail="Machine hardware unit not found or access denied"
         )
+    
+    # Attach metrics for the individual machine response
+    is_busy = machine.status == "Busy"
+    machine.metrics = PredictionService.calculate_metrics(machine.total_cycles, is_busy)
+    
     return machine
 
 def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
     """
-    Manually adds a new machine via the 'Add Machine' modal.
-    Initializes all operational metrics to zero.
+    Manually creates a new machine unit via the administrative dashboard.
+    Initializes all operational counters and time to zero.
     """
-    # Siguraduhing may shop_id na pumasok, kung wala, default to 1
     final_shop_id = shop_id if shop_id else 1
     
     new_machine = Machine(
@@ -77,7 +84,8 @@ def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
 
 def delete_machine(db: Session, machine_id: int, shop_id: int):
     """
-    Permanently removes a machine from the database.
+    Permanently removes a machine record from the database.
+    Used for hardware decommissioning.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     db.delete(machine)
@@ -86,15 +94,15 @@ def delete_machine(db: Session, machine_id: int, shop_id: int):
 
 def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
     """
-    Toggles the maintenance state. Blocked units cannot be selected in Booking Modal.
+    Updates the machine status to/from 'Maintenance'.
+    Machines in maintenance cannot be selected for new laundry bookings.
     """
     machine = get_machine_by_id(db, machine_id, shop_id)
     
-    # Toggle logic
     if machine.status == "Maintenance":
         machine.status = "Available"
     else:
-        # Kapag ginawang Maintenance, ititigil ang countdown
+        # Reset remaining time to stop any active countdowns during repair
         machine.status = "Maintenance"
         machine.remaining_time = 0 
 
@@ -102,36 +110,11 @@ def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
     db.refresh(machine)
     return machine
 
-def update_performance_metrics(db: Session, machine_id: int, shop_id: int, commit: bool = True):
-    """
-    Generates realistic cost data per cycle. 
-    Internal logic for Machine Hub's performance tracking.
-    """
-    machine = get_machine_by_id(db, machine_id, shop_id)
-    
-    if machine.total_cycles > 0:
-        if machine.machine_type == "Washer":
-            # Realistic consumption for Washers (PHP)
-            machine.avg_detergent = round(random.uniform(12.00, 18.00), 2)
-            machine.avg_electricity = round(random.uniform(8.00, 12.00), 2)
-            machine.avg_water = round(random.uniform(4.00, 7.00), 2)
-        else: 
-            # Dryers mainly consume high electricity
-            machine.avg_detergent = 0.00
-            machine.avg_electricity = round(random.uniform(18.00, 28.00), 2)
-            machine.avg_water = 0.00
-
-    if commit:
-        db.commit()
-        db.refresh(machine)
-    return machine
-
 def initialize_shop_machines(db: Session, shop_id: int):
     """
-    Standard auto-setup: 6 Washers and 6 Dryers.
-    Prevents duplicate setup for the same shop.
+    Performs initial setup for new shops by deploying 6 Washers and 6 Dryers.
+    Includes duplicate check to prevent overwriting existing hardware configurations.
     """
-    # Kung walang shop_id, default sa 1
     final_shop_id = shop_id if shop_id else 1
     
     existing_check = db.query(Machine).filter(Machine.shop_id == final_shop_id).first()
@@ -140,7 +123,7 @@ def initialize_shop_machines(db: Session, shop_id: int):
 
     machines_to_add = []
     
-    # Batch create Washers 1-6
+    # Generate standard Washer units (1-6)
     for i in range(1, 7):
         machines_to_add.append(
             Machine(
@@ -152,7 +135,7 @@ def initialize_shop_machines(db: Session, shop_id: int):
             )
         )
     
-    # Batch create Dryers 1-6
+    # Generate standard Dryer units (1-6)
     for i in range(1, 7):
         machines_to_add.append(
             Machine(

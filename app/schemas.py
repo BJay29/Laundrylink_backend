@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 
 # --- REGISTRATION SCHEMAS ---
@@ -22,7 +22,7 @@ class MachineBase(BaseModel):
     machine_type: str
     machine_number: int
     status: str = "Available"
-    # Ginawa nating default 1 para laging may value kahit galing sa simpleng request
+    # Defaulting to 1 to ensure compatibility with simple requests
     shop_id: int = 1 
 
 class MachineCreate(MachineBase):
@@ -33,25 +33,35 @@ class MachineUpdate(BaseModel):
     remaining_time: Optional[int] = None
     shop_id: Optional[int] = None
 
+# New schema to structure the ML/Prediction results
+class PredictionMetrics(BaseModel):
+    detergent_cost: float
+    electricity_cost: float
+    water_cost: float
+    total_overhead: float
+    is_active_consumption: bool
+
 class MachineResponse(MachineBase):
     id: int
     total_cycles: int
+    # These fields can remain for raw averages
     avg_detergent: float
     avg_electricity: float
     avg_water: float
     remaining_time: int
+    # Added metrics to hold the calculated logic from prediction_service.py
+    metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 # --- MACHINE NESTED ---
-# Ginagamit para sa nested objects sa BookingResponse.
-# Sinisiguro nito na hindi mag-error ang display sa Service Terminal at Dashboard.
+# Used for nested objects in BookingResponse to prevent display errors
 class MachineNested(BaseModel):
     id: int
     machine_type: str
     machine_number: int
     status: str
-    shop_id: int # Mahalaga ito para sa validation sa frontend
+    shop_id: int # Important for frontend validation
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -65,10 +75,10 @@ class BookingCreate(BaseModel):
     loads: int
     total_price: float
     booking_mode: str
-    # Default sa 1 para mag-match sa auto-fix logic natin
+    # Default set to 1 to match auto-fix logic
     shop_id: int = 1 
 
-    # Siniguradong tumatanggap ng null/None kung isang machine lang ang pinili
+    # Accepts null if only one machine is selected
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
@@ -89,13 +99,13 @@ class BookingResponse(BaseModel):
     status: str
     booking_mode: str
     created_at: datetime
-    shop_id: int # Sinisigurado na laging kasama ang shop reference
+    shop_id: int # Ensures shop reference is always included
     
-    # IDs para sa internal logic
+    # IDs for internal logic
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Pag-fetch ng booking, automatic kasama ang machine details (nested objects).
+    # Automatically includes machine details when fetching booking
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 

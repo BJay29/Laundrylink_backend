@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 class Shop(Base):
     """
     Represents a laundry business entity. 
+    One shop can have multiple users, machines, and bookings.
     """
     __tablename__ = "shops"
 
@@ -29,7 +30,7 @@ class Shop(Base):
 
 class User(Base):
     """
-    Central Authentication table.
+    Central Authentication table for Owners and Staff.
     """
     __tablename__ = "users"
 
@@ -55,7 +56,8 @@ class User(Base):
 
 class Machine(Base):
     """
-    Hardware units. Status field drives colors in Dashboard and Machine Hub.
+    Hardware units. The total_cycles field is used by PredictionService 
+    to calculate detergent, electricity, and water overhead.
     """
     __tablename__ = "machines"
 
@@ -63,19 +65,22 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False)
     
-    status = Column(String, default="Available") # 'Available', 'Busy', 'Maintenance'
+    # Status drives UI colors (Available=Green, Busy=Blue, Maintenance=Red)
+    status = Column(String, default="Available") 
     
+    # Usage metrics
     total_cycles = Column(Integer, default=0)
     avg_detergent = Column(Float, default=0.0)
     avg_electricity = Column(Float, default=0.0)
     avg_water = Column(Float, default=0.0)
     remaining_time = Column(Integer, default=0) 
     
-    # Mahalaga: nullable=True muna para sa migration, pero default=1 sa logic
+    # Mandatory relationship to Shop
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
 
     shop = relationship("Shop", back_populates="machines")
 
+    # Tracking which bookings are assigned to this hardware
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -98,12 +103,12 @@ class Machine(Base):
             "avg_electricity": self.avg_electricity,
             "avg_water": self.avg_water,
             "remaining_time": self.remaining_time,
-            "shop_id": self.shop_id or 1 # Fallback sa 1 kung null sa DB
+            "shop_id": self.shop_id or 1 # Fallback to shop 1 if null
         }
 
 class Booking(Base):
     """
-    Laundry transactions. References Machine IDs for automation.
+    Laundry transactions. Connects customers to specific hardware units.
     """
     __tablename__ = "bookings"
 
@@ -116,14 +121,16 @@ class Booking(Base):
     loads = Column(Integer, default=1)
     
     total_price = Column(Float, nullable=False)
-    booking_mode = Column(String, nullable=False) 
+    booking_mode = Column(String, nullable=False) # e.g., 'Self Service', 'Full Service'
     
+    # Optional add-ons
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
     status = Column(String, default="Pending") # 'Pending', 'In Progress', 'Ready', 'Claimed'
     
+    # Foreign keys linking to specific Machine IDs
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -132,6 +139,7 @@ class Booking(Base):
 
     shop = relationship("Shop", back_populates="bookings")
     
+    # Joined loading ensures machine data is available when fetching bookings
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
