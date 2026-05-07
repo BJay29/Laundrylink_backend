@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 class Shop(Base):
     """
     Represents a laundry business entity.
-    Each shop owns multiple machines, users (staff/owner), and bookings.
+    Acts as the parent container for machines, users (staff/owner), and transactions.
     """
     __tablename__ = "shops"
 
@@ -15,7 +15,7 @@ class Shop(Base):
     address = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    # Relationships
+    # Cascade deletion ensures that if a shop is removed, all related data is purged.
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
     machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
@@ -30,8 +30,8 @@ class Shop(Base):
 
 class User(Base):
     """
-    Central Authentication table for Owners and Staff.
-    Linked to a specific shop.
+    Identity management for Owners and Staff members.
+    Includes role-based access control (RBAC) fields.
     """
     __tablename__ = "users"
 
@@ -57,8 +57,8 @@ class User(Base):
 
 class Machine(Base):
     """
-    Hardware units tracking state and performance.
-    Stores consumption rates and calculated profitability for dashboard display.
+    Hardware units tracking operational state and financial performance.
+    Optimized for real-time monitoring on the Dashboard.
     """
     __tablename__ = "machines"
 
@@ -66,27 +66,28 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False)
     
-    # Real-time State for Dashboard Monitoring
-    status = Column(String, default="Available") 
+    # Real-time Telemetry for Monitoring Hub
+    status = Column(String, default="Available") # 'Available', 'Busy', 'Maintenance'
     current_service_type = Column(String, default="None")
     current_price = Column(Float, default=0.0)
-    remaining_time = Column(Integer, default=0) # Tracks exact time per service selected
     
-    # Financial & Performance Analytics (Displayed on Machine Cards)
+    # Persistent countdown timer for React Dashboard cards
+    remaining_time = Column(Integer, default=0) 
+    
+    # Financial Analytics for optimizationLogic.js
     total_cycles = Column(Integer, default=0)
     net_profit_accumulated = Column(Float, default=0.0)
-    profitability_rate = Column(Float, default=0.0) # Percentage shown on progress bar
+    profitability_rate = Column(Float, default=0.0) # Drives the UI Progress Bar (0-100)
     
-    # Efficiency Metrics (Hardware Telemetry / Machine Hub)
-    # Based on P10k Utility and P40k Supply monthly averages
-    avg_electricity = Column(Float, default=15.00)
-    avg_water = Column(Float, default=4.80)
-    avg_detergent = Column(Float, default=11.25) # Based on 100ml/g usage
+    # Unit Consumption Coefficients (Calibrated for Naga City utility rates)
+    avg_electricity = Column(Float, default=14.20) # Inverter cycle average
+    avg_water = Column(Float, default=16.50)       # Per-load water overhead
+    avg_detergent = Column(Float, default=12.75)   # Based on 100ml usage calibration
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
 
-    # Relationships to Bookings
+    # Relationships to facilitate transaction history tracking
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -118,15 +119,15 @@ class Machine(Base):
 
 class Booking(Base):
     """
-    Connects customers to specific hardware units.
-    Stores the specific service type used to calculate machine duration and profit.
+    Laundry transactions linking customers to specific hardware units.
+    Triggers the PredictionService calculations upon status changes.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    # Service selection: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'
+    # Service Logic: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'
     service_type = Column(String, nullable=False)
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
@@ -135,13 +136,15 @@ class Booking(Base):
     total_price = Column(Float, nullable=False)
     booking_mode = Column(String, nullable=False)
     
+    # Add-on modifiers for financial tracking
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
-    status = Column(String, default="Pending") # 'Pending', 'In Progress', 'Completed'
+    # Operational lifecycle: 'Pending', 'In Progress', 'Ready', 'Claimed', 'Cancelled'
+    status = Column(String, default="Pending") 
     
-    # Foreign Keys linking to Machine ID
+    # Hardware Assignments
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -150,6 +153,7 @@ class Booking(Base):
 
     shop = relationship("Shop", back_populates="bookings")
     
+    # Eager loading (joined) ensures UI displays 'W1/D1' labels without extra API calls
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
