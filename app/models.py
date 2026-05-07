@@ -1,5 +1,5 @@
 from app.database import Base
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Numeric
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -76,10 +76,11 @@ class Machine(Base):
     # Operational Analytics
     total_cycles = Column(Integer, default=0)
     net_profit_accumulated = Column(Float, default=0.0)
-    profitability_rate = Column(Float, default=0.0) # Drives UI Progress Bar (0-100)
+    # Using Numeric for precision in profitability calculations
+    profitability_rate = Column(Float, default=0.0) 
     
     # ACCUMULATED COSTS: Values increase per cycle based on Naga City rates.
-    # Electricity cost is designed to be the dominant expense in the Machine Hub.
+    # Electricity is the dominant cost for the 5000W Dryer setup.
     accumulated_electricity = Column(Float, default=0.0) 
     accumulated_water = Column(Float, default=0.0)       
     accumulated_detergent = Column(Float, default=0.0)   
@@ -100,6 +101,11 @@ class Machine(Base):
     )
 
     def to_dict(self):
+        # Calculate total overhead for the frontend optimization logic
+        overhead = (self.accumulated_electricity or 0) + \
+                   (self.accumulated_water or 0) + \
+                   (self.accumulated_detergent or 0)
+        
         return {
             "id": self.id,
             "machine_type": self.machine_type,
@@ -109,13 +115,13 @@ class Machine(Base):
             "current_price": self.current_price,
             "remaining_time": self.remaining_time,
             "total_cycles": self.total_cycles,
-            "net_profit_accumulated": self.net_profit_accumulated,
-            "profitability_rate": self.profitability_rate,
+            "net_profit": round(self.net_profit_accumulated, 2), # Simplified name for UI
+            "profitability_rate": round(self.profitability_rate, 2),
             "metrics": {
-                "electricity_cost": round(self.accumulated_electricity, 2),
-                "water_cost": round(self.accumulated_water, 2),
-                "detergent_cost": round(self.accumulated_detergent, 2),
-                "total_overhead": round(self.accumulated_electricity + self.accumulated_water + self.accumulated_detergent, 2)
+                "electricity_cost": round(self.accumulated_electricity or 0, 2),
+                "water_cost": round(self.accumulated_water or 0, 2),
+                "detergent_cost": round(self.accumulated_detergent or 0, 2),
+                "total_overhead": round(overhead, 2)
             },
             "shop_id": self.shop_id
         }
@@ -131,7 +137,7 @@ class Booking(Base):
     customer_name = Column(String, nullable=False)
     
     # Service Logic
-    service_type = Column(String, nullable=False) # e.g., 'Full Service'
+    service_type = Column(String, nullable=False) 
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
@@ -139,7 +145,7 @@ class Booking(Base):
     total_price = Column(Float, nullable=False)
     booking_mode = Column(String, nullable=False)
     
-    # Service Duration in minutes (Crucial for Electricity/Water calculation)
+    # Service Duration in minutes (Used for Utility Logic calculations)
     service_duration = Column(Integer, default=45) 
     
     # Add-on modifiers
@@ -150,15 +156,18 @@ class Booking(Base):
     # Lifecycle: 'Pending', 'In Progress', 'Ready', 'Claimed'
     status = Column(String, default="Pending") 
     
-    # Hardware Assignments
+    # Hardware Assignments (Foreign Keys)
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # Relationships
     shop = relationship("Shop", back_populates="bookings")
     
+    # 'joined' loading prevents the 500 Network Error by fetching machine info 
+    # in the same query as the booking.
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
@@ -186,6 +195,7 @@ class Booking(Base):
             "service_duration": self.service_duration,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
+            # Null-safe checks to prevent 500 errors when machines aren't assigned yet
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,

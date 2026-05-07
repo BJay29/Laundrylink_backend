@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
-    Creates a new booking, sets machines to 'Busy', and injects machine-specific 
-    cycle durations (Hardware Runtime) into the telemetry.
-    Calculates profitability using calibrated overhead: 
+    Creates a new booking, sets machines to 'Busy', and updates telemetry.
+    Calculates profitability and increments ACCUMULATED costs for utility tracking.
+    Overhead estimates for Naga City:
     - Washer: ~₱12.75 (Water/Detergent/Power)
-    - Dryer: ~₱38.50 (High Electricity Consumption)
+    - Dryer: ~₱38.50 (High 5000W Electricity Consumption)
     """
     new_booking = Booking(
         customer_name=booking_data.customer_name,
@@ -49,7 +49,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail=f"Hardware ID {m_id} not registered in current shop."
             )
         
-        # Guard clause for operational integrity
+        # Operational integrity guard clauses
         if machine.status == "Maintenance":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -61,31 +61,34 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail=f"{machine.machine_type} {machine.machine_number} is currently occupied."
             )
 
-        # --- UPDATE REAL-TIME TELEMETRY ---
+        # --- 1. UPDATE REAL-TIME TELEMETRY ---
         machine.status = "Busy"
         machine.current_service_type = booking_data.service_type
         machine.current_price = booking_data.total_price
         machine.total_cycles += 1
 
-        # Calculate Hardware Runtime based on actual cycle averages (e.g., 40-45 mins)
-        # This drives the 'Remaining Time' display on the React frontend cards.
+        # Injects machine-specific runtime (e.g., 45 mins) to drive React frontend countdown
         machine.remaining_time = PredictionService.get_machine_runtime(
             machine.machine_type, booking_data.service_type
         )
 
-        # --- DYNAMIC PROFITABILITY CALCULATION ---
-        # PredictionService retrieves the correct overhead based on machine type (Washer vs Dryer)
+        # --- 2. RESOURCE CONSUMPTION TRACKING ---
+        # Fetch detailed overhead breakdowns from PredictionService
         overhead_data = PredictionService.get_overhead(machine.machine_type)
-        overhead_cost = overhead_data.get("total_overhead", 0.0)
         
-        # Calculate net profit for this specific unit's cycle
+        # Update persistent accumulated costs in the database
+        machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
+        machine.accumulated_water += overhead_data.get("water_cost", 0.0)
+        machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
+
+        # --- 3. DYNAMIC PROFITABILITY CALCULATION ---
+        overhead_cost = overhead_data.get("total_overhead", 0.0)
         net_profit = booking_data.total_price - overhead_cost
         
-        # Update accumulated financial health for the machine
-        current_accumulated = machine.net_profit_accumulated or 0.0
-        machine.net_profit_accumulated = current_accumulated + net_profit
+        # Update lifetime financial health for the machine
+        machine.net_profit_accumulated += net_profit
 
-        # Update Profitability Rate (0-100%) for the Dashboard progress bar
+        # Calculate Profitability Rate (0-100%) for the Dashboard progress bars
         if booking_data.total_price > 0:
             margin = (net_profit / booking_data.total_price) * 100
             machine.profitability_rate = max(0.0, min(100.0, margin))
@@ -96,7 +99,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.add(new_booking)
         db.commit()
 
-        # Re-fetch with joinedload to ensure W1/D1 labels are ready for the UI Terminal
+        # Re-fetch with joinedload to ensure W1/D1 labels are ready for the Service Terminal UI
         return (
             db.query(Booking)
             .options(
@@ -109,16 +112,18 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
     except Exception as e:
         db.rollback()
+        # Log specifically for debugging 500 errors in Render logs
+        print(f"CRITICAL TRANSACTION ERROR: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Transactional Error: {str(e)}"
+            detail=f"Database Transactional Error: {str(e)}"
         )
 
 
 def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all pending laundry tasks. 
-    Filters out 'Claimed' and 'Cancelled' to keep the Terminal view focused.
+    Uses joinedload for performance optimization to prevent separate N+1 queries for machine numbers.
     """
     return (
         db.query(Booking)
@@ -137,8 +142,8 @@ def get_active_bookings(db: Session, shop_id: int):
 
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
-    Updates booking lifecycle. 
-    When marked 'Ready' or 'Claimed', associated hardware is released back to 'Available'.
+    Updates booking lifecycle status. 
+    Releases assigned hardware back to 'Available' when status is 'Ready', 'Claimed', or 'Cancelled'.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -153,7 +158,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # TRIGGER: Release hardware when service phase is finished
+    # TRIGGER: Release hardware resources when the cycle phase is officially finished
     if new_status in ["Ready", "Claimed", "Cancelled"]:
         assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
@@ -167,7 +172,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             ).all()
             
             for machine in machines:
-                # Do not revert status if the machine was manually moved to Maintenance
+                # Do not revert status if the machine was manually placed in Maintenance mode
                 if machine.status != "Maintenance":
                     machine.status = "Available"
                     machine.remaining_time = 0

@@ -36,30 +36,33 @@ class MachineBase(BaseModel):
     status: str = "Available"
     shop_id: int = 1 
     
-    # FIXED: Removed hardcoded defaults here to prevent ghost costs on new machines.
-    # These should be 0.0 by default unless specifically set during creation or update.
-    avg_detergent: float = 0.0   
-    avg_electricity: float = 0.0  
-    avg_water: float = 0.0        
+    # UPDATED: Changed from 'avg_' to 'accumulated_' to match DB and provide 
+    # true resource consumption telemetry for Naga City utility tracking.
+    accumulated_detergent: float = 0.0   
+    accumulated_electricity: float = 0.0  
+    accumulated_water: float = 0.0        
 
 class MachineCreate(MachineBase):
     """
     Used when registering a new unit. 
-    Defaults are set to 0.0 via MachineBase.
+    Defaults are inherited from MachineBase as 0.0.
     """
     pass 
 
 class MachineUpdate(BaseModel):
     """
     Schema for updating hardware configuration or manual status overrides.
+    Includes support for accumulated cost updates from the PredictionService.
     """
     status: Optional[str] = None
     remaining_time: Optional[int] = None
-    avg_detergent: Optional[float] = None
-    avg_electricity: Optional[float] = None
-    avg_water: Optional[float] = None
     
-    # Telemetry updates for real-time monitoring
+    # Telemetry data fields
+    accumulated_detergent: Optional[float] = None
+    accumulated_electricity: Optional[float] = None
+    accumulated_water: Optional[float] = None
+    
+    # Operational analytics for real-time monitoring hub
     current_service_type: Optional[str] = None
     current_price: Optional[float] = None
     profitability_rate: Optional[float] = None
@@ -68,7 +71,7 @@ class MachineUpdate(BaseModel):
 class MachineResponse(MachineBase):
     id: int
     total_cycles: int
-    remaining_time: int  # Exact countdown for the dashboard
+    remaining_time: int  # Exact countdown for dashboard synchronization
     
     # Live operational data
     current_service_type: Optional[str] = "None"
@@ -78,14 +81,14 @@ class MachineResponse(MachineBase):
     profitability_rate: float = 0.0 
     net_profit_accumulated: float = 0.0 
     
-    # This Dict holds the calculated costs (detergent_cost, electricity_cost, etc.)
-    # The PredictionService should populate this only based on ACTUAL bookings.
+    # Calculated metrics object used by optimizationLogic.js in the frontend.
+    # Contains: electricity_cost, water_cost, detergent_cost, total_overhead.
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 class MachineNested(BaseModel):
-    """Simplified view for inclusion within Booking responses."""
+    """Simplified machine view for inclusion within Booking responses."""
     id: int
     machine_type: str
     machine_number: int
@@ -110,7 +113,7 @@ class BookingCreate(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Service flags affecting duration and cost analytics
+    # Service flags affecting duration and resource consumption analysis
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
@@ -118,7 +121,7 @@ class BookingCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingStatusUpdate(BaseModel):
-    """Updates lifecycle (e.g., Pending -> In Progress -> Ready -> Claimed)."""
+    """Updates lifecycle state (e.g., Pending -> In Progress -> Ready -> Claimed)."""
     status: str
 
 class BookingResponse(BaseModel):
@@ -137,7 +140,7 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # Relationship nesting for labels like W1 or D2 in the Service Terminal
+    # Relationship nesting for labels like W1 or D2 in the Service Terminal UI
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
@@ -146,7 +149,7 @@ class BookingResponse(BaseModel):
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
-    """Consolidated schema for the Overview Dashboard."""
+    """Consolidated schema for the Overview Dashboard analytics."""
     total_revenue: float
     revenue_trend: str
     utilization_rate: float
@@ -161,15 +164,16 @@ class DashboardStats(BaseModel):
     full_service: int
     total_weight: float
     
-    # 7-Day Forecast Data
+    # 7-Day Forecast Data for trend visualization
     forecast_data: List[Dict[str, Any]]
     
-    # AI Optimization Tips
+    # AI-generated Optimization Tips
     optimization: Optional[Dict[str, str]] = None
 
 # --- SETTINGS SCHEMAS ---
 
 class ShopSettingsUpdate(BaseModel):
+    """Schema for updating business pricing and modifier rates."""
     rush_rate: Optional[float] = None
     delivery_fee: Optional[float] = None
     detergent_price: Optional[float] = None
