@@ -5,7 +5,7 @@ from app.database import get_db
 from app.schemas import BookingCreate, BookingResponse
 from app.controller import booking_controller
 
-# Route definition para sa laundry transaction lifecycle
+# Route definition for the laundry transaction lifecycle
 router = APIRouter(
     prefix="/bookings",
     tags=["Bookings"]
@@ -17,11 +17,12 @@ def create_new_booking(
     db: Session = Depends(get_db)
 ):
     """
-    Endpoint para sa paggawa ng bagong laundry transaction.
-    Ito ang nagti-trigger para maging 'Busy' ang specific na Washer/Dryer 
-    at mag-increment ng +1 sa cycle count nito para sa independent cost tracking.
+    Endpoint for creating a new laundry transaction.
+    This triggers the specific Washer/Dryer status to 'Busy' 
+    and increments the cycle count by +1 for independent cost and profit tracking.
     """
-    # Kasalukuyang naka-hardcoded sa shop_id 1 para sa development phase
+    # Currently hardcoded to shop_id 1 for the development phase.
+    # In production, this should be retrieved from the authenticated user's token.
     shop_id = 1 
     
     return booking_controller.create_booking(
@@ -35,9 +36,9 @@ def read_active_bookings(
     db: Session = Depends(get_db)
 ):
     """
-    Kinukuha ang lahat ng bookings na hindi pa 'Claimed'.
-    Ginagamit ito para i-populate ang Service Terminal table at 
-    Monitoring Dashboard para makita ang real-time progress ng bawat machine.
+    Retrieves all bookings that are not yet 'Claimed'.
+    This is used to populate the Service Terminal table and 
+    the Monitoring Dashboard to view real-time progress for each machine.
     """
     shop_id = 1
     return booking_controller.get_active_bookings(db=db, shop_id=shop_id)
@@ -49,13 +50,14 @@ def update_booking_status(
     db: Session = Depends(get_db)
 ):
     """
-    Nag-u-update ng status (e.g., In Progress -> Ready -> Claimed).
-    Kapag 'Ready' o 'Claimed' na, awtomatikong magiging 'Available' ang machine 
-    pero mananatili ang cycle count nito sa database para sa accurate data analytics.
+    Updates the booking status (e.g., In Progress -> Ready -> Claimed).
+    Once marked as 'Ready' or 'Claimed', the assigned hardware units 
+    automatically revert to 'Available', while cycle counts and profit metrics 
+    are preserved in the database for accurate business analytics.
     """
     shop_id = 1
     
-    # Siguraduhin na valid ang status na pinapadala mula sa frontend
+    # Ensure the status received from the frontend is valid
     valid_statuses = ["In Progress", "Ready", "Claimed", "Cancelled"]
     if new_status not in valid_statuses:
         raise HTTPException(

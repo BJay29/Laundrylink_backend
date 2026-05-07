@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 class Shop(Base):
     """
-    Represents a laundry business entity. 
+    Represents a laundry business entity.
+    Each shop owns multiple machines, users (staff/owner), and bookings.
     """
     __tablename__ = "shops"
 
@@ -30,6 +31,7 @@ class Shop(Base):
 class User(Base):
     """
     Central Authentication table for Owners and Staff.
+    Linked to a specific shop.
     """
     __tablename__ = "users"
 
@@ -56,6 +58,7 @@ class User(Base):
 class Machine(Base):
     """
     Hardware units tracking state and performance.
+    Stores consumption rates (electricity, water, detergent) for profit calculation.
     """
     __tablename__ = "machines"
 
@@ -63,22 +66,25 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False)
     
+    # Real-time State
     status = Column(String, default="Available") 
     current_service_type = Column(String, default="None")
     current_price = Column(Float, default=0.0)
     remaining_time = Column(Integer, default=0) 
     
+    # Financial & Performance Analytics
     total_cycles = Column(Integer, default=0)
     net_profit_accumulated = Column(Float, default=0.0)
     
+    # Efficiency Metrics (Used by PredictionService)
     avg_electricity = Column(Float, default=1.2)
     avg_water = Column(Float, default=60.0)
     avg_detergent = Column(Float, default=45.0)
     
-    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False) # Ginawa nating False para iwas sync error
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
 
-    # Relationship names simplified for clarity
+    # Relationships to Bookings
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -109,7 +115,8 @@ class Machine(Base):
 
 class Booking(Base):
     """
-    Connects customers to specific hardware units via ID.
+    Connects customers to specific hardware units (Machine IDs).
+    Tracks pricing, load details, and service status.
     """
     __tablename__ = "bookings"
 
@@ -130,7 +137,7 @@ class Booking(Base):
 
     status = Column(String, default="Pending")
     
-    # Siguraduhin na ang input dito ay MACHINE ID, hindi machine number.
+    # Foreign Keys: Link to specific Machine IDs (not machine numbers)
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -139,7 +146,7 @@ class Booking(Base):
 
     shop = relationship("Shop", back_populates="bookings")
     
-    # Joined loading para mabilis makuha ang machine_number sa frontend
+    # Joined loading for fast retrieval of machine numbers in the frontend
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
@@ -154,7 +161,6 @@ class Booking(Base):
     )
 
     def to_dict(self):
-        # Dagdag machine_number sa dictionary para hindi malito ang UI
         return {
             "id": self.id,
             "customer_name": self.customer_name,
