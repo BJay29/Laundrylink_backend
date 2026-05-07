@@ -19,10 +19,11 @@ def create_new_booking(
     """
     Endpoint for creating a new laundry transaction.
     Triggers the PredictionService to set hardware status to 'Busy' 
-    and increments cycle counts (+1) to track independent resource costs.
+    and increments cycle counts to track resource costs.
+    Captures 'booking_timestamp' for AI Peak-Hour Forecasting.
     """
-    # Currently hardcoded for the development phase at Naga College Foundation.
-    # To be replaced with JWT-based shop_id in the production build.
+    # Hardcoded for development at Naga College Foundation.
+    # Replace with JWT-based shop_id in the production build.
     shop_id = 1 
     
     return booking_controller.create_booking(
@@ -37,8 +38,7 @@ def read_active_bookings(
 ):
     """
     Retrieves all bookings with status other than 'Claimed' or 'Cancelled'.
-    Used to populate the 'Service Terminal' and the real-time 'Machine Hub' 
-    telemetry for monitoring current hardware load.
+    Used to populate the 'Service Terminal' and real-time 'Machine Hub'.
     """
     shop_id = 1
     return booking_controller.get_active_bookings(db=db, shop_id=shop_id)
@@ -51,13 +51,12 @@ def update_booking_status(
 ):
     """
     Updates the transaction lifecycle (e.g., In Progress -> Ready -> Claimed).
-    When 'Claimed' is triggered, the controller logic invokes the PredictionService 
-    to release the assigned Washer/Dryer back to 'Available' status.
+    Releases hardware back to 'Available' when 'Claimed' or 'Cancelled' is triggered.
     """
     shop_id = 1
     new_status = status_update.status
     
-    # Strict validation of the operational state machine
+    # Strict validation of the operational state machine to prevent logic errors
     valid_statuses = ["Pending", "In Progress", "Ready", "Claimed", "Cancelled"]
     if new_status not in valid_statuses:
         raise HTTPException(
@@ -78,8 +77,8 @@ def read_booking_history(
 ):
     """
     Retrieves completed transactions (Claimed). 
-    This data drives the 'Daily Gross Revenue' and 'Income Forecast' 
-    metrics visible on the Dashboard.
+    This data feeds the 'Daily Gross Revenue' and 'Income Forecast' 
+    metrics on the Dashboard.
     """
     shop_id = 1
     return booking_controller.get_booking_history(db=db, shop_id=shop_id)

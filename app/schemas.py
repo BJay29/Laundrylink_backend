@@ -128,8 +128,7 @@ class BookingResponse(BaseModel):
     total_price: float
     status: str
     booking_mode: str
-    
-    # NEW: Displays the recorded time of booking in the UI
+   
     booking_timestamp: datetime 
     created_at: datetime
     
