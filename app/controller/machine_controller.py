@@ -6,31 +6,27 @@ from fastapi import HTTPException, status
 
 def _enrich(machine: Machine) -> Machine:
     """
-    In-memory data enrichment using the PredictionService.
-    Calculates real-time metrics for the UI (Remaining Time, Profit Margin, 
-    and Overhead Breakdown) without persisting temporary data to the DB.
+    Data enrichment for the UI.
+    Formats the accumulated database values into a clean metrics object 
+    for the React Dashboard.
     """
-    is_busy = machine.status.lower() == "busy"
-    analytics = PredictionService.calculate_metrics(machine, is_busy)
-
-    # Injecting calculated fields for the frontend API response
-    machine.remaining_time = analytics["duration_minutes"]
-    machine.profitability_rate = analytics["profitability_rate"]
-    machine.net_profit_accumulated = analytics["net_profit"]
-    
-    # Nested metrics object used by the React Dashboard for warnings/analytics
+    # Create a structured metrics object for the frontend tables and cards
     machine.metrics = {
-        "detergent_cost":   analytics["detergent_cost"],
-        "electricity_cost": analytics["electricity_cost"],
-        "water_cost":       analytics["water_cost"],
-        "total_overhead":   analytics["total_overhead"],
+        "electricity_cost": round(machine.accumulated_electricity, 2),
+        "water_cost": round(machine.accumulated_water, 2),
+        "detergent_cost": round(machine.accumulated_detergent, 2),
+        "total_overhead": round(
+            machine.accumulated_electricity + 
+            machine.accumulated_water + 
+            machine.accumulated_detergent, 2
+        )
     }
     return machine
 
 def get_all_machines(db: Session, shop_id: int = 1):
     """
-    Retrieves all hardware units sorted by type and number.
-    Applies real-time telemetry enrichment to each unit.
+    Retrieves all hardware units sorted by type (Washers then Dryers).
+    Applies the enrichment helper to format accumulated costs for the UI.
     """
     machines = (
         db.query(Machine)
@@ -42,7 +38,7 @@ def get_all_machines(db: Session, shop_id: int = 1):
 
 def get_machine_by_id(db: Session, machine_id: int, shop_id: int = 1):
     """
-    Fetches a single machine and re-calculates its current profitability margin.
+    Fetches a single machine unit by its ID.
     """
     machine = db.query(Machine).filter(
         Machine.id == machine_id,
@@ -56,11 +52,38 @@ def get_machine_by_id(db: Session, machine_id: int, shop_id: int = 1):
         )
     return _enrich(machine)
 
+def update_machine_usage_stats(db: Session, machine_id: int, duration_minutes: int):
+    """
+    NEW: This function should be called when a laundry cycle is completed.
+    It calculates costs based on Naga City rates and increments the 
+    accumulated totals in the database.
+    """
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not machine:
+        return None
+
+    # Calculate costs for this specific session
+    costs = PredictionService.calculate_cycle_cost(machine.machine_type, duration_minutes)
+
+    # Increment accumulated values in the DB
+    machine.total_cycles += 1
+    machine.accumulated_electricity += costs["electricity"]
+    machine.accumulated_water += costs["water"]
+    machine.accumulated_detergent += costs["detergent"]
+    
+    # Update profit (Price charged to customer minus the overhead we just calculated)
+    # This assumes machine.current_price was set at the start of the booking
+    cycle_profit = machine.current_price - (costs["electricity"] + costs["water"] + costs["detergent"])
+    machine.net_profit_accumulated += cycle_profit
+
+    db.commit()
+    db.refresh(machine)
+    return _enrich(machine)
+
 def create_machine(db: Session, machine_data: MachineCreate, shop_id: int = 1):
     """
     Registers a new unit. 
-    FIXED: Consumption rates are initialized to 0.0 to prevent 'ghost costs' 
-    on the Dashboard before any cycles are completed.
+    Initializes all accumulated costs to 0.0 to ensure a clean start.
     """
     new_machine = Machine(
         machine_type=machine_data.machine_type,
@@ -71,10 +94,9 @@ def create_machine(db: Session, machine_data: MachineCreate, shop_id: int = 1):
         total_cycles=0,
         net_profit_accumulated=0.0,
         profitability_rate=0.0,
-        # Defaulting to 0.0; PredictionService handles the calibration during active cycles
-        avg_electricity=0.0,
-        avg_water=0.0,
-        avg_detergent=0.0,
+        accumulated_electricity=0.0,
+        accumulated_water=0.0,
+        accumulated_detergent=0.0,
         remaining_time=0,
         shop_id=shop_id
     )
@@ -84,26 +106,10 @@ def create_machine(db: Session, machine_data: MachineCreate, shop_id: int = 1):
     db.refresh(new_machine)
     return _enrich(new_machine)
 
-def delete_machine(db: Session, machine_id: int, shop_id: int = 1):
-    """
-    Deletes a machine record. Typically used for hardware decommissioning.
-    """
-    machine = db.query(Machine).filter(
-        Machine.id == machine_id,
-        Machine.shop_id == shop_id
-    ).first()
-
-    if not machine:
-        raise HTTPException(status_code=404, detail="Machine not found.")
-
-    db.delete(machine)
-    db.commit()
-    return {"message": f"Hardware unit {machine.machine_type} {machine.machine_number} removed."}
-
 def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int = 1):
     """
-    Toggles the maintenance state. Maintenance blocks the machine from 
-    the booking flow and resets active cycle timers.
+    Toggles the maintenance state. Maintenance blocks the machine 
+    and clears active service data.
     """
     machine = db.query(Machine).filter(
         Machine.id == machine_id,
@@ -117,65 +123,37 @@ def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int = 1):
         machine.status = "Available"
     else:
         machine.status = "Maintenance"
-        # Reset active cycle telemetry when moving to maintenance
         machine.remaining_time = 0
         machine.current_service_type = "None"
         machine.current_price = 0.0
-        machine.profitability_rate = 0.0
 
     db.commit()
     db.refresh(machine)
     return _enrich(machine)
 
-def reset_all_machines(db: Session, shop_id: int = 1):
-    """
-    Emergency override: Force-resets all machines to Available.
-    Clears all 'Busy' flags and active timers.
-    """
-    machines = db.query(Machine).filter(Machine.shop_id == shop_id).all()
-    for m in machines:
-        if m.status != "Maintenance":
-            m.status = "Available"
-            m.remaining_time = 0
-            m.current_service_type = "None"
-            m.current_price = 0.0
-    
-    db.commit()
-    return {"message": "All operational units have been reset to Available status."}
-
 def initialize_shop_machines(db: Session, shop_id: int = 1):
     """
-    Seed function for the development environment.
-    FIXED: Initializing utility rates to 0.0. The PredictionService will 
-    populate these values once the first cycle is logged.
+    Seed function to deploy the standard 12-unit hardware suite.
+    Sets all starting utility costs to zero.
     """
     existing = db.query(Machine).filter(Machine.shop_id == shop_id).first()
     if existing:
-        return {"message": "Hardware grid already initialized for this shop."}
+        return {"message": "Hardware grid already initialized."}
 
     machines = []
-    # Deploy 6 Washers
-    for i in range(1, 7):
-        machines.append(Machine(
-            machine_type="Washer", machine_number=i,
-            status="Available", current_service_type="None",
-            current_price=0.0, total_cycles=0,
-            net_profit_accumulated=0.0, profitability_rate=0.0,
-            avg_electricity=0.0, avg_water=0.0, avg_detergent=0.0,
-            remaining_time=0, shop_id=shop_id
-        ))
-    
-    # Deploy 6 Dryers
-    for i in range(1, 7):
-        machines.append(Machine(
-            machine_type="Dryer", machine_number=i,
-            status="Available", current_service_type="None",
-            current_price=0.0, total_cycles=0,
-            net_profit_accumulated=0.0, profitability_rate=0.0,
-            avg_electricity=0.0, avg_water=0.0, avg_detergent=0.0,
-            remaining_time=0, shop_id=shop_id
-        ))
+    # Deploy Washers (1-6) and Dryers (1-6)
+    for m_type in ["Washer", "Dryer"]:
+        for i in range(1, 7):
+            machines.append(Machine(
+                machine_type=m_type, machine_number=i,
+                status="Available", current_service_type="None",
+                current_price=0.0, total_cycles=0,
+                net_profit_accumulated=0.0, profitability_rate=0.0,
+                accumulated_electricity=0.0, accumulated_water=0.0, 
+                accumulated_detergent=0.0,
+                remaining_time=0, shop_id=shop_id
+            ))
 
     db.add_all(machines)
     db.commit()
-    return {"message": "Standard 12-unit hardware suite deployed with zeroed initial overhead."}
+    return {"message": "12-unit suite deployed with Actual Backend cost tracking enabled."}

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 class Shop(Base):
     """
     Represents a laundry business entity.
-    Acts as the parent container for machines, users (staff/owner), and transactions.
+    Acts as the parent container for machines, users, and transactions.
     """
     __tablename__ = "shops"
 
@@ -30,8 +30,7 @@ class Shop(Base):
 
 class User(Base):
     """
-    Identity management for Owners and Staff members.
-    Includes role-based access control (RBAC) fields.
+    Identity management for Owners and Staff members with RBAC.
     """
     __tablename__ = "users"
 
@@ -58,7 +57,7 @@ class User(Base):
 class Machine(Base):
     """
     Hardware units tracking operational state and financial performance.
-    Optimized for real-time monitoring on the Dashboard.
+    Updated to store accumulated utility costs based on real-time usage.
     """
     __tablename__ = "machines"
 
@@ -71,24 +70,24 @@ class Machine(Base):
     current_service_type = Column(String, default="None")
     current_price = Column(Float, default=0.0)
     
-    # Persistent countdown timer for React Dashboard cards
+    # Persistent countdown timer for frontend synchronization
     remaining_time = Column(Integer, default=0) 
     
-    # Financial Analytics for optimizationLogic.js
+    # Operational Analytics
     total_cycles = Column(Integer, default=0)
     net_profit_accumulated = Column(Float, default=0.0)
-    profitability_rate = Column(Float, default=0.0) # Drives the UI Progress Bar (0-100)
+    profitability_rate = Column(Float, default=0.0) # Drives UI Progress Bar (0-100)
     
-    # FIXED: Default values set to 0.0. 
-    # These coefficients should only be populated/calculated when actual activity occurs.
-    avg_electricity = Column(Float, default=0.0) 
-    avg_water = Column(Float, default=0.0)       
-    avg_detergent = Column(Float, default=0.0)   
+    # ACCUMULATED COSTS: Values increase per cycle based on Naga City rates.
+    # Electricity cost is designed to be the dominant expense in the Machine Hub.
+    accumulated_electricity = Column(Float, default=0.0) 
+    accumulated_water = Column(Float, default=0.0)       
+    accumulated_detergent = Column(Float, default=0.0)   
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
 
-    # Relationships to facilitate transaction history tracking
+    # Transaction History Relationships
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -112,23 +111,27 @@ class Machine(Base):
             "total_cycles": self.total_cycles,
             "net_profit_accumulated": self.net_profit_accumulated,
             "profitability_rate": self.profitability_rate,
-            "avg_detergent": self.avg_detergent,
-            "avg_electricity": self.avg_electricity,
-            "avg_water": self.avg_water,
+            "metrics": {
+                "electricity_cost": round(self.accumulated_electricity, 2),
+                "water_cost": round(self.accumulated_water, 2),
+                "detergent_cost": round(self.accumulated_detergent, 2),
+                "total_overhead": round(self.accumulated_electricity + self.accumulated_water + self.accumulated_detergent, 2)
+            },
             "shop_id": self.shop_id
         }
 
 class Booking(Base):
     """
     Laundry transactions linking customers to specific hardware units.
+    Stores duration-specific data to calculate precise utility consumption.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    # Service Logic: 'Full Service', 'Regular Wash', etc.
-    service_type = Column(String, nullable=False)
+    # Service Logic
+    service_type = Column(String, nullable=False) # e.g., 'Full Service'
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
@@ -136,12 +139,15 @@ class Booking(Base):
     total_price = Column(Float, nullable=False)
     booking_mode = Column(String, nullable=False)
     
-    # Add-on modifiers for financial tracking
+    # Service Duration in minutes (Crucial for Electricity/Water calculation)
+    service_duration = Column(Integer, default=45) 
+    
+    # Add-on modifiers
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
-    # Operational lifecycle: 'Pending', 'In Progress', 'Ready', 'Claimed'
+    # Lifecycle: 'Pending', 'In Progress', 'Ready', 'Claimed'
     status = Column(String, default="Pending") 
     
     # Hardware Assignments
@@ -153,7 +159,6 @@ class Booking(Base):
 
     shop = relationship("Shop", back_populates="bookings")
     
-    # Relationship nesting
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
@@ -178,6 +183,7 @@ class Booking(Base):
             "total_price": self.total_price,
             "booking_mode": self.booking_mode,
             "status": self.status,
+            "service_duration": self.service_duration,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
             "washer_number": self.washer.machine_number if self.washer else None,
