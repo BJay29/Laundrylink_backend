@@ -23,10 +23,11 @@ class MachineBase(BaseModel):
     machine_number: int
     status: str = "Available"
     shop_id: int = 1 
-    # Operational efficiency tracking - default consumption rates per hardware cycle
-    avg_detergent: float = 50.0  # ml per cycle
-    avg_electricity: float = 1.2 # kWh per cycle
-    avg_water: float = 60.0      # Liters per cycle
+    # Operational efficiency tracking - calibrated consumption rates per hardware cycle
+    # Based on P15 electricity and P4.80 water costs found in system logs
+    avg_detergent: float = 11.25  # ml per cycle
+    avg_electricity: float = 15.0 # Cost equivalent in PHP
+    avg_water: float = 4.80       # Cost equivalent in PHP
 
 class MachineCreate(MachineBase):
     pass 
@@ -35,38 +36,42 @@ class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
     shop_id: Optional[int] = None
-    # Update machine efficiency if hardware is upgraded or parts are replaced
+    # Update machine efficiency if hardware is upgraded
     avg_detergent: Optional[float] = None
     avg_electricity: Optional[float] = None
     avg_water: Optional[float] = None
     # Real-time assignment fields for live dashboard monitoring
     current_service_type: Optional[str] = None
     current_price: Optional[float] = None
+    profitability_rate: Optional[float] = None
 
 class PredictionMetrics(BaseModel):
     """
     Structure for the calculated costs returned by the PredictionService.
+    Calculates exact overhead for the selected service type.
     """
     detergent_cost: float
     electricity_cost: float
     water_cost: float
     total_overhead: float
+    duration_minutes: int # Exact time based on service (30, 38, 48, or 90 mins)
     is_active_consumption: bool
 
 class MachineResponse(MachineBase):
     id: int
     total_cycles: int
-    remaining_time: int
+    remaining_time: int # Displayed as "Exact Time" on the dashboard card
+    
     # Real-time telemetry data for Dashboard display
     current_service_type: Optional[str] = "None"
     current_price: float = 0.0
     
     # --- CALCULATED ANALYTICS ---
-    # These fields are computed by the service layer before returning to UI
-    profitability_rate: float = 0.0      # Pure profit margin percentage (%)
+    # These fields are computed by the service layer based on the shop price list
+    profitability_rate: float = 0.0      # Margin percentage (0-100%) for the progress bar
     net_profit_accumulated: float = 0.0 # Lifetime earnings after overhead deductions (₱)
     
-    # Dictionary carrying the breakdown of overhead costs (Electricity, Water, Detergent)
+    # Dictionary carrying the breakdown of overhead costs
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
@@ -87,6 +92,10 @@ class MachineNested(BaseModel):
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
+    """
+    Schema used when creating a new booking. 
+    service_type must match one of: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'
+    """
     customer_name: str
     service_type: str
     category: str
@@ -96,7 +105,7 @@ class BookingCreate(BaseModel):
     booking_mode: str
     shop_id: int = 1 
 
-    # Linking to specific hardware units (IDs must exist in the machines table)
+    # Linking to specific hardware units
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
@@ -123,7 +132,7 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # Nested hardware details to show Machine Numbers in the terminal/history
+    # Nested hardware details to show Machine Numbers instead of "UNASSIGNED"
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 

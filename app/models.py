@@ -58,7 +58,7 @@ class User(Base):
 class Machine(Base):
     """
     Hardware units tracking state and performance.
-    Stores consumption rates (electricity, water, detergent) for profit calculation.
+    Stores consumption rates and calculated profitability for dashboard display.
     """
     __tablename__ = "machines"
 
@@ -66,20 +66,22 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False)
     
-    # Real-time State
+    # Real-time State for Dashboard Monitoring
     status = Column(String, default="Available") 
     current_service_type = Column(String, default="None")
     current_price = Column(Float, default=0.0)
-    remaining_time = Column(Integer, default=0) 
+    remaining_time = Column(Integer, default=0) # Tracks exact time per service selected
     
-    # Financial & Performance Analytics
+    # Financial & Performance Analytics (Displayed on Machine Cards)
     total_cycles = Column(Integer, default=0)
     net_profit_accumulated = Column(Float, default=0.0)
+    profitability_rate = Column(Float, default=0.0) # Percentage shown on progress bar
     
-    # Efficiency Metrics (Used by PredictionService)
-    avg_electricity = Column(Float, default=1.2)
-    avg_water = Column(Float, default=60.0)
-    avg_detergent = Column(Float, default=45.0)
+    # Efficiency Metrics (Hardware Telemetry / Machine Hub)
+    # Based on P10k Utility and P40k Supply monthly averages
+    avg_electricity = Column(Float, default=15.00)
+    avg_water = Column(Float, default=4.80)
+    avg_detergent = Column(Float, default=11.25) # Based on 100ml/g usage
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
@@ -104,25 +106,27 @@ class Machine(Base):
             "status": self.status,
             "current_service_type": self.current_service_type,
             "current_price": self.current_price,
+            "remaining_time": self.remaining_time,
             "total_cycles": self.total_cycles,
             "net_profit_accumulated": self.net_profit_accumulated,
+            "profitability_rate": self.profitability_rate,
             "avg_detergent": self.avg_detergent,
             "avg_electricity": self.avg_electricity,
             "avg_water": self.avg_water,
-            "remaining_time": self.remaining_time,
             "shop_id": self.shop_id
         }
 
 class Booking(Base):
     """
-    Connects customers to specific hardware units (Machine IDs).
-    Tracks pricing, load details, and service status.
+    Connects customers to specific hardware units.
+    Stores the specific service type used to calculate machine duration and profit.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
+    # Service selection: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'
     service_type = Column(String, nullable=False)
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
@@ -135,9 +139,9 @@ class Booking(Base):
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
-    status = Column(String, default="Pending")
+    status = Column(String, default="Pending") # 'Pending', 'In Progress', 'Completed'
     
-    # Foreign Keys: Link to specific Machine IDs (not machine numbers)
+    # Foreign Keys linking to Machine ID
     washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
@@ -146,7 +150,6 @@ class Booking(Base):
 
     shop = relationship("Shop", back_populates="bookings")
     
-    # Joined loading for fast retrieval of machine numbers in the frontend
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
