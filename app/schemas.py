@@ -36,17 +36,13 @@ class MachineBase(BaseModel):
     status: str = "Available"
     shop_id: int = 1 
     
-    # UPDATED: Changed from 'avg_' to 'accumulated_' to match DB and provide 
-    # true resource consumption telemetry for Naga City utility tracking.
+    # Updated to match DB telemetry for Naga City utility tracking
     accumulated_detergent: float = 0.0   
     accumulated_electricity: float = 0.0  
     accumulated_water: float = 0.0        
 
 class MachineCreate(MachineBase):
-    """
-    Used when registering a new unit. 
-    Defaults are inherited from MachineBase as 0.0.
-    """
+    """Used when registering a new unit."""
     pass 
 
 class MachineUpdate(BaseModel):
@@ -57,12 +53,10 @@ class MachineUpdate(BaseModel):
     status: Optional[str] = None
     remaining_time: Optional[int] = None
     
-    # Telemetry data fields
     accumulated_detergent: Optional[float] = None
     accumulated_electricity: Optional[float] = None
     accumulated_water: Optional[float] = None
     
-    # Operational analytics for real-time monitoring hub
     current_service_type: Optional[str] = None
     current_price: Optional[float] = None
     profitability_rate: Optional[float] = None
@@ -71,24 +65,21 @@ class MachineUpdate(BaseModel):
 class MachineResponse(MachineBase):
     id: int
     total_cycles: int
-    remaining_time: int  # Exact countdown for dashboard synchronization
+    remaining_time: int
     
-    # Live operational data
     current_service_type: Optional[str] = "None"
     current_price: float = 0.0
     
     # --- CALCULATED ANALYTICS ---
+    # Matches the 'net_profit_accumulated' column in PostgreSQL
     profitability_rate: float = 0.0 
     net_profit_accumulated: float = 0.0 
     
-    # Calculated metrics object used by optimizationLogic.js in the frontend.
-    # Contains: electricity_cost, water_cost, detergent_cost, total_overhead.
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 class MachineNested(BaseModel):
-    """Simplified machine view for inclusion within Booking responses."""
     id: int
     machine_type: str
     machine_number: int
@@ -113,15 +104,18 @@ class BookingCreate(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Service flags affecting duration and resource consumption analysis
+    # Service flags
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
+    # NEW: Captures actual time from the Service Terminal for peak-hour forecasting
+    # This allows the frontend to send the exact click-time of the transaction.
+    booking_timestamp: Optional[datetime] = Field(default_factory=datetime.now)
+
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingStatusUpdate(BaseModel):
-    """Updates lifecycle state (e.g., Pending -> In Progress -> Ready -> Claimed)."""
     status: str
 
 class BookingResponse(BaseModel):
@@ -134,13 +128,15 @@ class BookingResponse(BaseModel):
     total_price: float
     status: str
     booking_mode: str
-    created_at: datetime
-    shop_id: int 
     
+    # NEW: Displays the recorded time of booking in the UI
+    booking_timestamp: datetime 
+    created_at: datetime
+    
+    shop_id: int 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # Relationship nesting for labels like W1 or D2 in the Service Terminal UI
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
@@ -149,7 +145,6 @@ class BookingResponse(BaseModel):
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
-    """Consolidated schema for the Overview Dashboard analytics."""
     total_revenue: float
     revenue_trend: str
     utilization_rate: float
@@ -164,16 +159,12 @@ class DashboardStats(BaseModel):
     full_service: int
     total_weight: float
     
-    # 7-Day Forecast Data for trend visualization
     forecast_data: List[Dict[str, Any]]
-    
-    # AI-generated Optimization Tips
     optimization: Optional[Dict[str, str]] = None
 
 # --- SETTINGS SCHEMAS ---
 
 class ShopSettingsUpdate(BaseModel):
-    """Schema for updating business pricing and modifier rates."""
     rush_rate: Optional[float] = None
     delivery_fee: Optional[float] = None
     detergent_price: Optional[float] = None

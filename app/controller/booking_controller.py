@@ -9,10 +9,14 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
     Creates a new booking, sets machines to 'Busy', and updates telemetry.
     Calculates profitability and increments ACCUMULATED costs for utility tracking.
-    Overhead estimates for Naga City:
-    - Washer: ~₱12.75 (Water/Detergent/Power)
-    - Dryer: ~₱38.50 (High 5000W Electricity Consumption)
+    
+    Now captures 'booking_timestamp' for future peak-hour forecasting.
     """
+    
+    # NEW: Capture the timestamp from the request, or default to current UTC time
+    # This is the key data point for your future AI Forecasting charts.
+    actual_booking_time = booking_data.booking_timestamp or datetime.now(timezone.utc)
+
     new_booking = Booking(
         customer_name=booking_data.customer_name,
         service_type=booking_data.service_type,
@@ -28,6 +32,8 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
+        # Syncing both timestamp fields for maximum data integrity
+        booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)
     )
 
@@ -67,16 +73,14 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         machine.current_price = booking_data.total_price
         machine.total_cycles += 1
 
-        # Injects machine-specific runtime (e.g., 45 mins) to drive React frontend countdown
+        # Triggers the React countdown timer based on service type
         machine.remaining_time = PredictionService.get_machine_runtime(
             machine.machine_type, booking_data.service_type
         )
 
         # --- 2. RESOURCE CONSUMPTION TRACKING ---
-        # Fetch detailed overhead breakdowns from PredictionService
         overhead_data = PredictionService.get_overhead(machine.machine_type)
         
-        # Update persistent accumulated costs in the database
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
@@ -85,10 +89,10 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         overhead_cost = overhead_data.get("total_overhead", 0.0)
         net_profit = booking_data.total_price - overhead_cost
         
-        # Update lifetime financial health for the machine
+        # Updates the field that matches your 'net_profit_accumulated' column fix
         machine.net_profit_accumulated += net_profit
 
-        # Calculate Profitability Rate (0-100%) for the Dashboard progress bars
+        # Calculate Margin for Dashboard progress bars
         if booking_data.total_price > 0:
             margin = (net_profit / booking_data.total_price) * 100
             machine.profitability_rate = max(0.0, min(100.0, margin))
@@ -99,7 +103,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.add(new_booking)
         db.commit()
 
-        # Re-fetch with joinedload to ensure W1/D1 labels are ready for the Service Terminal UI
+        # Re-fetch with joinedload to include machine labels (W1, D2) for the UI
         return (
             db.query(Booking)
             .options(
@@ -112,7 +116,6 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
     except Exception as e:
         db.rollback()
-        # Log specifically for debugging 500 errors in Render logs
         print(f"CRITICAL TRANSACTION ERROR: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -122,8 +125,8 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
 def get_active_bookings(db: Session, shop_id: int):
     """
-    Retrieves all pending laundry tasks. 
-    Uses joinedload for performance optimization to prevent separate N+1 queries for machine numbers.
+    Retrieves all non-finalized laundry tasks. 
+    Optimized with joinedload to prevent N+1 performance issues.
     """
     return (
         db.query(Booking)
@@ -135,15 +138,14 @@ def get_active_bookings(db: Session, shop_id: int):
             Booking.shop_id == shop_id,
             Booking.status.notin_(["Claimed", "Cancelled"])
         )
-        .order_by(Booking.created_at.desc())
+        .order_by(Booking.booking_timestamp.desc()) # Order by the actual booking time
         .all()
     )
 
 
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
-    Updates booking lifecycle status. 
-    Releases assigned hardware back to 'Available' when status is 'Ready', 'Claimed', or 'Cancelled'.
+    Updates lifecycle status and releases hardware resources when finished.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -158,7 +160,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # TRIGGER: Release hardware resources when the cycle phase is officially finished
+    # Release machines back to 'Available' if service is complete or cancelled
     if new_status in ["Ready", "Claimed", "Cancelled"]:
         assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
@@ -172,7 +174,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             ).all()
             
             for machine in machines:
-                # Do not revert status if the machine was manually placed in Maintenance mode
+                # Do not override manual Maintenance status
                 if machine.status != "Maintenance":
                     machine.status = "Available"
                     machine.remaining_time = 0

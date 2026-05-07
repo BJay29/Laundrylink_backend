@@ -57,7 +57,6 @@ class User(Base):
 class Machine(Base):
     """
     Hardware units tracking operational state and financial performance.
-    Updated to store accumulated utility costs based on real-time usage.
     """
     __tablename__ = "machines"
 
@@ -75,12 +74,12 @@ class Machine(Base):
     
     # Operational Analytics
     total_cycles = Column(Integer, default=0)
+    
+    # PRIMARY FINANCIAL SOURCE: Matches the net_profit_accumulated fix for the UI
     net_profit_accumulated = Column(Float, default=0.0)
-    # Using Numeric for precision in profitability calculations
     profitability_rate = Column(Float, default=0.0) 
     
-    # ACCUMULATED COSTS: Values increase per cycle based on Naga City rates.
-    # Electricity is the dominant cost for the 5000W Dryer setup.
+    # ACCUMULATED COSTS: Telemetry for utility tracking.
     accumulated_electricity = Column(Float, default=0.0) 
     accumulated_water = Column(Float, default=0.0)       
     accumulated_detergent = Column(Float, default=0.0)   
@@ -101,7 +100,6 @@ class Machine(Base):
     )
 
     def to_dict(self):
-        # Calculate total overhead for the frontend optimization logic
         overhead = (self.accumulated_electricity or 0) + \
                    (self.accumulated_water or 0) + \
                    (self.accumulated_detergent or 0)
@@ -115,7 +113,7 @@ class Machine(Base):
             "current_price": self.current_price,
             "remaining_time": self.remaining_time,
             "total_cycles": self.total_cycles,
-            "net_profit": round(self.net_profit_accumulated, 2), # Simplified name for UI
+            "net_profit_accumulated": round(self.net_profit_accumulated, 2),
             "profitability_rate": round(self.profitability_rate, 2),
             "metrics": {
                 "electricity_cost": round(self.accumulated_electricity or 0, 2),
@@ -129,7 +127,7 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customers to specific hardware units.
-    Stores duration-specific data to calculate precise utility consumption.
+    Updated with booking_timestamp for future Peak-Hour Forecasting.
     """
     __tablename__ = "bookings"
 
@@ -145,7 +143,7 @@ class Booking(Base):
     total_price = Column(Float, nullable=False)
     booking_mode = Column(String, nullable=False)
     
-    # Service Duration in minutes (Used for Utility Logic calculations)
+    # Service Duration in minutes
     service_duration = Column(Integer, default=45) 
     
     # Add-on modifiers
@@ -153,7 +151,6 @@ class Booking(Base):
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
-    # Lifecycle: 'Pending', 'In Progress', 'Ready', 'Claimed'
     status = Column(String, default="Pending") 
     
     # Hardware Assignments (Foreign Keys)
@@ -161,13 +158,14 @@ class Booking(Base):
     dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    
+    # NEW FIELD: Capture actual user booking time for AI Predictions
+    booking_timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     shop = relationship("Shop", back_populates="bookings")
     
-    # 'joined' loading prevents the 500 Network Error by fetching machine info 
-    # in the same query as the booking.
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
@@ -195,9 +193,9 @@ class Booking(Base):
             "service_duration": self.service_duration,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
-            # Null-safe checks to prevent 500 errors when machines aren't assigned yet
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,
+            "booking_timestamp": self.booking_timestamp.isoformat() if self.booking_timestamp else None,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
