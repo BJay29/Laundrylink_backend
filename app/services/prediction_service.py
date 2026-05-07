@@ -1,88 +1,105 @@
 class PredictionService:
     """
-    Handles real-time calculations for machine monitoring on the dashboard.
-    Calculates exact service duration, net profit, and profitability percentage
-    based on shop price lists and operational overhead.
+    Single source of truth for machine cost calculations and profitability metrics.
+    
+    Cost rates (calibrated to user survey data):
+    - Washer: Electricity ₱14.20 | Water ₱16.50 | Detergent ₱12.75 per cycle
+    - Dryer:  Electricity ₱38.50 | Water ₱0.00  | Detergent ₱0.00  per cycle
+    
+    Service durations:
+    - Full Service / Regular Wash: 45 min base + 5 min per extra load
+    - Titan Wash:                  60 min base
+    - Comforter:                   90 min flat
     """
 
-    # --- SERVICE DATA MAPPING (Based on Shop Price List Image) ---
-    # Maps service types to their exact duration in minutes for the Machine Card timer.
-    # Service times are based on the physical price list image provided.
-    SERVICE_MAPPER = {
-        "Full Service": {"duration": 90, "base_cost": 45.00}, # Combined Wash (48) + Dry (40) + Service
-        "Regular Wash": {"duration": 38, "base_cost": 19.80}, # 38 mins per price list
-        "Titan Wash":   {"duration": 38, "base_cost": 25.00}, # 38 mins per price list
-        "Comforter":    {"duration": 45, "base_cost": 35.00}  # Heavy load calibration
+    # ── Cost rates per cycle ───────────────────────────────────────────────────
+    WASHER_COSTS = {
+        "electricity": 14.20,
+        "water":       16.50,
+        "detergent":   12.75,
+    }
+    DRYER_COSTS = {
+        "electricity": 38.50,
+        "water":        0.00,
+        "detergent":    0.00,
     }
 
-    @staticmethod
-    def calculate_metrics(machine, is_busy: bool = False):
-        """
-        Calculates overhead costs and profitability for machine cards.
-        Ensures 'Exact Time' and 'Net Profit' are accurately reflected on the UI.
-        Used to drive the progress bars and analytics in the Dashboard.
-        """
-        # --- CALIBRATED UTILITY RATES ---
-        # Constants derived from monthly expense tracking (P10k Utilities / P40k Supplies).
-        # These rates translate consumption into actual PHP costs.
-        ELECTRICITY_RATE_PER_KWH = 12.50  
-        WATER_RATE_PER_LITER = 0.08      
-        DETERGENT_RATE_PER_ML = 0.25     
+    # ── Service duration map (minutes) ────────────────────────────────────────
+    SERVICE_DURATIONS = {
+        "full service":       45,
+        "regular wash":       45,
+        "self-service (8kg)": 45,
+        "titan wash (12kg)":  60,
+        "comforter":          90,
+    }
 
-        cycle_count = machine.total_cycles
-        
-        # Retrieve exact duration and base cost mapping for the current service
-        service_info = PredictionService.SERVICE_MAPPER.get(
-            machine.current_service_type, 
-            {"duration": 0, "base_cost": 0.00}
-        )
-
-        # 1. Calculate Lifetime Overhead Costs (Machine Hub Telemetry)
-        # Overhead is 0 if no cycles have been recorded yet.
-        if cycle_count <= 0:
-            electricity_cost = 0.00
-            water_cost = 0.00
-            detergent_cost = 0.00
+    @classmethod
+    def get_overhead(cls, machine_type: str) -> dict:
+        """Returns the cost breakdown for a machine type."""
+        if machine_type.lower() == "washer":
+            costs = cls.WASHER_COSTS
         else:
-            # Uses the machine's average consumption per hardware cycle
-            electricity_cost = cycle_count * machine.avg_electricity
-            water_cost = cycle_count * machine.avg_water
-            detergent_cost = cycle_count * machine.avg_detergent
+            costs = cls.DRYER_COSTS
 
-        total_overhead = electricity_cost + water_cost + detergent_cost
-
-        # 2. Profitability Calculation (For Dashboard Progress Bar and Net Profit label)
-        # Net Profit = Current Price (Revenue) - Estimated overhead for the active cycle.
-        current_net_profit = 0.0
-        profit_percentage = 0.0
-        
-        if is_busy and machine.current_price > 0:
-            # Calculate cost for the current active service to show real-time profit margin
-            current_cycle_overhead = machine.avg_electricity + machine.avg_water + machine.avg_detergent
-            current_net_profit = machine.current_price - current_cycle_overhead
-            
-            # Profitability Percentage drives the green progress bar on the Dashboard Card
-            profit_percentage = (current_net_profit / machine.current_price) * 100
-
-        # Ensure we return at least 0.00 and not negative values for display purposes
-        display_profit = max(0.0, current_net_profit)
-        display_percentage = max(0.0, profit_percentage)
-
+        total = sum(costs.values())
         return {
-            "detergent_cost": round(detergent_cost, 2),
-            "electricity_cost": round(electricity_cost, 2),
-            "water_cost": round(water_cost, 2),
-            "total_overhead": round(total_overhead, 2),
-            "duration_minutes": service_info["duration"], # Exact time (e.g., 38, 48, 90)
-            "net_profit": round(display_profit, 2),
-            "profitability_rate": round(display_percentage, 2),
-            "is_active_consumption": is_busy
+            "electricity_cost": costs["electricity"],
+            "water_cost":       costs["water"],
+            "detergent_cost":   costs["detergent"],
+            "total_overhead":   total,
         }
 
-    @staticmethod
-    def get_service_duration(service_type: str) -> int:
+    @classmethod
+    def get_duration(cls, service_type: str, loads: int = 1) -> int:
         """
-        Helper to retrieve exact minutes for a specific laundry service.
-        Used by the Booking Controller to initialize a machine's remaining_time.
+        Returns exact cycle duration in minutes.
+        Adds 5 minutes per additional load beyond the first.
         """
-        return PredictionService.SERVICE_MAPPER.get(service_type, {"duration": 0})["duration"]
+        key = (service_type or "").lower().strip()
+        base = cls.SERVICE_DURATIONS.get(key, 45)
+        extra = max(0, loads - 1) * 5
+        return base + extra
+
+    @classmethod
+    def calculate_metrics(cls, machine, is_busy: bool = False) -> dict:
+        """
+        Calculates all analytics for a machine card / hub row.
+        
+        Returns:
+            duration_minutes    – exact countdown time
+            profitability_rate  – profit margin as % (0-100)
+            net_profit          – lifetime net after overhead
+            electricity_cost    – per-cycle cost
+            water_cost          – per-cycle cost
+            detergent_cost      – per-cycle cost
+            total_overhead      – sum of all per-cycle costs
+        """
+        overhead = cls.get_overhead(machine.machine_type)
+        total_cost = overhead["total_overhead"]
+
+        # Net profit accumulated lifetime
+        gross = getattr(machine, "net_profit_accumulated", 0.0) or 0.0
+
+        # Profitability rate: (current_price - overhead) / current_price × 100
+        current_price = getattr(machine, "current_price", 0.0) or 0.0
+        if current_price > 0:
+            profit_margin = ((current_price - total_cost) / current_price) * 100
+            profitability_rate = max(0.0, min(100.0, profit_margin))
+        else:
+            profitability_rate = 0.0
+
+        # Duration: only meaningful when busy
+        service_type = getattr(machine, "current_service_type", "") or ""
+        loads = 1  # default; actual loads not stored on machine
+        duration = cls.get_duration(service_type, loads) if is_busy else 0
+
+        return {
+            "duration_minutes":       duration,
+            "profitability_rate":     round(profitability_rate, 2),
+            "net_profit":             round(gross, 2),
+            "electricity_cost":       overhead["electricity_cost"],
+            "water_cost":             overhead["water_cost"],
+            "detergent_cost":         overhead["detergent_cost"],
+            "total_overhead":         overhead["total_overhead"],
+            "is_active_consumption":  is_busy,
+        }

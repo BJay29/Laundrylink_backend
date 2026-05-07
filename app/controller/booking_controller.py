@@ -1,17 +1,16 @@
 from sqlalchemy.orm import Session, joinedload
 from app.models import Booking, Machine
 from app.schemas import BookingCreate
+from app.services.prediction_service import PredictionService
 from fastapi import HTTPException, status
 from datetime import datetime, timezone
 
+
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
-    Creates a new laundry transaction and links it to specific hardware units.
-    Updates real-time machine status, service type, and financial profitability metrics.
+    Creates a new booking, sets machines to Busy, injects exact service
+    duration into remaining_time, and recalculates profitability metrics.
     """
-
-    # 1. Initialize new booking object
-    # shop_id is explicitly assigned from the session context for security
     new_booking = Booking(
         customer_name=booking_data.customer_name,
         service_type=booking_data.service_type,
@@ -23,81 +22,70 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
         is_rush=booking_data.is_rush,
-        status="In Progress", # All new transactions start active
+        status="In Progress",
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
         created_at=datetime.now(timezone.utc)
     )
 
-    # 2. Extract assigned machine IDs (Primary Keys)
-    # The frontend must send the Database ID (e.g., 19), not the label (e.g., W1)
-    assigned_machine_ids = [
+    assigned_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
         if m_id is not None
     ]
 
-    # 3. Validate hardware availability and update telemetry
-    for m_id in assigned_machine_ids:
+    for m_id in assigned_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
             Machine.shop_id == shop_id
         ).first()
 
-        # Error if the Machine ID does not exist in this shop's database
         if not machine:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"System Sync: Machine ID {m_id} is not initialized in the database."
+                detail=f"Machine ID {m_id} not found in this shop."
             )
-        
-        # Prevent usage if machine is offline
         if machine.status == "Maintenance":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"{machine.machine_type} {machine.machine_number} is currently under maintenance."
+                detail=f"{machine.machine_type} {machine.machine_number} is under maintenance."
             )
-        
-        # Prevent double-booking
         if machine.status == "Busy":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"{machine.machine_type} {machine.machine_number} is already processing an order."
+                detail=f"{machine.machine_type} {machine.machine_number} is already occupied."
             )
 
-        # --- REAL-TIME TELEMETRY UPDATE ---
-        # Update hardware state to reflect on the Machine Hub Dashboard
+        # ── Update real-time telemetry ────────────────────────────────────────
         machine.status = "Busy"
         machine.current_service_type = booking_data.service_type
         machine.current_price = booking_data.total_price
-        machine.total_cycles += 1 
-        
-        # --- PROFITABILITY & OVERHEAD CALCULATION ---
-        # Fixed utility rates (Electricity, Water, Detergent)
-        electricity_rate = 12.0  # PHP per kWh
-        water_rate = 0.05        # PHP per Liter
-        detergent_rate = 0.10    # PHP per ml
+        machine.total_cycles += 1
 
-        # Compute operational cost based on machine-specific efficiency ratings
-        overhead = (
-            (machine.avg_electricity * electricity_rate) +
-            (machine.avg_water * water_rate) +
-            (machine.avg_detergent * detergent_rate)
+        # Inject exact duration so frontend countdown is accurate
+        machine.remaining_time = PredictionService.get_duration(
+            booking_data.service_type, booking_data.loads
         )
-        
-        # Accumulate net profit after deducting overhead from the transaction price
-        net_profit = booking_data.total_price - overhead
-        machine.net_profit_accumulated += net_profit
 
-        # Calculate live timer (45 mins base + 5 mins per additional load)
-        estimated_time = 45 + (max(0, booking_data.loads - 1) * 5)
-        machine.remaining_time = estimated_time
+        # ── Recalculate profitability ─────────────────────────────────────────
+        overhead = PredictionService.get_overhead(machine.machine_type)
+        net_profit = booking_data.total_price - overhead["total_overhead"]
+        machine.net_profit_accumulated = (
+            getattr(machine, "net_profit_accumulated", 0.0) or 0.0
+        ) + net_profit
+        machine.profitability_rate = max(
+            0.0,
+            ((booking_data.total_price - overhead["total_overhead"])
+             / booking_data.total_price * 100)
+            if booking_data.total_price > 0 else 0.0
+        )
 
     try:
         db.add(new_booking)
         db.commit()
 
-        # Re-fetch with joined relations so the response contains full machine info
+        # Re-fetch with joinedload to populate washer/dryer nested objects
+        # (models.py has lazy="joined" but explicit reload ensures fresh data)
         result = (
             db.query(Booking)
             .options(
@@ -113,14 +101,14 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database Transaction Failed: {str(e)}"
+            detail=f"Transaction Failed: {str(e)}"
         )
 
 
 def get_active_bookings(db: Session, shop_id: int):
     """
-    Retrieves all ongoing bookings with full machine details for the Terminal View.
-    Excludes 'Claimed' orders to keep the workspace organized.
+    Returns all non-Claimed bookings with nested machine objects
+    so the Service Terminal displays W1/D3 labels correctly.
     """
     return (
         db.query(Booking)
@@ -139,8 +127,8 @@ def get_active_bookings(db: Session, shop_id: int):
 
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
-    Manages the lifecycle of a transaction. 
-    Releases machines and resets telemetry when the service is 'Ready' or 'Claimed'.
+    Advances booking lifecycle and releases machines when done.
+    Resets all real-time telemetry fields on the freed machines.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -155,32 +143,25 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # RELEASE LOGIC: Free up machines when laundry is processed or picked up
     if new_status in ["Ready", "Claimed"]:
         assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
             if m_id is not None
         ]
-
         if assigned_ids:
-            # Batch update all linked machines
-            related_machines = db.query(Machine).filter(
+            machines = db.query(Machine).filter(
                 Machine.id.in_(assigned_ids),
                 Machine.shop_id == shop_id
             ).all()
-
-            for machine in related_machines:
-                # Only reset if not manually set to Maintenance
+            for machine in machines:
                 if machine.status != "Maintenance":
                     machine.status = "Available"
-                    machine.remaining_time = 0 
+                    machine.remaining_time = 0
                     machine.current_service_type = "None"
                     machine.current_price = 0.0
 
     try:
         db.commit()
-
-        # Return updated record with joined relations for UI sync
         return (
             db.query(Booking)
             .options(
@@ -190,7 +171,6 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             .filter(Booking.id == booking_id)
             .first()
         )
-
     except Exception as e:
         db.rollback()
         raise HTTPException(
