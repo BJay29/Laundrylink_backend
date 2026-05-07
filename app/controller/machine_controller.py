@@ -18,7 +18,7 @@ def _enrich(machine: Machine) -> Machine:
     machine.profitability_rate = analytics["profitability_rate"]
     machine.net_profit_accumulated = analytics["net_profit"]
     
-    # Nested metrics object used by optimizationLogic.js for the Dashboard warnings
+    # Nested metrics object used by the React Dashboard for warnings/analytics
     machine.metrics = {
         "detergent_cost":   analytics["detergent_cost"],
         "electricity_cost": analytics["electricity_cost"],
@@ -58,11 +58,10 @@ def get_machine_by_id(db: Session, machine_id: int, shop_id: int = 1):
 
 def create_machine(db: Session, machine_data: MachineCreate, shop_id: int = 1):
     """
-    Registers a new unit and sets its resource consumption coefficients.
-    Washers are initialized with Soap/Water rates, while Dryers are Power-heavy.
+    Registers a new unit. 
+    FIXED: Consumption rates are initialized to 0.0 to prevent 'ghost costs' 
+    on the Dashboard before any cycles are completed.
     """
-    is_washer = machine_data.machine_type.lower() == "washer"
-    
     new_machine = Machine(
         machine_type=machine_data.machine_type,
         machine_number=machine_data.machine_number,
@@ -72,10 +71,10 @@ def create_machine(db: Session, machine_data: MachineCreate, shop_id: int = 1):
         total_cycles=0,
         net_profit_accumulated=0.0,
         profitability_rate=0.0,
-        # Default consumption constants based on 2026 utility rates
-        avg_electricity=14.20 if is_washer else 38.50,
-        avg_water=16.50 if is_washer else 0.0,
-        avg_detergent=12.75 if is_washer else 0.0,
+        # Defaulting to 0.0; PredictionService handles the calibration during active cycles
+        avg_electricity=0.0,
+        avg_water=0.0,
+        avg_detergent=0.0,
         remaining_time=0,
         shop_id=shop_id
     )
@@ -99,7 +98,7 @@ def delete_machine(db: Session, machine_id: int, shop_id: int = 1):
 
     db.delete(machine)
     db.commit()
-    return {"message": f"Hardware unit {machine.machine_type} {machine.machine_number} successfully removed."}
+    return {"message": f"Hardware unit {machine.machine_type} {machine.machine_number} removed."}
 
 def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int = 1):
     """
@@ -146,8 +145,9 @@ def reset_all_machines(db: Session, shop_id: int = 1):
 
 def initialize_shop_machines(db: Session, shop_id: int = 1):
     """
-    Seed function for the Naga College Foundation dev environment.
-    Deploys 6 Washers and 6 Dryers with pre-calibrated utility rates.
+    Seed function for the development environment.
+    FIXED: Initializing utility rates to 0.0. The PredictionService will 
+    populate these values once the first cycle is logged.
     """
     existing = db.query(Machine).filter(Machine.shop_id == shop_id).first()
     if existing:
@@ -161,21 +161,21 @@ def initialize_shop_machines(db: Session, shop_id: int = 1):
             status="Available", current_service_type="None",
             current_price=0.0, total_cycles=0,
             net_profit_accumulated=0.0, profitability_rate=0.0,
-            avg_electricity=14.20, avg_water=16.50, avg_detergent=12.75,
+            avg_electricity=0.0, avg_water=0.0, avg_detergent=0.0,
             remaining_time=0, shop_id=shop_id
         ))
     
-    # Deploy 6 Dryers (Notice the high 38.50 electricity rate)
+    # Deploy 6 Dryers
     for i in range(1, 7):
         machines.append(Machine(
             machine_type="Dryer", machine_number=i,
             status="Available", current_service_type="None",
             current_price=0.0, total_cycles=0,
             net_profit_accumulated=0.0, profitability_rate=0.0,
-            avg_electricity=38.50, avg_water=0.0, avg_detergent=0.0,
+            avg_electricity=0.0, avg_water=0.0, avg_detergent=0.0,
             remaining_time=0, shop_id=shop_id
         ))
 
     db.add_all(machines)
     db.commit()
-    return {"message": "Standard 12-unit hardware suite deployed and ready for telemetry."}
+    return {"message": "Standard 12-unit hardware suite deployed with zeroed initial overhead."}

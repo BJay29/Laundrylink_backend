@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 # --- AUTHENTICATION & OWNER SCHEMAS ---
@@ -36,13 +36,17 @@ class MachineBase(BaseModel):
     status: str = "Available"
     shop_id: int = 1 
     
-    # --- CALIBRATED OPERATIONAL UNIT COSTS ---
-    # Based on questionnaire: 100ml detergent/load and high dryer energy draw.
-    avg_detergent: float = 12.75   # 100ml usage calibration
-    avg_electricity: float = 14.20  # Inverter Washer average
-    avg_water: float = 16.50        # Local utility rate per load
+    # FIXED: Removed hardcoded defaults here to prevent ghost costs on new machines.
+    # These should be 0.0 by default unless specifically set during creation or update.
+    avg_detergent: float = 0.0   
+    avg_electricity: float = 0.0  
+    avg_water: float = 0.0        
 
 class MachineCreate(MachineBase):
+    """
+    Used when registering a new unit. 
+    Defaults are set to 0.0 via MachineBase.
+    """
     pass 
 
 class MachineUpdate(BaseModel):
@@ -64,23 +68,24 @@ class MachineUpdate(BaseModel):
 class MachineResponse(MachineBase):
     id: int
     total_cycles: int
-    remaining_time: int  # The "Exact Time" countdown on the dashboard card
+    remaining_time: int  # Exact countdown for the dashboard
     
     # Live operational data
     current_service_type: Optional[str] = "None"
     current_price: float = 0.0
     
-    # --- CALCULATED ANALYTICS (PredictionService Output) ---
-    profitability_rate: float = 0.0     # 0-100% for Dashboard progress bars
-    net_profit_accumulated: float = 0.0 # Lifetime net income in PHP (₱)
+    # --- CALCULATED ANALYTICS ---
+    profitability_rate: float = 0.0 
+    net_profit_accumulated: float = 0.0 
     
-    # Detailed overhead breakdown for the Hardware Telemetry table
+    # This Dict holds the calculated costs (detergent_cost, electricity_cost, etc.)
+    # The PredictionService should populate this only based on ACTUAL bookings.
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 class MachineNested(BaseModel):
-    """Simplified view for inclusion within Booking responses (e.g., show 'W1')."""
+    """Simplified view for inclusion within Booking responses."""
     id: int
     machine_type: str
     machine_number: int
@@ -113,7 +118,7 @@ class BookingCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingStatusUpdate(BaseModel):
-    """Required for PATCH requests to update lifecycle (Pending -> Claimed)."""
+    """Updates lifecycle (e.g., Pending -> In Progress -> Ready -> Claimed)."""
     status: str
 
 class BookingResponse(BaseModel):
@@ -132,7 +137,7 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # Relationship nesting for labels like W1 or D3 in the Service Terminal
+    # Relationship nesting for labels like W1 or D2 in the Service Terminal
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
@@ -141,9 +146,7 @@ class BookingResponse(BaseModel):
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
-    """
-    Consolidated schema for the main Overview Dashboard.
-    """
+    """Consolidated schema for the Overview Dashboard."""
     total_revenue: float
     revenue_trend: str
     utilization_rate: float
@@ -153,16 +156,15 @@ class DashboardStats(BaseModel):
     pending_bookings: int
     bookings_trend: str
     
-    # Breakdown categories for the Analytics Engine
     wash_only: int
     dry_only: int
     full_service: int
     total_weight: float
     
-    # 7-Day Forecast Data for ForecastChart.jsx
+    # 7-Day Forecast Data
     forecast_data: List[Dict[str, Any]]
     
-    # AI Insight for OptimizationTip.jsx
+    # AI Optimization Tips
     optimization: Optional[Dict[str, str]] = None
 
 # --- SETTINGS SCHEMAS ---

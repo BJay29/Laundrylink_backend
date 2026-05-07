@@ -79,10 +79,11 @@ class Machine(Base):
     net_profit_accumulated = Column(Float, default=0.0)
     profitability_rate = Column(Float, default=0.0) # Drives the UI Progress Bar (0-100)
     
-    # Unit Consumption Coefficients (Calibrated for Naga City utility rates)
-    avg_electricity = Column(Float, default=14.20) # Inverter cycle average
-    avg_water = Column(Float, default=16.50)       # Per-load water overhead
-    avg_detergent = Column(Float, default=12.75)   # Based on 100ml usage calibration
+    # FIXED: Default values set to 0.0. 
+    # These coefficients should only be populated/calculated when actual activity occurs.
+    avg_electricity = Column(Float, default=0.0) 
+    avg_water = Column(Float, default=0.0)       
+    avg_detergent = Column(Float, default=0.0)   
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
@@ -120,14 +121,13 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customers to specific hardware units.
-    Triggers the PredictionService calculations upon status changes.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    # Service Logic: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'
+    # Service Logic: 'Full Service', 'Regular Wash', etc.
     service_type = Column(String, nullable=False)
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
@@ -141,7 +141,7 @@ class Booking(Base):
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
-    # Operational lifecycle: 'Pending', 'In Progress', 'Ready', 'Claimed', 'Cancelled'
+    # Operational lifecycle: 'Pending', 'In Progress', 'Ready', 'Claimed'
     status = Column(String, default="Pending") 
     
     # Hardware Assignments
@@ -153,7 +153,7 @@ class Booking(Base):
 
     shop = relationship("Shop", back_populates="bookings")
     
-    # Eager loading (joined) ensures UI displays 'W1/D1' labels without extra API calls
+    # Relationship nesting
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
