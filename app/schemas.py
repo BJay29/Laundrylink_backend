@@ -36,19 +36,19 @@ class MachineBase(BaseModel):
     status: str = "Available"
     shop_id: int = 1 
     
-    # Updated to match DB telemetry for Naga City utility tracking
+    # Updated to match DB telemetry for utility cost tracking
     accumulated_detergent: float = 0.0   
     accumulated_electricity: float = 0.0  
-    accumulated_water: float = 0.0        
+    accumulated_water: float = 0.0         
 
 class MachineCreate(MachineBase):
-    """Used when registering a new unit."""
+    """Used for initial hardware registration."""
     pass 
 
 class MachineUpdate(BaseModel):
     """
-    Schema for updating hardware configuration or manual status overrides.
-    Includes support for accumulated cost updates from the PredictionService.
+    Schema for updating hardware state or manual maintenance overrides.
+    Supports real-time cost updates from the PredictionService.
     """
     status: Optional[str] = None
     remaining_time: Optional[int] = None
@@ -71,7 +71,7 @@ class MachineResponse(MachineBase):
     current_price: float = 0.0
     
     # --- CALCULATED ANALYTICS ---
-    # Matches the 'net_profit_accumulated' column in PostgreSQL
+    # Tracks financial performance for the Monitoring Hub
     profitability_rate: float = 0.0 
     net_profit_accumulated: float = 0.0 
     
@@ -80,6 +80,7 @@ class MachineResponse(MachineBase):
     model_config = ConfigDict(from_attributes=True)
 
 class MachineNested(BaseModel):
+    """Simplified machine view used inside Booking responses."""
     id: int
     machine_type: str
     machine_number: int
@@ -91,6 +92,10 @@ class MachineNested(BaseModel):
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
+    """
+    Schema for creating a laundry transaction.
+    Now includes booking_timestamp for Peak-Hour Forecasting.
+    """
     customer_name: str
     service_type: str
     category: str
@@ -100,7 +105,7 @@ class BookingCreate(BaseModel):
     booking_mode: str
     shop_id: int = 1 
 
-    # Hardware Assignment
+    # Hardware Assignments
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
@@ -109,16 +114,20 @@ class BookingCreate(BaseModel):
     add_delivery: bool = False
     is_rush: bool = False
 
-    # NEW: Captures actual time from the Service Terminal for peak-hour forecasting
-    # This allows the frontend to send the exact click-time of the transaction.
-    booking_timestamp: Optional[datetime] = Field(default_factory=datetime.now)
+    # AI DATA POINT: Captures the exact creation time for the forecasting model
+    booking_timestamp: Optional[datetime] = Field(default=None)
 
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingStatusUpdate(BaseModel):
+    """Used to move transactions through the lifecycle (e.g., Ready -> Claimed)."""
     status: str
 
 class BookingResponse(BaseModel):
+    """
+    Full response schema for the Service Terminal.
+    Optimized with nested machine objects and formatted timestamps.
+    """
     id: int
     customer_name: str
     service_type: str
@@ -128,14 +137,20 @@ class BookingResponse(BaseModel):
     total_price: float
     status: str
     booking_mode: str
-   
-    booking_timestamp: datetime 
+    
+    # AI Prediction Metrics: Crucial for Peak-Hour Charts
+    booking_timestamp: Optional[datetime] = None
     created_at: datetime
     
     shop_id: int 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
+    # UI Helpers: Returns hardware labels (e.g., W1, D5) to the terminal table
+    washer_number: Optional[int] = None
+    dryer_number: Optional[int] = None
+    
+    # Nested objects for detailed hardware state
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
@@ -144,6 +159,7 @@ class BookingResponse(BaseModel):
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
+    """High-level metrics for the Owner's Overview page."""
     total_revenue: float
     revenue_trend: str
     utilization_rate: float
@@ -158,12 +174,14 @@ class DashboardStats(BaseModel):
     full_service: int
     total_weight: float
     
+    # Forecasting data for Chart.js/Recharts integration
     forecast_data: List[Dict[str, Any]]
     optimization: Optional[Dict[str, str]] = None
 
 # --- SETTINGS SCHEMAS ---
 
 class ShopSettingsUpdate(BaseModel):
+    """Adjustable business parameters for the Shop Owner."""
     rush_rate: Optional[float] = None
     delivery_fee: Optional[float] = None
     detergent_price: Optional[float] = None
