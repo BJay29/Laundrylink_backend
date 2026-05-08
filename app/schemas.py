@@ -28,6 +28,37 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
 
+# --- SETTINGS SCHEMAS ---
+# These schemas handle the core logic for Service Pricing and Utility Rates.
+
+class SettingBase(BaseModel):
+    """Base settings schema containing pricing and operational rates."""
+    wash_only_price: float = 40.0
+    dry_only_price: float = 30.0
+    full_service_price: float = 60.0
+    
+    # Utility Unit Rates for AI/ML Cost Prediction
+    electricity_rate: float = 12.0  # PHP per kWh
+    water_rate: float = 50.0        # PHP per Cubic Meter
+    detergent_cost_per_load: float = 10.0
+    
+    off_peak_hours: str = "8:00 AM - 11:00 AM"
+
+class SettingUpdate(BaseModel):
+    """Schema for updating shop parameters from the Optimization Settings page."""
+    wash_only_price: Optional[float] = None
+    dry_only_price: Optional[float] = None
+    full_service_price: Optional[float] = None
+    electricity_rate: Optional[float] = None
+    water_rate: Optional[float] = None
+    detergent_cost_per_load: Optional[float] = None
+    off_peak_hours: Optional[str] = None
+
+class SettingResponse(SettingBase):
+    """Response schema for the frontend to sync global pricing."""
+    shop_id: int
+    model_config = ConfigDict(from_attributes=True)
+
 # --- MACHINE SCHEMAS ---
 
 class MachineBase(BaseModel):
@@ -94,7 +125,7 @@ class MachineNested(BaseModel):
 class BookingCreate(BaseModel):
     """
     Schema for creating a laundry transaction.
-    Includes booking_timestamp for AI Peak-Hour Forecasting.
+    Values should be cross-referenced with the current SettingsResponse on the frontend.
     """
     customer_name: str
     service_type: str
@@ -105,16 +136,13 @@ class BookingCreate(BaseModel):
     booking_mode: str
     shop_id: int = 1 
 
-    # Hardware ID assignments from the dropdowns
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Service add-ons
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
-    # AI DATA POINT: Captures creation time for peak-hour models
     booking_timestamp: Optional[datetime] = Field(default=None)
 
     model_config = ConfigDict(populate_by_name=True)
@@ -124,10 +152,7 @@ class BookingStatusUpdate(BaseModel):
     status: str
 
 class BookingResponse(BaseModel):
-    """
-    Full response schema for the Service Terminal.
-    Optimized to return machine numbers directly for UI efficiency.
-    """
+    """Full response schema for the Service Terminal."""
     id: int
     customer_name: str
     service_type: str
@@ -138,7 +163,6 @@ class BookingResponse(BaseModel):
     status: str
     booking_mode: str
     
-    # Timestamps for history and forecasting charts
     booking_timestamp: Optional[datetime] = None
     created_at: datetime
     
@@ -146,18 +170,15 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # Nested objects fetched via joinedload in the controller
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
-    # UI HELPERS: Automatically extracts the machine number from the nested object
     washer_number: Optional[int] = None
     dryer_number: Optional[int] = None
 
     @field_validator("washer_number", mode="before")
     @classmethod
     def get_washer_no(cls, v, info):
-        # If the washer object exists, return its machine_number
         if info.data.get("washer"):
             return info.data["washer"].machine_number
         return v
@@ -165,7 +186,6 @@ class BookingResponse(BaseModel):
     @field_validator("dryer_number", mode="before")
     @classmethod
     def get_dryer_no(cls, v, info):
-        # If the dryer object exists, return its machine_number
         if info.data.get("dryer"):
             return info.data["dryer"].machine_number
         return v
@@ -190,14 +210,5 @@ class DashboardStats(BaseModel):
     full_service: int
     total_weight: float
     
-    # Data for Chart.js/Recharts peak-hour and revenue visualization
     forecast_data: List[Dict[str, Any]]
     optimization: Optional[Dict[str, str]] = None
-
-# --- SETTINGS SCHEMAS ---
-
-class ShopSettingsUpdate(BaseModel):
-    """Adjustable business parameters for fee management."""
-    rush_rate: Optional[float] = None
-    delivery_fee: Optional[float] = None
-    detergent_price: Optional[float] = None

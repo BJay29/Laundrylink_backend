@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 class Shop(Base):
     """
     Represents a laundry business entity.
-    Acts as the parent container for machines, users, and transactions.
+    Acts as the parent container for machines, users, transactions, and settings.
     """
     __tablename__ = "shops"
 
@@ -19,6 +19,8 @@ class Shop(Base):
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
     machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
+    # Link to shop-specific configuration
+    settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -26,6 +28,43 @@ class Shop(Base):
             "shop_name": self.shop_name,
             "address": self.address,
             "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+class Setting(Base):
+    """
+    Global configuration for service pricing and operational unit costs.
+    Acts as the 'Single Source of Truth' for price calculations in the Booking Modal.
+    """
+    __tablename__ = "settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Service Pricing (Base rates for different laundry types)
+    wash_only_price = Column(Float, default=40.0)
+    dry_only_price = Column(Float, default=30.0)
+    full_service_price = Column(Float, default=60.0)
+    
+    # Operating Costs (Unit rates used for AI/ML profit optimization)
+    electricity_rate = Column(Float, default=12.0)   # PHP per kWh
+    water_rate = Column(Float, default=50.0)         # PHP per Cubic Meter (m3)
+    detergent_cost_per_load = Column(Float, default=10.0) # Estimated PHP per cycle
+    
+    # Operational Schedule
+    off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
+    
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="settings")
+
+    def to_dict(self):
+        return {
+            "wash_only_price": self.wash_only_price,
+            "dry_only_price": self.dry_only_price,
+            "full_service_price": self.full_service_price,
+            "electricity_rate": self.electricity_rate,
+            "water_rate": self.water_rate,
+            "detergent_cost_per_load": self.detergent_cost_per_load,
+            "off_peak_hours": self.off_peak_hours,
+            "shop_id": self.shop_id
         }
 
 class User(Base):
@@ -128,15 +167,14 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customers to hardware units.
-    Updated with ondelete="SET NULL" to prevent hardware deletion errors.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    # Service Configuration
-    service_type = Column(String, nullable=False) 
+    # Service Configuration (Values pulled from Settings model during creation)
+    service_type = Column(String, nullable=False) # e.g., 'Full Service'
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
@@ -152,7 +190,6 @@ class Booking(Base):
 
     status = Column(String, default="Pending") 
     
-    # FIXED: Added ondelete="SET NULL" to allow machines to be deleted even if they have booking history
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     
@@ -164,7 +201,6 @@ class Booking(Base):
     # Relationships
     shop = relationship("Shop", back_populates="bookings")
     
-    # lazy="joined" ensures machine details are loaded in one query for the Service Terminal
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
@@ -179,9 +215,6 @@ class Booking(Base):
     )
 
     def to_dict(self):
-        """
-        Serialization optimized for the React Terminal to prevent "WAITING" labels.
-        """
         return {
             "id": self.id,
             "customer_name": self.customer_name,
