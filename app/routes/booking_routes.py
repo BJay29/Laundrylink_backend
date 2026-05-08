@@ -18,12 +18,10 @@ def create_new_booking(
 ):
     """
     Endpoint for creating a new laundry transaction.
-    Triggers the PredictionService to set hardware status to 'Busy' 
-    and increments cycle counts to track resource costs.
-    Captures 'booking_timestamp' for AI Peak-Hour Forecasting.
+    Triggers machine state updates to 'Busy' and pre-loads machine numbers 
+    to prevent "WAITING" labels in the frontend terminal.
     """
     # Hardcoded for development at Naga College Foundation.
-    # Replace with JWT-based shop_id in the production build.
     shop_id = 1 
     
     return booking_controller.create_booking(
@@ -38,7 +36,8 @@ def read_active_bookings(
 ):
     """
     Retrieves all bookings with status other than 'Claimed' or 'Cancelled'.
-    Used to populate the 'Service Terminal' and real-time 'Machine Hub'.
+    Uses joinedload in the controller to ensure 'washer_number' and 'dryer_number' 
+    are immediately available for the Service Terminal UI.
     """
     shop_id = 1
     return booking_controller.get_active_bookings(db=db, shop_id=shop_id)
@@ -51,12 +50,13 @@ def update_booking_status(
 ):
     """
     Updates the transaction lifecycle (e.g., In Progress -> Ready -> Claimed).
-    Releases hardware back to 'Available' when 'Claimed' or 'Cancelled' is triggered.
+    Releases hardware back to 'Available' when 'Claimed', 'Cancelled', or 'Ready' 
+    is triggered, solving the machine hub synchronization issue.
     """
     shop_id = 1
     new_status = status_update.status
     
-    # Strict validation of the operational state machine to prevent logic errors
+    # Strict validation of the operational state machine
     valid_statuses = ["Pending", "In Progress", "Ready", "Claimed", "Cancelled"]
     if new_status not in valid_statuses:
         raise HTTPException(
@@ -77,8 +77,9 @@ def read_booking_history(
 ):
     """
     Retrieves completed transactions (Claimed). 
-    This data feeds the 'Daily Gross Revenue' and 'Income Forecast' 
-    metrics on the Dashboard.
+    Provides data for the Dashboard metrics like Daily Gross Revenue 
+    and Peak-Hour forecasting.
     """
     shop_id = 1
+    # Ensure this function exists in your booking_controller.py
     return booking_controller.get_booking_history(db=db, shop_id=shop_id)

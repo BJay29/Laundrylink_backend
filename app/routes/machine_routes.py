@@ -49,8 +49,8 @@ def update_machine_config(
 def remove_machine(machine_id: int, db: Session = Depends(get_db)):
     """
     Decommissions a hardware unit.
-    Removes the record from active monitoring while allowing historical 
-    booking data to remain for financial reporting integrity.
+    Uses the controller's delete logic which handles SET NULL constraints,
+    ensuring machine records are removed without breaking historical booking logs.
     """
     shop_id = 1
     return machine_controller.delete_machine(db, machine_id, shop_id)
@@ -60,7 +60,7 @@ def setup_default_machines(db: Session = Depends(get_db)):
     """
     Bootstrap endpoint to deploy a standard hardware grid (6 Washers, 6 Dryers).
     Each unit is pre-configured with standard consumption rates 
-    compatible with the current PHP utility prices.
+    compatible with local utility prices.
     """
     shop_id = 1
     return machine_controller.initialize_shop_machines(db, shop_id)
@@ -84,7 +84,7 @@ def get_machine_telemetry(machine_id: int, db: Session = Depends(get_db)):
     """
     High-frequency endpoint for the Monitoring Dashboard.
     Forces a recalculation of predictive overhead metrics to catch 
-    sudden spikes in utility usage or performance drops.
+    performance drops.
     """
     shop_id = 1
     return machine_controller.get_machine_by_id(
@@ -100,4 +100,5 @@ def reset_all_statuses(db: Session = Depends(get_db)):
     Useful for system synchronization after server restarts or testing cycles.
     """
     shop_id = 1
+    # Ensure 'reset_all_machines' is implemented in your machine_controller.py
     return machine_controller.reset_all_machines(db, shop_id)

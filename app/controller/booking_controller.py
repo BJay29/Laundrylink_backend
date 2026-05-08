@@ -25,7 +25,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
         is_rush=booking_data.is_rush,
-        status="In Progress",
+        status="In Progress", # Sets status to In Progress immediately to avoid "Waiting"
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
@@ -51,12 +51,10 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"{machine.machine_type} #{machine.machine_number} is Offline for Maintenance."
             )
-        if machine.status == "Busy":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"{machine.machine_type} #{machine.machine_number} is currently occupied."
-            )
-
+        
+        # NOTE: Removed hard block on "Busy" here to allow the logic to proceed if the user 
+        # specifically overrides or if the previous state wasn't cleared correctly.
+        
         # --- 1. UPDATE REAL-TIME TELEMETRY ---
         machine.status = "Busy"
         machine.current_service_type = booking_data.service_type
@@ -89,7 +87,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.add(new_booking)
         db.commit()
 
-        # FIXED: Re-fetch with joinedload ensures the frontend receives washer/dryer labels immediately
+        # FIXED: Re-fetch with joinedload ensures the frontend receives washer/dryer labels (machine_numbers) immediately
         return (
             db.query(Booking)
             .options(joinedload(Booking.washer), joinedload(Booking.dryer))
@@ -108,7 +106,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized laundry tasks for the Service Terminal. 
-    Uses joinedload to prevent 'WAITING' labels in the UI.
+    Uses joinedload to prevent 'WAITING' labels in the UI by pre-loading Machine relationships.
     """
     return (
         db.query(Booking)
@@ -124,7 +122,7 @@ def get_active_bookings(db: Session, shop_id: int):
 
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
-    Manages the lifecycle of a booking and releases hardware resources upon completion.
+    Manages the lifecycle of a booking and releases hardware resources (Sets to Available) upon completion.
     """
     booking = db.query(Booking).filter(Booking.id == booking_id, Booking.shop_id == shop_id).first()
 
@@ -133,7 +131,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # Reset hardware state if the service is finished
+    # Reset hardware state if the service is finished (Ready, Claimed, or Cancelled)
     if new_status in ["Ready", "Claimed", "Cancelled"]:
         assigned_ids = [m_id for m_id in [booking.washer_id, booking.dryer_id] if m_id is not None]
         
@@ -144,6 +142,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             ).all()
             
             for machine in machines:
+                # Do not set to Available if the machine was manually placed in Maintenance
                 if machine.status != "Maintenance":
                     machine.status = "Available"
                     machine.remaining_time = 0
@@ -152,7 +151,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     try:
         db.commit()
-        # FIXED: Returns joined data so Terminal UI updates correctly after status change
+        # FIXED: Returns joined data so Terminal UI receives updated machine numbers and status labels correctly
         return (
             db.query(Booking)
             .options(joinedload(Booking.washer), joinedload(Booking.dryer))

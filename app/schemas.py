@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, ConfigDict, Field
+from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -36,13 +36,13 @@ class MachineBase(BaseModel):
     status: str = "Available"
     shop_id: int = 1 
     
-    # Updated to match DB telemetry for utility cost tracking
+    # Telemetry for utility cost tracking used in calculation logic
     accumulated_detergent: float = 0.0   
     accumulated_electricity: float = 0.0  
     accumulated_water: float = 0.0         
 
 class MachineCreate(MachineBase):
-    """Used for initial hardware registration."""
+    """Used for initial hardware registration in the hub."""
     pass 
 
 class MachineUpdate(BaseModel):
@@ -70,17 +70,17 @@ class MachineResponse(MachineBase):
     current_service_type: Optional[str] = "None"
     current_price: float = 0.0
     
-    # --- CALCULATED ANALYTICS ---
-    # Tracks financial performance for the Monitoring Hub
+    # Financial performance metrics for the Monitoring Hub
     profitability_rate: float = 0.0 
     net_profit_accumulated: float = 0.0 
     
+    # Holds calculated utility costs (electricity_cost, water_cost, etc.)
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 class MachineNested(BaseModel):
-    """Simplified machine view used inside Booking responses."""
+    """Simplified machine view used inside Booking responses for UI labels."""
     id: int
     machine_type: str
     machine_number: int
@@ -94,7 +94,7 @@ class MachineNested(BaseModel):
 class BookingCreate(BaseModel):
     """
     Schema for creating a laundry transaction.
-    Now includes booking_timestamp for Peak-Hour Forecasting.
+    Includes booking_timestamp for AI Peak-Hour Forecasting.
     """
     customer_name: str
     service_type: str
@@ -105,16 +105,16 @@ class BookingCreate(BaseModel):
     booking_mode: str
     shop_id: int = 1 
 
-    # Hardware Assignments
+    # Hardware ID assignments from the dropdowns
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Service flags
+    # Service add-ons
     add_detergent: bool = False
     add_delivery: bool = False
     is_rush: bool = False
 
-    # AI DATA POINT: Captures the exact creation time for the forecasting model
+    # AI DATA POINT: Captures creation time for peak-hour models
     booking_timestamp: Optional[datetime] = Field(default=None)
 
     model_config = ConfigDict(populate_by_name=True)
@@ -126,7 +126,7 @@ class BookingStatusUpdate(BaseModel):
 class BookingResponse(BaseModel):
     """
     Full response schema for the Service Terminal.
-    Optimized with nested machine objects and formatted timestamps.
+    Optimized to return machine numbers directly for UI efficiency.
     """
     id: int
     customer_name: str
@@ -138,7 +138,7 @@ class BookingResponse(BaseModel):
     status: str
     booking_mode: str
     
-    # AI Prediction Metrics: Crucial for Peak-Hour Charts
+    # Timestamps for history and forecasting charts
     booking_timestamp: Optional[datetime] = None
     created_at: datetime
     
@@ -146,20 +146,36 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
-    # UI Helpers: Returns hardware labels (e.g., W1, D5) to the terminal table
-    washer_number: Optional[int] = None
-    dryer_number: Optional[int] = None
-    
-    # Nested objects for detailed hardware state
+    # Nested objects fetched via joinedload in the controller
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
+
+    # UI HELPERS: Automatically extracts the machine number from the nested object
+    washer_number: Optional[int] = None
+    dryer_number: Optional[int] = None
+
+    @field_validator("washer_number", mode="before")
+    @classmethod
+    def get_washer_no(cls, v, info):
+        # If the washer object exists, return its machine_number
+        if info.data.get("washer"):
+            return info.data["washer"].machine_number
+        return v
+
+    @field_validator("dryer_number", mode="before")
+    @classmethod
+    def get_dryer_no(cls, v, info):
+        # If the dryer object exists, return its machine_number
+        if info.data.get("dryer"):
+            return info.data["dryer"].machine_number
+        return v
 
     model_config = ConfigDict(from_attributes=True)
 
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
-    """High-level metrics for the Owner's Overview page."""
+    """High-level metrics for the Owner's Overview dashboard."""
     total_revenue: float
     revenue_trend: str
     utilization_rate: float
@@ -174,14 +190,14 @@ class DashboardStats(BaseModel):
     full_service: int
     total_weight: float
     
-    # Forecasting data for Chart.js/Recharts integration
+    # Data for Chart.js/Recharts peak-hour and revenue visualization
     forecast_data: List[Dict[str, Any]]
     optimization: Optional[Dict[str, str]] = None
 
 # --- SETTINGS SCHEMAS ---
 
 class ShopSettingsUpdate(BaseModel):
-    """Adjustable business parameters for the Shop Owner."""
+    """Adjustable business parameters for fee management."""
     rush_rate: Optional[float] = None
     delivery_fee: Optional[float] = None
     detergent_price: Optional[float] = None
