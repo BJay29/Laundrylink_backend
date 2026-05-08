@@ -19,7 +19,8 @@ class Shop(Base):
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
     machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
-    # Link to shop-specific configuration
+    
+    # One-to-one relationship with shop-specific configuration
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
 
     def to_dict(self):
@@ -33,23 +34,27 @@ class Shop(Base):
 class Setting(Base):
     """
     Global configuration for service pricing and operational unit costs.
-    Acts as the 'Single Source of Truth' for price calculations in the Booking Modal.
+    Acts as the 'Single Source of Truth' for price calculations in the Booking Modal
+    and for operational costs in the Prediction Service.
     """
     __tablename__ = "settings"
 
     id = Column(Integer, primary_key=True, index=True)
     
-    # Service Pricing (Base rates for different laundry types)
-    wash_only_price = Column(Float, default=40.0)
-    dry_only_price = Column(Float, default=30.0)
-    full_service_price = Column(Float, default=60.0)
+    # --- Service Pricing ---
+    # Updated to match specific service types in the Booking Modal
+    full_service_price = Column(Float, default=210.0)
+    regular_wash_price = Column(Float, default=65.0)
+    titan_wash_price = Column(Float, default=100.0)
+    comforter_price = Column(Float, default=150.0)
     
-    # Operating Costs (Unit rates used for AI/ML profit optimization)
+    # --- Operating Costs ---
+    # These unit rates are used by the Prediction Service for net profit calculations.
     electricity_rate = Column(Float, default=12.0)   # PHP per kWh
     water_rate = Column(Float, default=50.0)         # PHP per Cubic Meter (m3)
     detergent_cost_per_load = Column(Float, default=10.0) # Estimated PHP per cycle
     
-    # Operational Schedule
+    # --- Optimization Settings ---
     off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
@@ -57,9 +62,10 @@ class Setting(Base):
 
     def to_dict(self):
         return {
-            "wash_only_price": self.wash_only_price,
-            "dry_only_price": self.dry_only_price,
             "full_service_price": self.full_service_price,
+            "regular_wash_price": self.regular_wash_price,
+            "titan_wash_price": self.titan_wash_price,
+            "comforter_price": self.comforter_price,
             "electricity_rate": self.electricity_rate,
             "water_rate": self.water_rate,
             "detergent_cost_per_load": self.detergent_cost_per_load,
@@ -69,7 +75,7 @@ class Setting(Base):
 
 class User(Base):
     """
-    Identity management for Owners and Staff members with RBAC.
+    Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
     """
     __tablename__ = "users"
 
@@ -95,7 +101,8 @@ class User(Base):
 
 class Machine(Base):
     """
-    Hardware units tracking operational state and financial performance.
+    Hardware units (Washers/Dryers) tracking real-time status and financial performance.
+    Used by the Machine Hub and Service Terminal.
     """
     __tablename__ = "machines"
 
@@ -103,22 +110,22 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False)
     
-    # Real-time Telemetry for Monitoring Hub
+    # Real-time Telemetry state for the UI Monitoring Hub
     status = Column(String, default="Available") # 'Available', 'Busy', 'Maintenance'
     current_service_type = Column(String, default="None")
     current_price = Column(Float, default=0.0)
     
-    # Persistent countdown timer for frontend synchronization
+    # Persistent countdown timer for frontend synchronization across refreshes
     remaining_time = Column(Integer, default=0) 
     
-    # Operational Analytics
+    # Operational Analytics for Lifecycle tracking
     total_cycles = Column(Integer, default=0)
     
-    # Primary Financial Source for Dashboard/Terminal logic
+    # Financial metrics calculated by the Prediction Service
     net_profit_accumulated = Column(Float, default=0.0)
     profitability_rate = Column(Float, default=0.0) 
     
-    # Accumulated Utility Costs for Telemetry tracking
+    # Aggregated Utility Costs tracked per machine
     accumulated_electricity = Column(Float, default=0.0) 
     accumulated_water = Column(Float, default=0.0)       
     accumulated_detergent = Column(Float, default=0.0)   
@@ -126,7 +133,7 @@ class Machine(Base):
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
 
-    # Transaction history mapping using explicit foreign keys
+    # Transaction history relationships
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -139,7 +146,6 @@ class Machine(Base):
     )
 
     def to_dict(self):
-        # Calculate total overhead for the metrics object
         overhead = (self.accumulated_electricity or 0.0) + \
                    (self.accumulated_water or 0.0) + \
                    (self.accumulated_detergent or 0.0)
@@ -166,35 +172,40 @@ class Machine(Base):
 
 class Booking(Base):
     """
-    Laundry transactions linking customers to hardware units.
+    Laundry transactions linking customer service requests to hardware units.
+    Prices are applied from the 'Setting' model at the time of creation.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    # Service Configuration (Values pulled from Settings model during creation)
-    service_type = Column(String, nullable=False) # e.g., 'Full Service'
+    # Service Configuration
+    service_type = Column(String, nullable=False) # e.g., 'Regular Wash', 'Titan Wash', 'Full Service', 'Comforter'
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
+    # Pricing fields (pulled from current settings during frontend submission)
     total_price = Column(Float, nullable=False)
-    booking_mode = Column(String, nullable=False) 
+    booking_mode = Column(String, nullable=False) # e.g., 'Self-Service' or 'Full Service'
     
     service_duration = Column(Integer, default=45) 
     
+    # Additional fee triggers
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
     status = Column(String, default="Pending") 
     
+    # Machine assignment (Hardware links)
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
+    # Timestamps
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

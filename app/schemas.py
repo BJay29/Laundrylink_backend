@@ -29,33 +29,41 @@ class LoginResponse(BaseModel):
     user: UserResponse
 
 # --- SETTINGS SCHEMAS ---
-# These schemas handle the core logic for Service Pricing and Utility Rates.
+# UPDATED: Mapping keys to exact Service Types (Full Service, Regular Wash, Titan Wash, Comforter).
+# This provides the 'Single Source of Truth' for the Booking Modal pricing logic.
 
 class SettingBase(BaseModel):
-    """Base settings schema containing pricing and operational rates."""
-    wash_only_price: float = 40.0
-    dry_only_price: float = 30.0
-    full_service_price: float = 60.0
+    """
+    Base settings schema containing pricing and operational rates.
+    Renamed fields to match the specific service types in the frontend modal.
+    """
+    full_service_price: float = 210.0
+    regular_wash_price: float = 65.0
+    titan_wash_price: float = 100.0
+    comforter_price: float = 150.0
     
-    # Utility Unit Rates for AI/ML Cost Prediction
+    # Utility Unit Rates for AI/ML Cost Prediction and Profitability logic
     electricity_rate: float = 12.0  # PHP per kWh
     water_rate: float = 50.0        # PHP per Cubic Meter
     detergent_cost_per_load: float = 10.0
     
+    # Scheduling optimization window
     off_peak_hours: str = "8:00 AM - 11:00 AM"
 
 class SettingUpdate(BaseModel):
     """Schema for updating shop parameters from the Optimization Settings page."""
-    wash_only_price: Optional[float] = None
-    dry_only_price: Optional[float] = None
     full_service_price: Optional[float] = None
+    regular_wash_price: Optional[float] = None
+    titan_wash_price: Optional[float] = None
+    comforter_price: Optional[float] = None
+    
     electricity_rate: Optional[float] = None
     water_rate: Optional[float] = None
     detergent_cost_per_load: Optional[float] = None
     off_peak_hours: Optional[str] = None
 
 class SettingResponse(SettingBase):
-    """Response schema for the frontend to sync global pricing."""
+    """Response schema for the frontend to sync global pricing across all modals."""
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
 
@@ -125,10 +133,10 @@ class MachineNested(BaseModel):
 class BookingCreate(BaseModel):
     """
     Schema for creating a laundry transaction.
-    Values should be cross-referenced with the current SettingsResponse on the frontend.
+    Service types now align with: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'
     """
     customer_name: str
-    service_type: str
+    service_type: str  
     category: str
     weight: float
     loads: int
@@ -152,7 +160,7 @@ class BookingStatusUpdate(BaseModel):
     status: str
 
 class BookingResponse(BaseModel):
-    """Full response schema for the Service Terminal."""
+    """Full response schema for the Service Terminal UI."""
     id: int
     customer_name: str
     service_type: str
@@ -205,9 +213,12 @@ class DashboardStats(BaseModel):
     pending_bookings: int
     bookings_trend: str
     
-    wash_only: int
-    dry_only: int
+    # Updated Categorized counts to match new service types
     full_service: int
+    regular_wash: int
+    titan_wash: int
+    comforter: int
+    
     total_weight: float
     
     forecast_data: List[Dict[str, Any]]
