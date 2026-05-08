@@ -9,12 +9,9 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
     Creates a new booking, sets machines to 'Busy', and updates telemetry.
     Calculates profitability and increments accumulated costs for utility tracking.
-    
-    Captures 'booking_timestamp' to facilitate future AI Peak-Hour Forecasting.
     """
     
-    # NEW: Ensure the timestamp is timezone-aware for the forecasting engine
-    # Uses the provided timestamp from React or defaults to the current UTC time
+    # Ensure the timestamp is timezone-aware for the forecasting engine
     actual_booking_time = booking_data.booking_timestamp or datetime.now(timezone.utc)
 
     new_booking = Booking(
@@ -32,22 +29,15 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
-        # Integrity: Syncing both fields ensures accurate historical data
         booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)
     )
 
     # Identify assigned hardware IDs for telemetry and resource updates
-    assigned_ids = [
-        m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
-        if m_id is not None
-    ]
+    assigned_ids = [m_id for m_id in [booking_data.washer_id, booking_data.dryer_id] if m_id is not None]
 
     for m_id in assigned_ids:
-        machine = db.query(Machine).filter(
-            Machine.id == m_id,
-            Machine.shop_id == shop_id
-        ).first()
+        machine = db.query(Machine).filter(Machine.id == m_id, Machine.shop_id == shop_id).first()
 
         if not machine:
             raise HTTPException(
@@ -73,27 +63,22 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         machine.current_price = booking_data.total_price
         machine.total_cycles += 1
 
-        # Calculate and set the remaining time for the frontend countdown
+        # Set machine runtime for frontend countdowns
         machine.remaining_time = PredictionService.get_machine_runtime(
             machine.machine_type, booking_data.service_type
         )
 
         # --- 2. RESOURCE CONSUMPTION TRACKING ---
-        # Fetches utility overhead metrics based on machine hardware specs
         overhead_data = PredictionService.get_overhead(machine.machine_type)
-        
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
 
         # --- 3. DYNAMIC PROFITABILITY CALCULATION ---
-        # Deducts overhead from gross price to track net financial performance
         overhead_total = overhead_data.get("total_overhead", 0.0)
         net_profit = booking_data.total_price - overhead_total
-        
         machine.net_profit_accumulated += net_profit
 
-        # Calculate Margin percentage for Dashboard visual indicators
         if booking_data.total_price > 0:
             margin = (net_profit / booking_data.total_price) * 100
             machine.profitability_rate = max(0.0, min(100.0, margin))
@@ -104,20 +89,16 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.add(new_booking)
         db.commit()
 
-        # Re-fetch with joinedload to return full hardware details to the React state
+        # FIXED: Re-fetch with joinedload ensures the frontend receives washer/dryer labels immediately
         return (
             db.query(Booking)
-            .options(
-                joinedload(Booking.washer),
-                joinedload(Booking.dryer)
-            )
+            .options(joinedload(Booking.washer), joinedload(Booking.dryer))
             .filter(Booking.id == new_booking.id)
             .first()
         )
 
     except Exception as e:
         db.rollback()
-        print(f"CRITICAL TRANSACTION ERROR: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database Transactional Error: {str(e)}"
@@ -127,19 +108,15 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized laundry tasks for the Service Terminal. 
-    Uses joinedload to provide machine numbers (W1, D2) in a single request.
+    Uses joinedload to prevent 'WAITING' labels in the UI.
     """
     return (
         db.query(Booking)
-        .options(
-            joinedload(Booking.washer),
-            joinedload(Booking.dryer)
-        )
+        .options(joinedload(Booking.washer), joinedload(Booking.dryer))
         .filter(
             Booking.shop_id == shop_id,
             Booking.status.notin_(["Claimed", "Cancelled"])
         )
-        # Order by the latest booking time for better queue visibility
         .order_by(Booking.booking_timestamp.desc()) 
         .all()
     )
@@ -149,25 +126,16 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
     """
     Manages the lifecycle of a booking and releases hardware resources upon completion.
     """
-    booking = db.query(Booking).filter(
-        Booking.id == booking_id,
-        Booking.shop_id == shop_id
-    ).first()
+    booking = db.query(Booking).filter(Booking.id == booking_id, Booking.shop_id == shop_id).first()
 
     if not booking:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Transaction record not found."
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction record not found.")
 
     booking.status = new_status
 
-    # Reset hardware state if the service is finished or voided
+    # Reset hardware state if the service is finished
     if new_status in ["Ready", "Claimed", "Cancelled"]:
-        assigned_ids = [
-            m_id for m_id in [booking.washer_id, booking.dryer_id]
-            if m_id is not None
-        ]
+        assigned_ids = [m_id for m_id in [booking.washer_id, booking.dryer_id] if m_id is not None]
         
         if assigned_ids:
             machines = db.query(Machine).filter(
@@ -176,7 +144,6 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             ).all()
             
             for machine in machines:
-                # Do not set to Available if the machine is manually flagged for repair
                 if machine.status != "Maintenance":
                     machine.status = "Available"
                     machine.remaining_time = 0
@@ -185,12 +152,10 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     try:
         db.commit()
+        # FIXED: Returns joined data so Terminal UI updates correctly after status change
         return (
             db.query(Booking)
-            .options(
-                joinedload(Booking.washer),
-                joinedload(Booking.dryer)
-            )
+            .options(joinedload(Booking.washer), joinedload(Booking.dryer))
             .filter(Booking.id == booking_id)
             .first()
         )

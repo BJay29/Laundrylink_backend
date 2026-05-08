@@ -128,7 +128,7 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customers to hardware units.
-    Updated with booking_timestamp to facilitate AI Peak-Hour Forecasting.
+    Updated with ondelete="SET NULL" to prevent hardware deletion errors.
     """
     __tablename__ = "bookings"
 
@@ -142,31 +142,29 @@ class Booking(Base):
     loads = Column(Integer, default=1)
     
     total_price = Column(Float, nullable=False)
-    booking_mode = Column(String, nullable=False) # e.g., 'smart' or 'manual'
+    booking_mode = Column(String, nullable=False) 
     
-    # Estimated duration in minutes
     service_duration = Column(Integer, default=45) 
     
-    # Optional modifiers
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
     status = Column(String, default="Pending") 
     
-    # Foreign Key Assignments for Washers and Dryers
-    washer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
-    dryer_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
+    # FIXED: Added ondelete="SET NULL" to allow machines to be deleted even if they have booking history
+    washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
+    dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
-    # AI Prediction Metrics: Captures exact time for forecasting models
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Relationships with joined loading for frontend terminal performance
+    # Relationships
     shop = relationship("Shop", back_populates="bookings")
     
+    # lazy="joined" ensures machine details are loaded in one query for the Service Terminal
     washer = relationship(
         "Machine", 
         foreign_keys=[washer_id], 
@@ -182,8 +180,7 @@ class Booking(Base):
 
     def to_dict(self):
         """
-        Custom serialization to return readable machine labels (W1/D1) 
-        and ISO formatted timestamps to the React Service Terminal.
+        Serialization optimized for the React Terminal to prevent "WAITING" labels.
         """
         return {
             "id": self.id,
@@ -201,11 +198,9 @@ class Booking(Base):
             "add_delivery": self.add_delivery,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
-            # Provides labels for the UI Table (e.g., "Washer #1")
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,
-            # Ensure timestamps are ISO strings for JavaScript Date parsing
             "booking_timestamp": self.booking_timestamp.isoformat() if self.booking_timestamp else None,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
