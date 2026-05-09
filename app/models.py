@@ -42,7 +42,7 @@ class Setting(Base):
     
     # --- Service Pricing ---
     # Standardized naming to ensure compatibility with frontend and seeding scripts.
-    # Note: 'regular_wash_price' replaces the invalid 'wash_only_price' seen in logs.
+    # Stored as Float to allow for centavo/decimal precision.
     full_service_price = Column(Float, default=210.0)
     regular_wash_price = Column(Float, default=65.0) 
     titan_wash_price = Column(Float, default=100.0)
@@ -62,6 +62,7 @@ class Setting(Base):
 
     def to_dict(self):
         return {
+            "id": self.id,
             "full_service_price": self.full_service_price,
             "regular_wash_price": self.regular_wash_price,
             "titan_wash_price": self.titan_wash_price,
@@ -132,7 +133,7 @@ class Machine(Base):
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
 
-    # Transaction history relationships
+    # Transaction history relationships with explicit foreign key mapping
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -145,6 +146,7 @@ class Machine(Base):
     )
 
     def to_dict(self):
+        # Calculate total overhead dynamically for the Metrics UI
         overhead = (self.accumulated_electricity or 0.0) + \
                    (self.accumulated_water or 0.0) + \
                    (self.accumulated_detergent or 0.0)
@@ -184,30 +186,30 @@ class Booking(Base):
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
-    # Pricing fields (must be captured from latest 'Setting' values at time of booking)
+    # Financial fields captured from 'Setting' at the time of creation
     total_price = Column(Float, nullable=False)
     booking_mode = Column(String, nullable=False) # 'Self-Service' or 'Full Service'
     
     service_duration = Column(Integer, default=45) 
     
-    # Additional fee triggers
+    # Boolean flags for additional service costs
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
     status = Column(String, default="Pending") 
     
-    # Machine assignment (Hardware links)
+    # Hardware mapping: Set to NULL if a machine is removed to prevent data loss
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
-    # Timestamps
+    # Timestamps for tracking and analytics
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Relationships
+    # Relationships with eager loading ('joined') for efficient frontend fetching
     shop = relationship("Shop", back_populates="bookings")
     
     washer = relationship(
@@ -240,6 +242,7 @@ class Booking(Base):
             "add_delivery": self.add_delivery,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
+            # Provides machine_number directly to the frontend table
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,

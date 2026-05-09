@@ -55,7 +55,10 @@ class SettingBase(BaseModel):
     off_peak_hours: str = "8:00 AM - 11:00 AM"
 
 class SettingUpdate(BaseModel):
-    """Schema for updating shop parameters from the Optimization Settings page."""
+    """
+    Schema for updating shop parameters from the Optimization Settings page.
+    Modified to allow partial updates for real-time price syncing.
+    """
     full_service_price: Optional[float] = None
     regular_wash_price: Optional[float] = None
     titan_wash_price: Optional[float] = None
@@ -184,9 +187,11 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
     
+    # Relationships from models.py
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
 
+    # Top-level fields used for scannability in the React Table/List
     washer_number: Optional[int] = None
     dryer_number: Optional[int] = None
 
@@ -195,14 +200,16 @@ class BookingResponse(BaseModel):
     @classmethod
     def get_washer_no(cls, v, info):
         if info.data.get("washer"):
-            return info.data["washer"].machine_number
+            # Accessing the machine_number attribute from the nested washer object
+            return info.data["washer"].machine_number if hasattr(info.data["washer"], 'machine_number') else None
         return v
 
     @field_validator("dryer_number", mode="before")
     @classmethod
     def get_dryer_no(cls, v, info):
         if info.data.get("dryer"):
-            return info.data["dryer"].machine_number
+            # Accessing the machine_number attribute from the nested dryer object
+            return info.data["dryer"].machine_number if hasattr(info.data["dryer"], 'machine_number') else None
         return v
 
     model_config = ConfigDict(from_attributes=True)

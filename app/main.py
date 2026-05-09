@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
-# Import the new settings_routes
 from app.routes import auth_routes, booking_routes, machine_routes, setting_routes
 from sqlalchemy.orm import Session
 
@@ -12,16 +11,19 @@ from sqlalchemy.orm import Session
 def seed_settings(db: Session):
     """
     Ensures that default optimization settings exist for shop_id=1.
-    This prevents the UI from crashing during the first load.
+    Prevents UI crashes by initializing pricing and operational unit rates.
     """
     existing_settings = db.query(models.Setting).filter(models.Setting.shop_id == 1).first()
     if not existing_settings:
         print("No settings found for Shop 1. Initializing default configuration...")
+        
+        # Updated to match the columns defined in models.py and schemas.py
         default_settings = models.Setting(
             shop_id=1,
-            wash_only_price=40.0,
-            dry_only_price=30.0,
-            full_service_price=60.0,
+            full_service_price=210.0,
+            regular_wash_price=65.0,  # Replaces old 'wash_only_price'
+            titan_wash_price=100.0,   # Added to match new service categories
+            comforter_price=150.0,    # Added to match new service categories
             electricity_rate=12.0,
             water_rate=50.0,
             detergent_cost_per_load=10.0,
@@ -33,8 +35,8 @@ def seed_settings(db: Session):
 
 def seed_machines():
     """
-    1. Checks if the machines table is empty and populates it with shop_id=1.
-    2. If machines exist but shop_id is NULL, it automatically updates them to 1.
+    1. Verifies existing hardware and updates any NULL shop_ids to 1.
+    2. Populates an empty machine table with 6 Washers and 6 Dryers.
     """
     db = SessionLocal()
     try:
@@ -95,12 +97,16 @@ def seed_machines():
 # 1. Lifespan Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Manages the application startup and shutdown events.
+    Handles table syncing and initial data seeding.
+    """
     print("========================================")
     print("LaundryLink Backend started successfully")
     print("Architecture: Clean Routes/Controllers Split")
     
     try:
-        # Syncing Tables (Creates the 'settings' table automatically)
+        # Syncing Tables
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Tables Synced Successfully!")
         
@@ -121,11 +127,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LaundryLink API",
     description="Backend API for Laundry Income Optimization System",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan
 )
 
 # 3. CORS Configuration
+# Ensures the frontend can communicate with the backend across different ports
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -142,11 +149,12 @@ app.add_middleware(
 app.include_router(auth_routes.router)
 app.include_router(booking_routes.router)
 app.include_router(machine_routes.router)
-app.include_router(setting_routes.router) # <--- Added the settings router here
+app.include_router(setting_routes.router)
 
 # 5. Health Check
 @app.get("/")
 def read_root():
+    """Returns the current operational status of the system."""
     return {
         "status": "Online",
         "system": "LaundryLink Optimization Engine",

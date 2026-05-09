@@ -50,6 +50,7 @@ def update_settings(db: Session, shop_id: int, settings_data: schemas.SettingUpd
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
     # Extract only the data that was sent in the request (partial updates)
+    # Using model_dump(exclude_unset=True) ensures we don't overwrite values with None.
     update_data = settings_data.model_dump(exclude_unset=True)
 
     if not db_settings:
@@ -59,7 +60,8 @@ def update_settings(db: Session, shop_id: int, settings_data: schemas.SettingUpd
     else:
         # Update existing record fields dynamically using setattr
         for key, value in update_data.items():
-            setattr(db_settings, key, value)
+            if hasattr(db_settings, key):
+                setattr(db_settings, key, value)
     
     db.commit()
     db.refresh(db_settings)
@@ -75,21 +77,24 @@ def reset_to_system_defaults(db: Session, shop_id: int):
     if db_settings:
         # Overwrite all custom values with system-wide defaults
         for key, value in SYSTEM_DEFAULTS.items():
-            setattr(db_settings, key, value)
+            if hasattr(db_settings, key):
+                setattr(db_settings, key, value)
         db.commit()
         db.refresh(db_settings)
         return db_settings
     
-    # If no settings existed at all, just initialize them
+    # If no settings existed at all, just initialize them using the helper
     return get_settings(db, shop_id)
 
 def get_pricing_for_booking(db: Session, shop_id: int):
     """
     Helper function specifically for the Booking Modal.
     Returns a mapped dictionary where keys match the specific 'service_type' 
-    labels used in the frontend booking logic.
+    labels used in the React frontend booking logic.
     """
     settings = get_settings(db, shop_id)
+    
+    # Ensure these keys exactly match the strings used in your Frontend 'service_type' dropdown
     return {
         "Full Service": settings.full_service_price,
         "Regular Wash": settings.regular_wash_price,

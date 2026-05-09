@@ -18,8 +18,8 @@ def get_system_defaults():
     Used by the frontend to preview values before saving to the database.
     """
     try:
-        # Fetches the updated SYSTEM_DEFAULTS constant from the controller
-        # This now uses 'regular_wash_price' instead of the old 'wash_only_price'
+        # Fetches the updated SYSTEM_DEFAULTS constant from the controller.
+        # This confirms the transition from 'wash_only_price' to 'regular_wash_price'.
         return settings_controller.get_factory_defaults()
     except Exception as e:
         raise HTTPException(
@@ -36,6 +36,7 @@ def get_shop_settings(shop_id: int, db: Session = Depends(get_db)):
     """
     settings = settings_controller.get_settings(db, shop_id)
     if not settings:
+        # Fallback error if the shop_id provided does not exist in the system.
         raise HTTPException(
             status_code=404, 
             detail=f"Settings for Shop ID {shop_id} not found"
@@ -53,6 +54,7 @@ def update_shop_settings(
     Propagates changes immediately to the Booking Modal using the updated service keys.
     """
     try:
+        # Controller processes the partial update and returns the new state.
         updated_settings = settings_controller.update_settings(db, shop_id, settings_update)
         return updated_settings
     except Exception as e:
@@ -68,6 +70,7 @@ def reset_shop_settings(shop_id: int, db: Session = Depends(get_db)):
     Restores original prices for all specific service types, clearing custom pricing.
     """
     try:
+        # This operation is destructive for custom prices but essential for system recovery.
         return settings_controller.reset_to_system_defaults(db, shop_id)
     except Exception as e:
         raise HTTPException(
