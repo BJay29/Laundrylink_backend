@@ -6,24 +6,27 @@ from app import models
 from app.routes import auth_routes, booking_routes, machine_routes, setting_routes
 from sqlalchemy.orm import Session
 
-# --- UPDATED SEEDING & AUTO-FIX LOGIC ---
+# --- UPDATED SEEDING & DATA INTEGRITY LOGIC ---
 
 def seed_settings(db: Session):
     """
     Ensures that default optimization settings exist for shop_id=1.
-    Prevents UI crashes by initializing pricing and operational unit rates.
+    This runs ONLY if the settings table is empty for this shop.
+    Initializes pricing based on the standard college project requirements.
     """
     existing_settings = db.query(models.Setting).filter(models.Setting.shop_id == 1).first()
+    
     if not existing_settings:
-        print("No settings found for Shop 1. Initializing default configuration...")
+        print("Initial boot detected: No settings found for Shop 1. Seeding factory defaults...")
         
-        # Updated to match the columns defined in models.py and schemas.py
+        # Default configuration used only for first-time setup.
+        # Once seeded, the system will prioritize user updates in the DB.
         default_settings = models.Setting(
             shop_id=1,
             full_service_price=210.0,
-            regular_wash_price=65.0,  # Replaces old 'wash_only_price'
-            titan_wash_price=100.0,   # Added to match new service categories
-            comforter_price=150.0,    # Added to match new service categories
+            regular_wash_price=65.0,  
+            titan_wash_price=100.0,   
+            comforter_price=150.0,    
             electricity_rate=12.0,
             water_rate=50.0,
             detergent_cost_per_load=10.0,
@@ -31,32 +34,34 @@ def seed_settings(db: Session):
         )
         db.add(default_settings)
         db.commit()
-        print("Default shop settings initialized successfully.")
+        print("Default shop settings successfully seeded.")
+    else:
+        print("Shop settings already initialized. Skipping seed to preserve user modifications.")
 
 def seed_machines():
     """
-    1. Verifies existing hardware and updates any NULL shop_ids to 1.
+    1. Verifies existing hardware and updates any legacy NULL shop_ids to 1.
     2. Populates an empty machine table with 6 Washers and 6 Dryers.
     """
     db = SessionLocal()
     try:
-        # Seed/Fix Settings first as machines depend on the shop structure
+        # Initialize Settings first to ensure the shop structure exists
         seed_settings(db)
 
-        # Step 1: Check for machines with NULL shop_id and fix them
+        # Fix legacy data: Convert machines with NULL shop_id to default shop_id=1
         null_machines = db.query(models.Machine).filter(models.Machine.shop_id == None).all()
         if null_machines:
-            print(f"Found {len(null_machines)} machines with NULL shop_id. Fixing now...")
+            print(f"Repair Mode: Found {len(null_machines)} machines with NULL shop_id. Fixing now...")
             for m in null_machines:
                 m.shop_id = 1
             db.commit()
-            print("Existing machines updated to shop_id=1 successfully.")
+            print("Legacy hardware records successfully mapped to shop_id=1.")
 
-        # Step 2: Initial seeding for empty hardware table
+        # Initial hardware seeding for fresh database installations
         machine_count = db.query(models.Machine).count()
         
         if machine_count == 0:
-            print("No machines found. Initializing seed data with shop_id=1...")
+            print("Hardware Hub empty. Seeding 12 machine units with shop_id=1...")
             
             machines_to_add = []
             
@@ -84,77 +89,82 @@ def seed_machines():
             
             db.add_all(machines_to_add)
             db.commit()
-            print(f"Successfully seeded {len(machines_to_add)} machines!")
+            print(f"Successfully deployed {len(machines_to_add)} hardware units to Shop 1.")
         else:
-            print(f"Machines already exist ({machine_count} units). Seed skipped.")
+            print(f"Machine Hub active: {machine_count} units detected. Seed skipped.")
             
     except Exception as e:
-        print(f"Seeding/Fixing Error: {e}")
+        print(f"Database Initialization/Seeding Error: {e}")
         db.rollback()
     finally:
         db.close()
 
-# 1. Lifespan Manager
+# --- LIFESPAN MANAGER ---
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manages the application startup and shutdown events.
-    Handles table syncing and initial data seeding.
+    Handles backend startup and shutdown sequences.
+    Ensures PostgreSQL table synchronization and data seeding on boot.
     """
-    print("========================================")
-    print("LaundryLink Backend started successfully")
-    print("Architecture: Clean Routes/Controllers Split")
+    print("====================================================")
+    print("LaundryLink Backend: Initialization Sequence Started")
+    print("Target Environment: Naga College Foundation (CCS)")
     
     try:
-        # Syncing Tables
+        # Syncing SQLAlchemy models with the database schema
         models.Base.metadata.create_all(bind=engine)
-        print("PostgreSQL Tables Synced Successfully!")
+        print("PostgreSQL Schema Synchronization: COMPLETE")
         
-        # Auto-fix and Auto-seed Data
+        # Trigger data seeding and hardware integrity checks
         seed_machines()
         
     except Exception as e:
-        print(f"Database Initialization Error: {e}")
+        print(f"Critical System Boot Error: {e}")
         
-    print("System Mode: Profit Optimization Ready")
-    print("========================================")
+    print("Status: Profit Optimization Engine Online")
+    print("====================================================")
     
     yield  
     
-    print("Shutting down LaundryLink Backend...")
+    print("LaundryLink Backend: Initiating Graceful Shutdown...")
 
-# 2. FastAPI Instance
+# --- FASTAPI INSTANCE ---
+
 app = FastAPI(
     title="LaundryLink API",
-    description="Backend API for Laundry Income Optimization System",
-    version="1.1.0",
+    description="Intelligent Backend for Laundry Income Optimization & Hardware Management",
+    version="1.2.0",
     lifespan=lifespan
 )
 
-# 3. CORS Configuration
-# Ensures the frontend can communicate with the backend across different ports
+# --- CORS MIDDLEWARE ---
+# Allows cross-origin requests from the React/Vite development server
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:3000",
+        "http://localhost:5173", # Vite Default
+        "http://localhost:5174", # Vite Alternative
+        "http://localhost:3000", # Traditional React
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 4. Include Routes
+# --- ROUTER REGISTRATION ---
+
 app.include_router(auth_routes.router)
 app.include_router(booking_routes.router)
 app.include_router(machine_routes.router)
 app.include_router(setting_routes.router)
 
-# 5. Health Check
+# --- ROOT HEALTH CHECK ---
+
 @app.get("/")
 def read_root():
-    """Returns the current operational status of the system."""
+    """Returns the operational status and active modules of the backend."""
     return {
         "status": "Online",
         "system": "LaundryLink Optimization Engine",

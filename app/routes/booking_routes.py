@@ -21,9 +21,10 @@ def create_new_booking(
     Triggers machine state updates to 'Busy' and pre-loads machine numbers 
     to prevent "WAITING" labels in the frontend terminal.
     """
-    # Hardcoded for development at Naga College Foundation.
+    # Hardcoded shop ID for college project development context.
     shop_id = 1 
     
+    # Calls the controller to handle business logic and database persistence.
     return booking_controller.create_booking(
         db=db, 
         booking_data=booking_in, 
@@ -57,6 +58,7 @@ def update_booking_status(
     new_status = status_update.status
     
     # Strict validation of the operational state machine
+    # These statuses must match the logic handled in booking_controller.py
     valid_statuses = ["Pending", "In Progress", "Ready", "Claimed", "Cancelled"]
     if new_status not in valid_statuses:
         raise HTTPException(
@@ -81,5 +83,5 @@ def read_booking_history(
     and Peak-Hour forecasting.
     """
     shop_id = 1
-    # Ensure this function exists in your booking_controller.py
+    # Note: Ensure the 'get_booking_history' function is defined in booking_controller.py
     return booking_controller.get_booking_history(db=db, shop_id=shop_id)

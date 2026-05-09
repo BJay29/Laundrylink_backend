@@ -1,9 +1,13 @@
 from sqlalchemy.orm import Session
 from .. import models, schemas
+import logging
 
-# Define "Factory Defaults" as a constant to ensure they are always recoverable.
-# These values match the updated specific service types for the laundry system.
-# The key 'regular_wash_price' replaces 'wash_only_price' to fix the seeding error.
+# Set up logging to track if the system is falling back to defaults
+logger = logging.getLogger(__name__)
+
+# --- SYSTEM CONSTANTS ---
+# These are strictly "Factory Defaults" used ONLY for new shop initialization 
+# or manual resets. They should NOT be used for active calculations.
 SYSTEM_DEFAULTS = {
     "full_service_price": 210.0,
     "regular_wash_price": 65.0,
@@ -18,13 +22,13 @@ SYSTEM_DEFAULTS = {
 def get_settings(db: Session, shop_id: int):
     """
     Retrieves the optimization settings for a specific shop.
-    If no settings exist yet, it creates an entry using SYSTEM_DEFAULTS.
+    If no settings exist in the database, it initializes them using SYSTEM_DEFAULTS.
     """
     settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
     if not settings:
-        # Create default settings using the SYSTEM_DEFAULTS constant if row is missing.
-        # This uses dictionary unpacking (**) to map keys to the Setting model.
+        logger.info(f"No settings found for shop_id {shop_id}. Initializing with defaults.")
+        # Create a new record in the database so the user can modify it later.
         settings = models.Setting(
             shop_id=shop_id,
             **SYSTEM_DEFAULTS
@@ -38,44 +42,42 @@ def get_settings(db: Session, shop_id: int):
 def get_factory_defaults():
     """
     Returns the hardcoded system default values.
-    Used by the frontend to show the 'original' prices before the user saves changes.
+    Provides the frontend with the 'Standard' reference prices.
     """
     return SYSTEM_DEFAULTS
 
 def update_settings(db: Session, shop_id: int, settings_data: schemas.SettingUpdate):
     """
-    Updates the business parameters and operational costs in the database.
-    These changes will immediately reflect in the Booking Modal and Profit Forecasts.
+    Updates the business parameters and pricing in the database.
+    This change triggers an immediate update for the Booking Modal and Analytics.
     """
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
-    # Extract only the data that was sent in the request (partial updates)
-    # Using model_dump(exclude_unset=True) ensures we don't overwrite values with None.
+    # Exclude unset values to allow partial updates (e.g., only updating one price)
     update_data = settings_data.model_dump(exclude_unset=True)
 
     if not db_settings:
-        # Fallback: If settings row doesn't exist, create it with provided data
+        # Create new record if it doesn't exist
         db_settings = models.Setting(shop_id=shop_id, **update_data)
         db.add(db_settings)
     else:
-        # Update existing record fields dynamically using setattr
+        # Dynamically update existing fields
         for key, value in update_data.items():
             if hasattr(db_settings, key):
                 setattr(db_settings, key, value)
     
     db.commit()
     db.refresh(db_settings)
+    logger.info(f"Settings successfully updated for shop_id {shop_id}.")
     return db_settings
 
 def reset_to_system_defaults(db: Session, shop_id: int):
     """
-    Reverts the shop's database record back to the original SYSTEM_DEFAULTS.
-    This effectively clears any custom pricing set by the owner.
+    Wipes custom pricing and reverts the shop's DB record to SYSTEM_DEFAULTS.
     """
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
     if db_settings:
-        # Overwrite all custom values with system-wide defaults
         for key, value in SYSTEM_DEFAULTS.items():
             if hasattr(db_settings, key):
                 setattr(db_settings, key, value)
@@ -83,22 +85,25 @@ def reset_to_system_defaults(db: Session, shop_id: int):
         db.refresh(db_settings)
         return db_settings
     
-    # If no settings existed at all, just initialize them using the helper
     return get_settings(db, shop_id)
 
 def get_pricing_for_booking(db: Session, shop_id: int):
     """
-    Helper function specifically for the Booking Modal.
-    Returns a mapped dictionary where keys match the specific 'service_type' 
-    labels used in the React frontend booking logic.
+    Crucial helper for the Booking Modal. 
+    Maps database column values to the specific 'service_type' keys 
+    expected by the React frontend logic.
     """
+    # Fetch the LATEST settings directly from the DB
     settings = get_settings(db, shop_id)
     
-    # Ensure these keys exactly match the strings used in your Frontend 'service_type' dropdown
+    # Verification log to ensure the values fetched are correct
+    logger.info(f"Fetching Live Pricing for Shop {shop_id}: Full Service = {settings.full_service_price}")
+
+    # The keys here must match the 'service_type' selection in the Frontend
     return {
-        "Full Service": settings.full_service_price,
-        "Regular Wash": settings.regular_wash_price,
-        "Titan Wash": settings.titan_wash_price,
-        "Comforter": settings.comforter_price,
-        "detergent_fee": settings.detergent_cost_per_load
+        "Full Service": float(settings.full_service_price),
+        "Regular Wash": float(settings.regular_wash_price),
+        "Titan Wash": float(settings.titan_wash_price),
+        "Comforter": float(settings.comforter_price),
+        "detergent_fee": float(settings.detergent_cost_per_load)
     }
