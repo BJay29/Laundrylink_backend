@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
-from app.routes import auth_routes, booking_routes, machine_routes, setting_routes
+# Added analytics_routes to the imports
+from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes
 from sqlalchemy.orm import Session
 
 # --- UPDATED SEEDING & DATA INTEGRITY LOGIC ---
@@ -159,6 +160,7 @@ app.include_router(auth_routes.router)
 app.include_router(booking_routes.router)
 app.include_router(machine_routes.router)
 app.include_router(setting_routes.router)
+app.include_router(analytics_routes.router)
 
 # --- ROOT HEALTH CHECK ---
 
@@ -169,6 +171,6 @@ def read_root():
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
         "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "Bookings", "Machines", "Settings"],
+        "modules_active": ["Auth", "Bookings", "Machines", "Settings", "Analytics"],
         "environment": "Development Sprint"
     }
