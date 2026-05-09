@@ -42,7 +42,6 @@ class Setting(Base):
     
     # --- Service Pricing ---
     # Standardized naming to ensure compatibility with frontend and seeding scripts.
-    # Stored as Float to allow for centavo/decimal precision.
     full_service_price = Column(Float, default=210.0)
     regular_wash_price = Column(Float, default=65.0) 
     titan_wash_price = Column(Float, default=100.0)
@@ -133,7 +132,7 @@ class Machine(Base):
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
 
-    # Transaction history relationships with explicit foreign key mapping
+    # Transaction history relationships
     washer_bookings = relationship(
         "Booking", 
         foreign_keys="[Booking.washer_id]", 
@@ -146,7 +145,6 @@ class Machine(Base):
     )
 
     def to_dict(self):
-        # Calculate total overhead dynamically for the Metrics UI
         overhead = (self.accumulated_electricity or 0.0) + \
                    (self.accumulated_water or 0.0) + \
                    (self.accumulated_detergent or 0.0)
@@ -174,19 +172,23 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customer service requests to hardware units.
+    This table provides the source data for actual service volume and weight analytics.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    # Service Configuration
-    service_type = Column(String, nullable=False) # e.g., 'Regular Wash', 'Full Service'
+    # Service Configuration: Values must strictly match the following for dashboard filtering:
+    # 'Full Service', 'Titan Wash', 'Regular Wash', 'Comforter'
+    service_type = Column(String, nullable=False) 
     category = Column(String, nullable=False)
+    
+    # Used for calculating the 'Total Load' metric in the dashboard breakdown
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
-    # Financial fields captured from 'Setting' at the time of creation
+    # Financial fields captured at the time of creation
     total_price = Column(Float, nullable=False)
     booking_mode = Column(String, nullable=False) # 'Self-Service' or 'Full Service'
     
@@ -199,17 +201,17 @@ class Booking(Base):
 
     status = Column(String, default="Pending") 
     
-    # Hardware mapping: Set to NULL if a machine is removed to prevent data loss
+    # Hardware mapping
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
-    # Timestamps for tracking and analytics
+    # Timestamps for tracking and historical volume analytics
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Relationships with eager loading ('joined') for efficient frontend fetching
+    # Relationships
     shop = relationship("Shop", back_populates="bookings")
     
     washer = relationship(
@@ -242,7 +244,6 @@ class Booking(Base):
             "add_delivery": self.add_delivery,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
-            # Provides machine_number directly to the frontend table
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,
