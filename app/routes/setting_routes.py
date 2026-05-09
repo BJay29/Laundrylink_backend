@@ -19,6 +19,7 @@ def get_system_defaults():
     """
     try:
         # Fetches the updated SYSTEM_DEFAULTS constant from the controller
+        # This now uses 'regular_wash_price' instead of the old 'wash_only_price'
         return settings_controller.get_factory_defaults()
     except Exception as e:
         raise HTTPException(
@@ -49,7 +50,7 @@ def update_shop_settings(
 ):
     """
     Update business parameters such as service prices and utility rates.
-    Propagates changes immediately to the Booking Modal using the new service keys.
+    Propagates changes immediately to the Booking Modal using the updated service keys.
     """
     try:
         updated_settings = settings_controller.update_settings(db, shop_id, settings_update)
@@ -64,7 +65,7 @@ def update_shop_settings(
 def reset_shop_settings(shop_id: int, db: Session = Depends(get_db)):
     """
     Hard reset endpoint to revert database entries back to factory defaults.
-    Restores original prices for all specific service types.
+    Restores original prices for all specific service types, clearing custom pricing.
     """
     try:
         return settings_controller.reset_to_system_defaults(db, shop_id)

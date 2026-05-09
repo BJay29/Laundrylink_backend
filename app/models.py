@@ -34,17 +34,17 @@ class Shop(Base):
 class Setting(Base):
     """
     Global configuration for service pricing and operational unit costs.
-    Acts as the 'Single Source of Truth' for price calculations in the Booking Modal
-    and for operational costs in the Prediction Service.
+    Acts as the 'Single Source of Truth' for price calculations in the Booking Modal.
     """
     __tablename__ = "settings"
 
     id = Column(Integer, primary_key=True, index=True)
     
     # --- Service Pricing ---
-    # Updated to match specific service types in the Booking Modal
+    # Standardized naming to ensure compatibility with frontend and seeding scripts.
+    # Note: 'regular_wash_price' replaces the invalid 'wash_only_price' seen in logs.
     full_service_price = Column(Float, default=210.0)
-    regular_wash_price = Column(Float, default=65.0)
+    regular_wash_price = Column(Float, default=65.0) 
     titan_wash_price = Column(Float, default=100.0)
     comforter_price = Column(Float, default=150.0)
     
@@ -102,7 +102,6 @@ class User(Base):
 class Machine(Base):
     """
     Hardware units (Washers/Dryers) tracking real-time status and financial performance.
-    Used by the Machine Hub and Service Terminal.
     """
     __tablename__ = "machines"
 
@@ -173,7 +172,6 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customer service requests to hardware units.
-    Prices are applied from the 'Setting' model at the time of creation.
     """
     __tablename__ = "bookings"
 
@@ -181,14 +179,14 @@ class Booking(Base):
     customer_name = Column(String, nullable=False)
     
     # Service Configuration
-    service_type = Column(String, nullable=False) # e.g., 'Regular Wash', 'Titan Wash', 'Full Service', 'Comforter'
+    service_type = Column(String, nullable=False) # e.g., 'Regular Wash', 'Full Service'
     category = Column(String, nullable=False)
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
-    # Pricing fields (pulled from current settings during frontend submission)
+    # Pricing fields (must be captured from latest 'Setting' values at time of booking)
     total_price = Column(Float, nullable=False)
-    booking_mode = Column(String, nullable=False) # e.g., 'Self-Service' or 'Full Service'
+    booking_mode = Column(String, nullable=False) # 'Self-Service' or 'Full Service'
     
     service_duration = Column(Integer, default=45) 
     

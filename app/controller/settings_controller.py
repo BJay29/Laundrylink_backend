@@ -3,6 +3,7 @@ from .. import models, schemas
 
 # Define "Factory Defaults" as a constant to ensure they are always recoverable.
 # These values match the updated specific service types for the laundry system.
+# The key 'regular_wash_price' replaces 'wash_only_price' to fix the seeding error.
 SYSTEM_DEFAULTS = {
     "full_service_price": 210.0,
     "regular_wash_price": 65.0,
@@ -22,7 +23,8 @@ def get_settings(db: Session, shop_id: int):
     settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
     if not settings:
-        # Create default settings using the SYSTEM_DEFAULTS constant if row is missing
+        # Create default settings using the SYSTEM_DEFAULTS constant if row is missing.
+        # This uses dictionary unpacking (**) to map keys to the Setting model.
         settings = models.Setting(
             shop_id=shop_id,
             **SYSTEM_DEFAULTS

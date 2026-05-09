@@ -5,16 +5,19 @@ from datetime import datetime
 # --- AUTHENTICATION & OWNER SCHEMAS ---
 
 class OwnerCreate(BaseModel):
+    """Schema for initial shop owner registration and shop creation."""
     shop_name: str
     address: str
     email: EmailStr
     password: str
 
 class UserLogin(BaseModel):
+    """Schema for user authentication requests."""
     email: EmailStr
     password: str
 
 class UserResponse(BaseModel):
+    """Profile data returned after successful login or session validation."""
     email: str
     role: str
     shop_id: Optional[int] = None
@@ -24,27 +27,28 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, exclude_none=True)
 
 class LoginResponse(BaseModel):
+    """Standardized OAuth2-compatible login response."""
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
 
 # --- SETTINGS SCHEMAS ---
-# UPDATED: Mapping keys to exact Service Types (Full Service, Regular Wash, Titan Wash, Comforter).
-# This provides the 'Single Source of Truth' for the Booking Modal pricing logic.
+# Single Source of Truth for the Booking Modal and Optimization logic.
+# These fields match the 'Setting' database model exactly.
 
 class SettingBase(BaseModel):
     """
     Base settings schema containing pricing and operational rates.
-    Renamed fields to match the specific service types in the frontend modal.
+    Matches the specific service types: Full Service, Regular Wash, Titan Wash, Comforter.
     """
     full_service_price: float = 210.0
-    regular_wash_price: float = 65.0
+    regular_wash_price: float = 65.0  # Matches updated Database column
     titan_wash_price: float = 100.0
     comforter_price: float = 150.0
     
     # Utility Unit Rates for AI/ML Cost Prediction and Profitability logic
-    electricity_rate: float = 12.0  # PHP per kWh
-    water_rate: float = 50.0        # PHP per Cubic Meter
+    electricity_rate: float = 12.0   # PHP per kWh
+    water_rate: float = 50.0         # PHP per Cubic Meter (m3)
     detergent_cost_per_load: float = 10.0
     
     # Scheduling optimization window
@@ -63,13 +67,14 @@ class SettingUpdate(BaseModel):
     off_peak_hours: Optional[str] = None
 
 class SettingResponse(SettingBase):
-    """Response schema for the frontend to sync global pricing across all modals."""
+    """Full response schema for syncing global pricing across all frontend modals."""
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
 
 # --- MACHINE SCHEMAS ---
 
 class MachineBase(BaseModel):
+    """Base hardware schema representing Washers and Dryers."""
     machine_type: str
     machine_number: int
     status: str = "Available"
@@ -87,7 +92,7 @@ class MachineCreate(MachineBase):
 class MachineUpdate(BaseModel):
     """
     Schema for updating hardware state or manual maintenance overrides.
-    Supports real-time cost updates from the PredictionService.
+    Allows for real-time synchronization of financial metrics from the backend.
     """
     status: Optional[str] = None
     remaining_time: Optional[int] = None
@@ -102,6 +107,7 @@ class MachineUpdate(BaseModel):
     net_profit_accumulated: Optional[float] = None
 
 class MachineResponse(MachineBase):
+    """Full hardware state returned to the Machine Hub UI."""
     id: int
     total_cycles: int
     remaining_time: int
@@ -109,17 +115,17 @@ class MachineResponse(MachineBase):
     current_service_type: Optional[str] = "None"
     current_price: float = 0.0
     
-    # Financial performance metrics for the Monitoring Hub
+    # Financial performance metrics calculated by the PredictionService
     profitability_rate: float = 0.0 
     net_profit_accumulated: float = 0.0 
     
-    # Holds calculated utility costs (electricity_cost, water_cost, etc.)
+    # Nested dictionary for utility cost breakdown
     metrics: Optional[Dict[str, float]] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
 class MachineNested(BaseModel):
-    """Simplified machine view used inside Booking responses for UI labels."""
+    """Simplified machine view used for labels inside Booking responses."""
     id: int
     machine_type: str
     machine_number: int
@@ -133,7 +139,7 @@ class MachineNested(BaseModel):
 class BookingCreate(BaseModel):
     """
     Schema for creating a laundry transaction.
-    Service types now align with: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'
+    Validated against: 'Full Service', 'Regular Wash', 'Titan Wash', 'Comforter'.
     """
     customer_name: str
     service_type: str  
@@ -156,11 +162,11 @@ class BookingCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 class BookingStatusUpdate(BaseModel):
-    """Used to move transactions through the lifecycle (e.g., Ready -> Claimed)."""
+    """Transitions a booking through lifecycle states (e.g., Pending -> Busy -> Ready)."""
     status: str
 
 class BookingResponse(BaseModel):
-    """Full response schema for the Service Terminal UI."""
+    """Detailed transaction response for the Service Terminal UI."""
     id: int
     customer_name: str
     service_type: str
@@ -184,6 +190,7 @@ class BookingResponse(BaseModel):
     washer_number: Optional[int] = None
     dryer_number: Optional[int] = None
 
+    # Validators to map nested machine numbers to top-level fields for the UI
     @field_validator("washer_number", mode="before")
     @classmethod
     def get_washer_no(cls, v, info):
@@ -203,7 +210,7 @@ class BookingResponse(BaseModel):
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
-    """High-level metrics for the Owner's Overview dashboard."""
+    """High-level metrics for the Owner Overview analytics dashboard."""
     total_revenue: float
     revenue_trend: str
     utilization_rate: float
@@ -213,7 +220,7 @@ class DashboardStats(BaseModel):
     pending_bookings: int
     bookings_trend: str
     
-    # Updated Categorized counts to match new service types
+    # Categorized counts to visualize service popularity
     full_service: int
     regular_wash: int
     titan_wash: int
@@ -221,5 +228,6 @@ class DashboardStats(BaseModel):
     
     total_weight: float
     
+    # Dynamic list for chart visualization
     forecast_data: List[Dict[str, Any]]
     optimization: Optional[Dict[str, str]] = None
