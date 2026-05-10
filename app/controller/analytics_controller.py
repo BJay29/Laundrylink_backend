@@ -7,14 +7,14 @@ from app.services.ai_engine import AIEngine
 class AnalyticsController:
     """
     Handles the logic for data aggregation, comparison, and AI-driven forecasting.
-    Updated to include actual service volume and weight metrics.
+    Updated to replace AI Accuracy with Average Per Service metrics.
     """
 
     @staticmethod
     def get_dashboard_summary(db: Session, shop_id: int = 1):
         """
         Calculates summary statistics for dashboard cards and service breakdowns.
-        This provides the source for 'Actual' vs 'Predicted' comparisons.
+        Replaces 'accuracy_rate' with 'avg_per_service' for the Overview Dashboard.
         """
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
@@ -37,7 +37,6 @@ class AnalyticsController:
             income_growth = ((today_revenue - yesterday_revenue) / yesterday_revenue) * 100
 
         # 4. Aggregate Actual Service Volumes (Total Count per Type)
-        # Filters specifically for the service types defined in the system
         service_counts = db.query(
             models.Booking.service_type, 
             func.count(models.Booking.id).label("total")
@@ -45,17 +44,28 @@ class AnalyticsController:
         
         service_map = {item.service_type: item.total for item in service_counts}
 
-        # 5. Calculate Total Actual Weight (kg) across all bookings
+        # 5. Calculate Average Income Per Service (Global Average)
+        # Replaces the AI Accuracy metric in the dashboard card
+        total_stats = db.query(
+            func.sum(models.Booking.total_price).label("revenue"),
+            func.count(models.Booking.id).label("count")
+        ).filter(models.Booking.shop_id == shop_id).first()
+
+        total_revenue = float(total_stats.revenue or 0.0)
+        total_bookings = int(total_stats.count or 0)
+        avg_per_service = round(total_revenue / total_bookings, 2) if total_bookings > 0 else 0.0
+
+        # 6. Calculate Total Actual Weight (kg)
         total_kg = db.query(func.sum(models.Booking.weight)).filter(
             models.Booking.shop_id == shop_id
         ).scalar() or 0.0
 
-        # 6. Get Predicted Data from AI Engine
+        # 7. Get Predicted Data from AI Engine
         ai = AIEngine()
         predicted_count_today = ai.get_predicted_bookings(datetime.now())
         projected_income_today = ai.calculate_projected_income(predicted_count_today)
 
-        # 7. Fetch Total Active Machines (Busy status)
+        # 8. Fetch Total Active Machines (Busy status)
         active_machines = db.query(models.Machine).filter(
             models.Machine.shop_id == shop_id,
             models.Machine.status == "Busy"
@@ -67,8 +77,7 @@ class AnalyticsController:
             "active_machines": active_machines,
             "predicted_bookings_today": predicted_count_today,
             "projected_income_today": projected_income_today,
-            "accuracy_rate": 85.5,
-            # Actual Totals for the Dashboard Footer
+            "avg_per_service": avg_per_service, # Replaced accuracy_rate
             "full_service": service_map.get("Full Service", 0),
             "titan_wash": service_map.get("Titan Wash", 0),
             "regular_wash": service_map.get("Regular Wash", 0),
@@ -79,14 +88,13 @@ class AnalyticsController:
     @staticmethod
     def get_forecast_data(db: Session, shop_id: int = 1):
         """
-        Generates the 7-day forecast data used by the Recharts/Chart.js frontend.
+        Generates the 7-day forecast data used by the Recharts frontend.
         Includes historical trend analysis for visual comparison.
         """
         ai = AIEngine()
-        # Initial forecast using AI baseline and synthetic questionnaire weights
         raw_forecast = ai.get_weekly_forecast(is_rainy_forecast=False)
 
-        # Fetch the last 7 days of ACTUAL historical data from the database
+        # Fetch the last 7 days of ACTUAL historical data
         history_data = []
         for i in range(6, -1, -1):
             target_date = datetime.now().date() - timedelta(days=i)
