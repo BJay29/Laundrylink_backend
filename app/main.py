@@ -110,7 +110,6 @@ async def lifespan(app: FastAPI):
     """
     print("====================================================")
     print("LaundryLink Backend: Initialization Sequence Started")
-    print("Target Environment: Naga College Foundation (CCS)")
     
     try:
         # Syncing SQLAlchemy models with the database schema
