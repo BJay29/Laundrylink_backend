@@ -3,17 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
-# Added analytics_routes to the imports
 from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes
 from sqlalchemy.orm import Session
 
-# --- UPDATED SEEDING & DATA INTEGRITY LOGIC ---
+# --- DATABASE SEEDING & DATA INTEGRITY LOGIC ---
 
 def seed_settings(db: Session):
     """
     Ensures that default optimization settings exist for shop_id=1.
     This runs ONLY if the settings table is empty for this shop.
-    Initializes pricing based on the standard college project requirements.
+    Initializes pricing based on the standard project requirements.
     """
     existing_settings = db.query(models.Setting).filter(models.Setting.shop_id == 1).first()
     
@@ -30,14 +29,14 @@ def seed_settings(db: Session):
             comforter_price=150.0,    
             electricity_rate=12.0,
             water_rate=50.0,
-            detergent_cost_per_load=10.0,
+            deterget_cost_per_load=10.0,
             off_peak_hours="8:00 AM - 11:00 AM"
         )
         db.add(default_settings)
         db.commit()
         print("Default shop settings successfully seeded.")
     else:
-        print("Shop settings already initialized. Skipping seed to preserve user modifications.")
+        print("Shop settings already initialized. Preserving user modifications.")
 
 def seed_machines():
     """
@@ -52,7 +51,7 @@ def seed_machines():
         # Fix legacy data: Convert machines with NULL shop_id to default shop_id=1
         null_machines = db.query(models.Machine).filter(models.Machine.shop_id == None).all()
         if null_machines:
-            print(f"Repair Mode: Found {len(null_machines)} machines with NULL shop_id. Fixing now...")
+            print(f"Repair Mode: Found {len(null_machines)} machines with NULL shop_id. Fixing...")
             for m in null_machines:
                 m.shop_id = 1
             db.commit()
@@ -62,11 +61,11 @@ def seed_machines():
         machine_count = db.query(models.Machine).count()
         
         if machine_count == 0:
-            print("Hardware Hub empty. Seeding 12 machine units with shop_id=1...")
+            print("Hardware Hub empty. Seeding 12 units for Shop 1...")
             
             machines_to_add = []
             
-            # Create 6 Washers (Assigned to shop_id=1)
+            # Create 6 Washers
             for i in range(1, 7):
                 machines_to_add.append(
                     models.Machine(
@@ -77,7 +76,7 @@ def seed_machines():
                     )
                 )
             
-            # Create 6 Dryers (Assigned to shop_id=1)
+            # Create 6 Dryers
             for i in range(1, 7):
                 machines_to_add.append(
                     models.Machine(
@@ -134,19 +133,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LaundryLink API",
     description="Intelligent Backend for Laundry Income Optimization & Hardware Management",
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan
 )
 
-# --- CORS MIDDLEWARE ---
-# Allows cross-origin requests from the React/Vite development server
+# --- CORS MIDDLEWARE FIX ---
+# Updated to allow Flutter Web, Localhost, and Wildcard for mobile testing
 
 app.add_middleware(
     CORSMiddleware,
+    # Use ["*"] to allow all origins during development, or list specific ones:
     allow_origins=[
-        "http://localhost:5173", # Vite Default
-        "http://localhost:5174", # Vite Alternative
-        "http://localhost:3000", # Traditional React
+        "http://localhost:5173", # Vite Web
+        "http://localhost:5174", # Vite Web Alt
+        "http://localhost:3000", # React
+        "http://localhost:49552", # Specific Flutter Web Port (from your error)
+        "*",                      # ALLOW ALL (Essential for mobile emulators/testing)
     ],
     allow_credentials=True,
     allow_methods=["*"],
