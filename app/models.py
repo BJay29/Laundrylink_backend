@@ -1,5 +1,5 @@
 from app.database import Base
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -172,36 +172,34 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customer service requests to hardware units.
-    Critical source for AI forecasting and historical revenue comparison.
+    This table provides the source data for actual service volume and weight analytics.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
     
-    # Service Configuration: Values strictly match: 'Full Service', 'Titan Wash', 'Regular Wash', 'Comforter'
-    service_type = Column(String, nullable=False, index=True) 
-    category = Column(String, nullable=False) # e.g., 'Clothes', 'Curtains'
+    # Service Configuration: Values must strictly match the following for dashboard filtering:
+    # 'Full Service', 'Titan Wash', 'Regular Wash', 'Comforter'
+    service_type = Column(String, nullable=False) 
+    category = Column(String, nullable=False)
     
-    # Weight is vital for 'Total Weight' KPI and AI load balancing
-    weight = Column(Float, nullable=False, default=0.0)
+    # Used for calculating the 'Total Load' metric in the dashboard breakdown
+    weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
     
-    # Financial fields
+    # Financial fields captured at the time of creation
     total_price = Column(Float, nullable=False)
-    # actual_income ensures accurate trend comparison even if discounts are applied
-    actual_income = Column(Float, nullable=False, default=0.0) 
     booking_mode = Column(String, nullable=False) # 'Self-Service' or 'Full Service'
     
     service_duration = Column(Integer, default=45) 
     
-    # Boolean flags for overhead cost estimation
+    # Boolean flags for additional service costs
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
 
-    # Status must be 'Completed' to be included in revenue analytics
-    status = Column(String, default="Pending", index=True) 
+    status = Column(String, default="Pending") 
     
     # Hardware mapping
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
@@ -209,8 +207,8 @@ class Booking(Base):
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
-    # Timestamps with Indexes for fast historical trend querying (Last 7 Days)
-    booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    # Timestamps for tracking and historical volume analytics
+    booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -229,11 +227,6 @@ class Booking(Base):
         lazy="joined"
     )
 
-    # Database Index to speed up "vs Last Week" revenue calculations
-    __table_args__ = (
-        Index('idx_shop_booking_time', 'shop_id', 'booking_timestamp'),
-    )
-
     def to_dict(self):
         return {
             "id": self.id,
@@ -243,7 +236,6 @@ class Booking(Base):
             "weight": self.weight,
             "loads": self.loads,
             "total_price": round(self.total_price or 0.0, 2),
-            "actual_income": round(self.actual_income or 0.0, 2),
             "booking_mode": self.booking_mode,
             "status": self.status,
             "service_duration": self.service_duration,
