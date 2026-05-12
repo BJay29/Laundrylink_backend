@@ -3,12 +3,22 @@ from sqlalchemy import func
 from datetime import datetime, timedelta
 from app import models
 from app.services.ai_engine import AIEngine
+from app.services import insight_engine  # Added reference to the new insight engine
 
 class AnalyticsController:
     """
     Handles the logic for data aggregation, comparison, and AI-driven forecasting.
-    Updated to replace AI Accuracy with Average Per Service metrics.
+    Includes Decision Support System (DSS) logic via Operational Insights.
     """
+
+    @staticmethod
+    def get_operational_insights(db: Session):
+        """
+        Fetches live operational insights regarding machine status, 
+        profit impact, and strategic suggestions.
+        """
+        # Calls the logic from app/services/insight_engine.py
+        return insight_engine.generate_operational_insight(db)
 
     @staticmethod
     def get_dashboard_summary(db: Session, shop_id: int = 1):
@@ -45,7 +55,6 @@ class AnalyticsController:
         service_map = {item.service_type: item.total for item in service_counts}
 
         # 5. Calculate Average Income Per Service (Global Average)
-        # Replaces the AI Accuracy metric in the dashboard card
         total_stats = db.query(
             func.sum(models.Booking.total_price).label("revenue"),
             func.count(models.Booking.id).label("count")
@@ -77,7 +86,7 @@ class AnalyticsController:
             "active_machines": active_machines,
             "predicted_bookings_today": predicted_count_today,
             "projected_income_today": projected_income_today,
-            "avg_per_service": avg_per_service, # Replaced accuracy_rate
+            "avg_per_service": avg_per_service,
             "full_service": service_map.get("Full Service", 0),
             "titan_wash": service_map.get("Titan Wash", 0),
             "regular_wash": service_map.get("Regular Wash", 0),
@@ -88,13 +97,12 @@ class AnalyticsController:
     @staticmethod
     def get_forecast_data(db: Session, shop_id: int = 1):
         """
-        Generates the 7-day forecast data used by the Recharts frontend.
+        Generates the 7-day forecast data for the frontend chart.
         Includes historical trend analysis for visual comparison.
         """
         ai = AIEngine()
         raw_forecast = ai.get_weekly_forecast(is_rainy_forecast=False)
 
-        # Fetch the last 7 days of ACTUAL historical data
         history_data = []
         for i in range(6, -1, -1):
             target_date = datetime.now().date() - timedelta(days=i)
@@ -116,7 +124,7 @@ class AnalyticsController:
     @staticmethod
     def get_service_distribution(db: Session, shop_id: int = 1):
         """
-        Returns a distribution map of all services to help refine AI model weights.
+        Returns a distribution map of all services to analyze business trends.
         """
         distribution = db.query(
             models.Booking.service_type, 

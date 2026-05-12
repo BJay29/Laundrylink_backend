@@ -33,32 +33,25 @@ class LoginResponse(BaseModel):
     user: UserResponse
 
 # --- SETTINGS SCHEMAS ---
-# Single Source of Truth for the Booking Modal and Optimization logic.
 
 class SettingBase(BaseModel):
     """
     Base settings schema containing pricing and operational rates.
-    REMOVED hardcoded defaults (210, 65, etc.) to ensure 
-    the system fetches live data from the Database.
+    Hardcoded defaults are removed to ensure the system fetches live Database data.
     """
     full_service_price: float 
     regular_wash_price: float 
     titan_wash_price: float
     comforter_price: float
     
-    # Utility Unit Rates for AI/ML Cost Prediction
     electricity_rate: float
     water_rate: float
     detergent_cost_per_load: float
     
-    # Scheduling optimization window
     off_peak_hours: str = "8:00 AM - 11:00 AM"
 
 class SettingUpdate(BaseModel):
-    """
-    Schema for updating shop parameters from the Optimization Settings page.
-    Allows partial updates for real-time price syncing.
-    """
+    """Schema for updating shop parameters from the Optimization Settings page."""
     full_service_price: Optional[float] = None
     regular_wash_price: Optional[float] = None
     titan_wash_price: Optional[float] = None
@@ -83,7 +76,6 @@ class MachineBase(BaseModel):
     status: str = "Available"
     shop_id: int = 1 
     
-    # Telemetry for utility cost tracking
     accumulated_detergent: float = 0.0   
     accumulated_electricity: float = 0.0  
     accumulated_water: float = 0.0         
@@ -135,10 +127,7 @@ class MachineNested(BaseModel):
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
-    """
-    Schema for creating a laundry transaction.
-    Ensure total_price is passed from the calculated frontend value.
-    """
+    """Schema for creating a laundry transaction."""
     customer_name: str
     service_type: str  
     category: str
@@ -226,3 +215,16 @@ class DashboardStats(BaseModel):
     
     forecast_data: List[Dict[str, Any]]
     optimization: Optional[Dict[str, str]] = None
+
+class InsightResponse(BaseModel):
+    """
+    Schema for real-time Operational Insights (Decision Support System).
+    Maps directly to the React 'Operational Insight' card.
+    """
+    hasIssue: bool
+    type: str
+    problemMessage: str
+    impactDetail: str
+    suggestions: List[str]
+
+    model_config = ConfigDict(from_attributes=True)

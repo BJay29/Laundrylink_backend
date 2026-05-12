@@ -7,12 +7,11 @@ class PredictionService:
     """
 
     # --- NAGA CITY UTILITY RATES ---
-    ELEC_RATE_KWH = 8.83  # CASURECO II residential/commercial average
-    WATER_RATE_CUM = 37.90  # MNWD rate per cubic meter
-    DETERGENT_FIXED = 12.75 # Fixed cost per wash load (liquid/powder + softener)
+    ELEC_RATE_KWH = 8.83  
+    WATER_RATE_CUM = 37.90  
+    DETERGENT_FIXED = 12.75 #
 
     # --- HARDWARE SPECIFICATIONS (Wattage) ---
-    # High wattage for Dryers ensures Electricity is the dominant cost in analytics.
     WATTS_WASHER = 1200 
     WATTS_DRYER = 5000  
 

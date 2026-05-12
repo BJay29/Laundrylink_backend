@@ -16,6 +16,23 @@ def get_db():
     finally:
         db.close()
 
+@router.get("/operational-insights")
+def get_insights(db: Session = Depends(get_db)):
+    """
+    Retrieve real-time operational insights.
+    Analyzes machine health to calculate profit impact and 
+    provides strategic suggestions for the shop owner.
+    """
+    try:
+        # Fetches the decision support logic from the controller
+        insights = AnalyticsController.get_operational_insights(db)
+        return insights
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating operational insights: {str(e)}"
+        )
+
 @router.get("/dashboard-summary")
 def get_summary(db: Session = Depends(get_db)):
     """
