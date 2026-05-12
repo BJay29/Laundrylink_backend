@@ -3,31 +3,40 @@ from app.models import Machine, Booking
 from sqlalchemy import func
 import logging
 
-# Setup basic logging to replace print statements
+# Setup basic logging
 logger = logging.getLogger(__name__)
 
-def generate_operational_insight(db: Session):
+def generate_operational_insight(db: Session, shop_id: int = 1):
     """
     Analyzes current machine statuses and historical booking data 
     to provide real-time financial insights and actionable suggestions.
+    
+    UPDATED: Added .ilike() for case-insensitive status matching and shop_id filtering.
     """
     try:
-        # 1. Count how many machines are currently out of service
-        offline_count = db.query(Machine).filter(Machine.status == 'MAINTENANCE').count()
+        # 1. Count machines out of service (CASE-INSENSITIVE)
+        # Using .ilike() ensures 'maintenance', 'Maintenance', and 'MAINTENANCE' are all caught.
+        offline_machines = db.query(Machine).filter(
+            Machine.shop_id == shop_id,
+            Machine.status.ilike('maintenance')
+        ).all()
         
-        # 2. Get total number of machines to calculate capacity percentage
-        total_machines = db.query(Machine).count() or 1 # Avoid division by zero
+        offline_count = len(offline_machines)
+        
+        # 2. Get total number of machines for this specific shop
+        total_machines = db.query(Machine).filter(Machine.shop_id == shop_id).count() or 1
         
         if offline_count > 0:
-            # 3. Calculate Average Revenue per booking to estimate loss
-            # We take the average of 'total_price' from all completed bookings
-            avg_revenue_per_booking = db.query(func.avg(Booking.total_price)).scalar() or 0
+            # 3. Calculate Average Revenue per booking
+            # Filtering by shop_id to ensure the average is specific to this business
+            avg_revenue_per_booking = db.query(func.avg(Booking.total_price)).filter(
+                Booking.shop_id == shop_id
+            ).scalar() or 0
             
-            # 4. Impact Calculation Logic:
+            # 4. Impact Calculation Logic
             # Assuming an average machine handles about 6 loads per day.
-            # Loss = (Number of Offline Machines) * (Avg Price per Load) * (Estimated Loads per Day)
             estimated_loads_per_day = 6
-            daily_loss_estimate = offline_count * avg_revenue_per_booking * estimated_loads_per_day
+            daily_loss_estimate = offline_count * float(avg_revenue_per_booking) * estimated_loads_per_day
             
             capacity_reduction = (offline_count / total_machines) * 100
 
@@ -44,15 +53,15 @@ def generate_operational_insight(db: Session):
                 ]
             }
 
-        # Default response when everything is running smoothly
+        # Default response when shop performance is within peak range
         return {
             "hasIssue": False,
             "type": "OPTIMIZED",
-            "problemMessage": "All systems are operational. Machine allocation is currently at peak efficiency.",
-            "impactDetail": "Current service income is optimized across all available units.",
+            "problemMessage": "Operations Optimized. Your shop is performing at peak efficiency.",
+            "impactDetail": "Revenue trends and service distribution are currently aligned with targets.",
             "suggestions": [
-                "Consider a 'Happy Hour' discount if machine idle time increases.",
-                "Monitor water and energy trends to further optimize utility costs."
+                "Consider a 'Happy Hour' discount during off-peak hours to maximize idle units.",
+                "Monitor water and energy trends to further reduce utility overhead."
             ]
         }
 
@@ -60,7 +69,8 @@ def generate_operational_insight(db: Session):
         logger.error(f"Error generating operational insights: {str(e)}")
         return {
             "hasIssue": False,
+            "type": "SYNCING",
             "problemMessage": "Syncing insights...",
-            "impactDetail": "Calculation temporarily unavailable.",
+            "impactDetail": "The decision support engine is recalculating metrics.",
             "suggestions": []
         }
