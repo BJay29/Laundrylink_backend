@@ -5,10 +5,10 @@ from app.controller.analytics_controller import AnalyticsController
 
 router = APIRouter(
     prefix="/analytics",
-    tags=["Analytics"]
+    tags=["Analytics Hub"]
 )
 
-# Dependency to provide a database session for each request
+# Dependency to safely handle and instantiate a database connection session per request
 def get_db():
     db = SessionLocal()
     try:
@@ -19,12 +19,11 @@ def get_db():
 @router.get("/operational-insights")
 def get_insights(db: Session = Depends(get_db)):
     """
-    Retrieve real-time operational insights.
-    Analyzes machine health to calculate profit impact and 
-    provides strategic suggestions for the shop owner.
+    Retrieve real-time operational machine metrics and Decision Support System insights.
+    Evaluates hardware failures to estimate profit loss and provide automated strategic remedies.
     """
     try:
-        # Fetches the decision support logic from the controller
+        # Fetches the operational logic block directly via the controller
         insights = AnalyticsController.get_operational_insights(db)
         return insights
     except Exception as e:
@@ -36,15 +35,15 @@ def get_insights(db: Session = Depends(get_db)):
 @router.get("/dashboard-summary")
 def get_summary(db: Session = Depends(get_db)):
     """
-    Fetch comprehensive dashboard metrics.
+    Fetch comprehensive dashboard KPIs and service counters.
     Returns:
-    - Revenue and growth trends.
-    - AI-predicted bookings vs projected income.
-    - Actual totals for Full Service, Titan Wash, Regular Wash, and Comforter.
-    - Aggregated total weight (kg) for current bookings.
+    - Active revenue tracking and growth metrics.
+    - AI-predicted customer volumes vs projected daily target earnings.
+    - Actual total loads parsed for Full Service, Titan Wash, Regular Wash, and Comforter.
+    - Total load capacity metrics calculated in kilograms.
     """
     try:
-        # Defaulting to shop_id=1 for the current development phase
+        # Defaulting to shop_id=1 for current multi-tenant testing phase milestones
         summary = AnalyticsController.get_dashboard_summary(db, shop_id=1)
         return summary
     except Exception as e:
@@ -56,8 +55,8 @@ def get_summary(db: Session = Depends(get_db)):
 @router.get("/forecast-graph")
 def get_forecast(db: Session = Depends(get_db)):
     """
-    Generate data for the 7-day financial forecast chart.
-    Returns a combined dataset of historical income trends and AI-driven future projections.
+    Generate data matrices for the 7-day linear forecast chart container.
+    Merges historical business revenue streams with future model projections for comparison views.
     """
     try:
         forecast_data = AnalyticsController.get_forecast_data(db, shop_id=1)
@@ -71,8 +70,8 @@ def get_forecast(db: Session = Depends(get_db)):
 @router.get("/service-distribution")
 def get_distribution(db: Session = Depends(get_db)):
     """
-    Retrieve the service utilization breakdown for distribution charts.
-    Provides a real-time count of bookings per service type to validate AI weighting logic.
+    Retrieve product category distributions for charting systems.
+    Provides live segmentation counters per service item to continuously calibrate AI models.
     """
     try:
         distribution = AnalyticsController.get_service_distribution(db, shop_id=1)
@@ -83,15 +82,16 @@ def get_distribution(db: Session = Depends(get_db)):
             detail=f"Error fetching service distribution metrics: {str(e)}"
         )
 
-@router.get("/ai-accuracy")
-def get_ai_accuracy():
+@router.get("/accuracy")
+def get_ai_accuracy(db: Session = Depends(get_db)):
     """
-    Retrieve statistical accuracy verification metrics.
-    Runs a simulation matrix to evaluate variance stability indices for demand 
-    forecasting models and deterministic utility calculation telemetry.
+    Retrieve statistical model accuracy calibrations and calibration configurations.
+    Evaluates historical telemetry metrics to map variance indices for predictive 
+    demand subsystems alongside utility consumption checking matrices.
     """
     try:
-        accuracy_metrics = AnalyticsController.get_ai_prediction_metrics()
+        # Appends the open database tunnel dependency to run deep tracking comparisons
+        accuracy_metrics = AnalyticsController.get_ai_prediction_metrics(db)
         return accuracy_metrics
     except Exception as e:
         raise HTTPException(

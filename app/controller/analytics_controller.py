@@ -9,46 +9,47 @@ from app.services import insight_engine
 
 class AnalyticsController:
     """
-    Handles the logic for data aggregation, comparison, and AI-driven forecasting.
-    Includes Decision Support System (DSS) logic via Operational Insights.
+    Handles the core operational logic for data aggregation, data comparison, 
+    and AI-driven forecasting analytics. Includes a Decision Support System (DSS) 
+    engine pipeline via Operational Insights.
     """
 
     @staticmethod
     def get_operational_insights(db: Session):
         """
-        Fetches live operational insights regarding machine status, 
-        profit impact, and strategic suggestions.
+        Fetches live operational insights regarding current machine telemetry status, 
+        projected profit impacts, and business strategy suggestions.
         """
-        # Calls the logic from app/services/insight_engine.py
+        # Calls the functional evaluation logic directly from app/services/insight_engine.py
         return insight_engine.generate_operational_insight(db)
 
     @staticmethod
     def get_dashboard_summary(db: Session, shop_id: int = 1):
         """
-        Calculates summary statistics for dashboard cards and service breakdowns.
-        Replaces 'accuracy_rate' with 'avg_per_service' for the Overview Dashboard.
+        Calculates aggregate summary statistics for the top-level dashboard metrics 
+        and lower service breakdown counters.
         """
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
 
-        # 1. Fetch Actual Income for Today
+        # 1. Fetch Actual Financial Income for Today
         today_revenue = db.query(func.sum(models.Booking.total_price)).filter(
             models.Booking.shop_id == shop_id,
             func.date(models.Booking.created_at) == today
         ).scalar() or 0.0
 
-        # 2. Fetch Actual Income for Yesterday
+        # 2. Fetch Actual Financial Income for Yesterday
         yesterday_revenue = db.query(func.sum(models.Booking.total_price)).filter(
             models.Booking.shop_id == shop_id,
             func.date(models.Booking.created_at) == yesterday
         ).scalar() or 0.0
 
-        # 3. Calculate Income Growth Percentage
+        # 3. Calculate Income Growth/Loss Percentage Relative to Yesterday
         income_growth = 0.0
         if yesterday_revenue > 0:
             income_growth = ((today_revenue - yesterday_revenue) / yesterday_revenue) * 100
 
-        # 4. Aggregate Actual Service Volumes (Total Count per Type)
+        # 4. Aggregate Actual Service Volumes (Total Count partitioned by Type)
         service_counts = db.query(
             models.Booking.service_type, 
             func.count(models.Booking.id).label("total")
@@ -56,7 +57,7 @@ class AnalyticsController:
         
         service_map = {item.service_type: item.total for item in service_counts}
 
-        # 5. Calculate Average Income Per Service (Global Average)
+        # 5. Calculate Average Global Ticket Value Income Per Service
         total_stats = db.query(
             func.sum(models.Booking.total_price).label("revenue"),
             func.count(models.Booking.id).label("count")
@@ -66,17 +67,17 @@ class AnalyticsController:
         total_bookings = int(total_stats.count or 0)
         avg_per_service = round(total_revenue / total_bookings, 2) if total_bookings > 0 else 0.0
 
-        # 6. Calculate Total Actual Weight (kg)
+        # 6. Calculate Total Cumulative Hardware Load Weight Processing Volume (kg)
         total_kg = db.query(func.sum(models.Booking.weight)).filter(
             models.Booking.shop_id == shop_id
         ).scalar() or 0.0
 
-        # 7. Get Predicted Data from AI Engine
+        # 7. Query Forecast Projections directly from the central AIEngine
         ai = AIEngine()
         predicted_count_today = ai.get_predicted_bookings(datetime.now())
         projected_income_today = ai.calculate_projected_income(predicted_count_today)
 
-        # 8. Fetch Total Active Machines (Busy status)
+        # 8. Fetch Total Number of Active Machines currently running a 'Busy' state
         active_machines = db.query(models.Machine).filter(
             models.Machine.shop_id == shop_id,
             models.Machine.status == "Busy"
@@ -99,8 +100,8 @@ class AnalyticsController:
     @staticmethod
     def get_forecast_data(db: Session, shop_id: int = 1):
         """
-        Generates the 7-day forecast data for the frontend chart.
-        Includes historical trend analysis for visual comparison.
+        Generates the sequential 7-day future prediction array for frontend graph rendering.
+        Includes a matching historical trend matrix for comparative client visualizations.
         """
         ai = AIEngine()
         raw_forecast = ai.get_weekly_forecast(is_rainy_forecast=False)
@@ -126,7 +127,8 @@ class AnalyticsController:
     @staticmethod
     def get_service_distribution(db: Session, shop_id: int = 1):
         """
-        Returns a distribution map of all services to analyze business trends.
+        Returns an isolated proportional structural map of processing category totals 
+        to evaluate seasonal business distribution trends.
         """
         distribution = db.query(
             models.Booking.service_type, 
@@ -136,16 +138,18 @@ class AnalyticsController:
         return {item.service_type: item.count for item in distribution}
 
     @staticmethod
-    def get_ai_prediction_metrics() -> Dict[str, Any]:
+    def get_ai_prediction_metrics(db: Session) -> Dict[str, Any]:
         """
-        Aggregates operational accuracy parameters, math evaluation bounds, 
-        and hardware consumption calibration scores for front-end analytics dashboard ingestion.
+        Aggregates model mathematical accuracy configurations, statistical confidence indices, 
+        and water/electricity hardware calibration logs for frontend ingestion.
+        Accepts an open database connection context session parameters to review data targets.
         """
         ai = AIEngine()
-        # Evaluate historical stochastic variance checks
+        
+        # Evaluate model mathematical variances using database constraints if required
         demand_metrics = ai.calculate_model_accuracy()
         
-        # Evaluate baseline mathematical hardware equation coefficients
+        # Evaluate hardware telemetry consumption coefficients and baseline calibration metrics
         utility_metrics = PredictionService.calculate_utility_accuracy()
         
         return {
