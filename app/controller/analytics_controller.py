@@ -16,39 +16,46 @@ class AnalyticsController:
 
     @staticmethod
     def get_operational_insights(db: Session):
-        """
-        Fetches live operational insights regarding current machine telemetry status, 
-        projected profit impacts, and business strategy suggestions.
-        """
         return insight_engine.generate_operational_insight(db)
 
     @staticmethod
     def get_dashboard_summary(db: Session, shop_id: int = 1):
         """
-        Calculates aggregate summary statistics for the top-level dashboard metrics 
-        and lower service breakdown counters.
+        Calculates aggregate summary statistics including current performance 
+        and historical comparison for trends.
         """
         today = datetime.now().date()
-        yesterday = today - timedelta(days=1)
+        # Define date ranges for comparison
+        seven_days_ago = today - timedelta(days=7)
+        last_week_start = today - timedelta(days=14)
+        last_week_end = today - timedelta(days=8)
 
-        # 1. Fetch Actual Financial Income for Today
-        today_revenue = db.query(func.sum(models.Booking.total_price)).filter(
+        # 1. Fetch Current Week Stats (Last 7 days)
+        current_week_stats = db.query(
+            func.sum(models.Booking.total_price).label("revenue"),
+            func.count(models.Booking.id).label("bookings")
+        ).filter(
             models.Booking.shop_id == shop_id,
-            func.date(models.Booking.created_at) == today
-        ).scalar() or 0.0
+            func.date(models.Booking.created_at) >= seven_days_ago
+        ).first()
 
-        # 2. Fetch Actual Financial Income for Yesterday
-        yesterday_revenue = db.query(func.sum(models.Booking.total_price)).filter(
+        # 2. Fetch Previous Week Stats (For comparison)
+        last_week_stats = db.query(
+            func.sum(models.Booking.total_price).label("revenue"),
+            func.count(models.Booking.id).label("bookings")
+        ).filter(
             models.Booking.shop_id == shop_id,
-            func.date(models.Booking.created_at) == yesterday
-        ).scalar() or 0.0
+            func.date(models.Booking.created_at) >= last_week_start,
+            func.date(models.Booking.created_at) <= last_week_end
+        ).first()
 
-        # 3. Calculate Income Growth/Loss Percentage Relative to Yesterday
-        income_growth = 0.0
-        if yesterday_revenue > 0:
-            income_growth = ((today_revenue - yesterday_revenue) / yesterday_revenue) * 100
+        today_revenue = current_week_stats.revenue or 0.0
+        last_week_revenue = last_week_stats.revenue or 0.0
+        
+        today_bookings = current_week_stats.bookings or 0
+        last_week_bookings = last_week_stats.bookings or 0
 
-        # 4. Aggregate Actual Service Volumes
+        # 3. Aggregate Service Volumes
         service_counts = db.query(
             models.Booking.service_type, 
             func.count(models.Booking.id).label("total")
@@ -56,56 +63,40 @@ class AnalyticsController:
         
         service_map = {item.service_type: item.total for item in service_counts}
 
-        # 5. Calculate Average Global Ticket Value Income Per Service
-        total_stats = db.query(
-            func.sum(models.Booking.total_price).label("revenue"),
-            func.count(models.Booking.id).label("count")
-        ).filter(models.Booking.shop_id == shop_id).first()
-
-        total_revenue = float(total_stats.revenue or 0.0)
-        total_bookings = int(total_stats.count or 0)
-        avg_per_service = round(total_revenue / total_bookings, 2) if total_bookings > 0 else 0.0
-
-        # 6. Calculate Total Cumulative Hardware Load Weight Processing Volume (kg)
+        # 4. Total Weight Volume (kg)
         total_kg = db.query(func.sum(models.Booking.weight)).filter(
             models.Booking.shop_id == shop_id
         ).scalar() or 0.0
 
-        # 7. Query Forecast Projections directly from the central AIEngine
+        # 5. AI Engine Data
         ai = AIEngine()
         predicted_count_today = ai.get_predicted_bookings(datetime.now())
         projected_income_today = ai.calculate_projected_income(predicted_count_today)
 
-        # 8. Fetch Total Number of Active Machines currently running a 'Busy' state
         active_machines = db.query(models.Machine).filter(
             models.Machine.shop_id == shop_id,
             models.Machine.status == "Busy"
         ).count()
 
         return {
-            "today_revenue": round(today_revenue, 2),
-            "income_growth": round(income_growth, 2),
+            "today_revenue": round(float(today_revenue), 2),
+            "last_week_revenue": round(float(last_week_revenue), 2),
+            "total_bookings": today_bookings,
+            "last_week_bookings": last_week_bookings,
             "active_machines": active_machines,
             "predicted_bookings_today": predicted_count_today,
             "projected_income_today": projected_income_today,
-            "avg_per_service": avg_per_service,
             "full_service": service_map.get("Full Service", 0),
             "titan_wash": service_map.get("Titan Wash", 0),
             "regular_wash": service_map.get("Regular Wash", 0),
             "comforter": service_map.get("Comforter", 0),
-            "total_kg": round(total_kg, 2)
+            "total_kg": round(float(total_kg), 2)
         }
 
     @staticmethod
     def get_forecast_data(db: Session, shop_id: int = 1):
-        """
-        Generates the sequential 7-day future prediction array for frontend graph rendering.
-        Includes a dynamic AI-generated narrative insight for executive summary.
-        """
         ai = AIEngine()
         raw_forecast = ai.get_weekly_forecast(is_rainy_forecast=False)
-
-        # Generate the dynamic AI narrative using the insight_engine
         ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
 
         history_data = []
@@ -118,38 +109,28 @@ class AnalyticsController:
             
             history_data.append({
                 "label": target_date.strftime("%b %d"),
-                "actual_income": round(actual_income, 2)
+                "actual_income": round(float(actual_income), 2)
             })
 
         return {
             "forecast": raw_forecast,
             "history": history_data,
-            "ai_generated_insight": ai_narrative # New parameter added for frontend ingestion
+            "ai_generated_insight": ai_narrative
         }
 
     @staticmethod
     def get_service_distribution(db: Session, shop_id: int = 1):
-        """
-        Returns an isolated proportional structural map of processing category totals.
-        """
         distribution = db.query(
             models.Booking.service_type, 
             func.count(models.Booking.id).label("count")
         ).filter(models.Booking.shop_id == shop_id).group_by(models.Booking.service_type).all()
-
         return {item.service_type: item.count for item in distribution}
 
     @staticmethod
     def get_ai_prediction_metrics(db: Session) -> Dict[str, Any]:
-        """
-        Aggregates model mathematical accuracy configurations and calibration logs.
-        """
         ai = AIEngine()
-        demand_metrics = ai.calculate_model_accuracy()
-        utility_metrics = PredictionService.calculate_utility_accuracy()
-        
         return {
             "status": "success",
-            "demand_forecasting_model": demand_metrics,
-            "utility_telemetry_model": utility_metrics
+            "demand_forecasting_model": ai.calculate_model_accuracy(),
+            "utility_telemetry_model": PredictionService.calculate_utility_accuracy()
         }

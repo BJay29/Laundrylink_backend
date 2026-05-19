@@ -23,7 +23,6 @@ def get_insights(db: Session = Depends(get_db)):
     Evaluates hardware failures to estimate profit loss and provide automated strategic remedies.
     """
     try:
-        # Fetches the operational logic block directly via the controller
         insights = AnalyticsController.get_operational_insights(db)
         return insights
     except Exception as e:
@@ -35,15 +34,14 @@ def get_insights(db: Session = Depends(get_db)):
 @router.get("/dashboard-summary")
 def get_summary(db: Session = Depends(get_db)):
     """
-    Fetch comprehensive dashboard KPIs and service counters.
+    Fetch comprehensive dashboard KPIs, service counters, and historical trend comparisons.
     Returns:
-    - Active revenue tracking and growth metrics.
+    - Active revenue tracking and weekly growth metrics.
     - AI-predicted customer volumes vs projected daily target earnings.
-    - Actual total loads parsed for Full Service, Titan Wash, Regular Wash, and Comforter.
-    - Total load capacity metrics calculated in kilograms.
+    - Breakdown of services and total load capacity metrics in kilograms.
     """
     try:
-        # Defaulting to shop_id=1 for current multi-tenant testing phase milestones
+        # Fetching summary which now includes last_week_revenue/bookings for trend calculation
         summary = AnalyticsController.get_dashboard_summary(db, shop_id=1)
         return summary
     except Exception as e:
@@ -90,7 +88,6 @@ def get_ai_accuracy(db: Session = Depends(get_db)):
     demand subsystems alongside utility consumption checking matrices.
     """
     try:
-        # Appends the open database tunnel dependency to run deep tracking comparisons
         accuracy_metrics = AnalyticsController.get_ai_prediction_metrics(db)
         return accuracy_metrics
     except Exception as e:
