@@ -1,9 +1,11 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
+from typing import Dict, Any
 from app import models
 from app.services.ai_engine import AIEngine
-from app.services import insight_engine  # Added reference to the new insight engine
+from app.services.prediction_service import PredictionService
+from app.services import insight_engine 
 
 class AnalyticsController:
     """
@@ -132,3 +134,22 @@ class AnalyticsController:
         ).filter(models.Booking.shop_id == shop_id).group_by(models.Booking.service_type).all()
 
         return {item.service_type: item.count for item in distribution}
+
+    @staticmethod
+    def get_ai_prediction_metrics() -> Dict[str, Any]:
+        """
+        Aggregates operational accuracy parameters, math evaluation bounds, 
+        and hardware consumption calibration scores for front-end analytics dashboard ingestion.
+        """
+        ai = AIEngine()
+        # Evaluate historical stochastic variance checks
+        demand_metrics = ai.calculate_model_accuracy()
+        
+        # Evaluate baseline mathematical hardware equation coefficients
+        utility_metrics = PredictionService.calculate_utility_accuracy()
+        
+        return {
+            "status": "success",
+            "demand_forecasting_model": demand_metrics,
+            "utility_telemetry_model": utility_metrics
+        }

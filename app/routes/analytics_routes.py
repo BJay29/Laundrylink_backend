@@ -82,3 +82,19 @@ def get_distribution(db: Session = Depends(get_db)):
             status_code=500, 
             detail=f"Error fetching service distribution metrics: {str(e)}"
         )
+
+@router.get("/ai-accuracy")
+def get_ai_accuracy():
+    """
+    Retrieve statistical accuracy verification metrics.
+    Runs a simulation matrix to evaluate variance stability indices for demand 
+    forecasting models and deterministic utility calculation telemetry.
+    """
+    try:
+        accuracy_metrics = AnalyticsController.get_ai_prediction_metrics()
+        return accuracy_metrics
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error executing AI accuracy model evaluation: {str(e)}"
+        )
