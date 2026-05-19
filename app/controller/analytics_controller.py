@@ -20,7 +20,6 @@ class AnalyticsController:
         Fetches live operational insights regarding current machine telemetry status, 
         projected profit impacts, and business strategy suggestions.
         """
-        # Calls the functional evaluation logic directly from app/services/insight_engine.py
         return insight_engine.generate_operational_insight(db)
 
     @staticmethod
@@ -49,7 +48,7 @@ class AnalyticsController:
         if yesterday_revenue > 0:
             income_growth = ((today_revenue - yesterday_revenue) / yesterday_revenue) * 100
 
-        # 4. Aggregate Actual Service Volumes (Total Count partitioned by Type)
+        # 4. Aggregate Actual Service Volumes
         service_counts = db.query(
             models.Booking.service_type, 
             func.count(models.Booking.id).label("total")
@@ -101,10 +100,13 @@ class AnalyticsController:
     def get_forecast_data(db: Session, shop_id: int = 1):
         """
         Generates the sequential 7-day future prediction array for frontend graph rendering.
-        Includes a matching historical trend matrix for comparative client visualizations.
+        Includes a dynamic AI-generated narrative insight for executive summary.
         """
         ai = AIEngine()
         raw_forecast = ai.get_weekly_forecast(is_rainy_forecast=False)
+
+        # Generate the dynamic AI narrative using the insight_engine
+        ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
 
         history_data = []
         for i in range(6, -1, -1):
@@ -121,14 +123,14 @@ class AnalyticsController:
 
         return {
             "forecast": raw_forecast,
-            "history": history_data
+            "history": history_data,
+            "ai_generated_insight": ai_narrative # New parameter added for frontend ingestion
         }
 
     @staticmethod
     def get_service_distribution(db: Session, shop_id: int = 1):
         """
-        Returns an isolated proportional structural map of processing category totals 
-        to evaluate seasonal business distribution trends.
+        Returns an isolated proportional structural map of processing category totals.
         """
         distribution = db.query(
             models.Booking.service_type, 
@@ -140,16 +142,10 @@ class AnalyticsController:
     @staticmethod
     def get_ai_prediction_metrics(db: Session) -> Dict[str, Any]:
         """
-        Aggregates model mathematical accuracy configurations, statistical confidence indices, 
-        and water/electricity hardware calibration logs for frontend ingestion.
-        Accepts an open database connection context session parameters to review data targets.
+        Aggregates model mathematical accuracy configurations and calibration logs.
         """
         ai = AIEngine()
-        
-        # Evaluate model mathematical variances using database constraints if required
         demand_metrics = ai.calculate_model_accuracy()
-        
-        # Evaluate hardware telemetry consumption coefficients and baseline calibration metrics
         utility_metrics = PredictionService.calculate_utility_accuracy()
         
         return {
