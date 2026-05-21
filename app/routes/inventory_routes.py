@@ -24,18 +24,29 @@ def create_inventory_item(item_data: InventoryItemCreate, db: Session = Depends(
     Added try-except block to catch database integrity errors (like NULL values or constraint violations).
     """
     try:
+        # Validate required fields
+        if not item_data.item_name or not item_data.item_name.strip():
+            raise HTTPException(status_code=400, detail="Item name is required")
+        if item_data.shop_id <= 0:
+            raise HTTPException(status_code=400, detail="Valid shop_id is required")
+        
         # Pass the item_data to the controller
         result = inventory_controller.create_item(db, item_data=item_data)
         
         if not result:
-            raise HTTPException(status_code=400, detail="Failed to create item - possible database constraint violation.")
+            raise HTTPException(
+                status_code=400, 
+                detail="Failed to create item - please check all required fields are filled correctly"
+            )
             
         return result
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log the specific error here to check in Render Logs
+        # Log the specific error for debugging
         print(f"CRITICAL ERROR in create_inventory_item: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            status_code=status.HTTP_400_BAD_REQUEST, 
             detail=f"Database error: {str(e)}"
         )
 

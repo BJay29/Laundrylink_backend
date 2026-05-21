@@ -72,6 +72,7 @@ class SettingResponse(SettingBase):
 class InventoryItemBase(BaseModel):
     """Base schema for laundry supply tracking and stock levels."""
     item_name: str
+    category: str = "General"
     current_stock: float
     reorder_point: float
     unit: str
@@ -87,6 +88,7 @@ class InventoryItemUpdate(BaseModel):
     current_stock: Optional[float] = None
     reorder_point: Optional[float] = None
     usage_rate: Optional[float] = None
+    category: Optional[str] = None
 
 class InventoryItemResponse(InventoryItemBase):
     """Full response schema for the Inventory Dashboard."""

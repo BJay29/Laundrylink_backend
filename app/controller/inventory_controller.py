@@ -11,8 +11,15 @@ def get_item(db: Session, item_id: int):
     return db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
 
 def create_item(db: Session, item_data: InventoryItemCreate):
-    """Creates a new inventory item in the database with usage_rate support."""
+    """Creates a new inventory item in the database with usage_rate and category support."""
     try:
+        # Validate that shop_id exists
+        from app.models import Shop
+        shop = db.query(Shop).filter(Shop.id == item_data.shop_id).first()
+        if not shop:
+            print(f"Invalid shop_id: {item_data.shop_id}")
+            return None
+        
         new_item = InventoryItem(
             item_name=item_data.item_name,
             category=item_data.category,
@@ -27,8 +34,8 @@ def create_item(db: Session, item_data: InventoryItemCreate):
         db.refresh(new_item)
         return new_item
     except Exception as e:
-        db.rollback() # Rollback transaction on failure
-        print(f"Database Error in create_item: {e}")
+        db.rollback()
+        print(f"Database Error in create_item: {str(e)}")
         return None
 
 def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate):
