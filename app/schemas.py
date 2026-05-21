@@ -67,6 +67,30 @@ class SettingResponse(SettingBase):
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
 
+# --- INVENTORY SCHEMAS ---
+
+class InventoryItemBase(BaseModel):
+    """Base schema for laundry supply tracking and stock levels."""
+    item_name: str
+    current_stock: float
+    reorder_point: float
+    unit: str
+
+class InventoryItemCreate(InventoryItemBase):
+    """Schema for adding new inventory items."""
+    shop_id: int
+
+class InventoryItemUpdate(BaseModel):
+    """Schema for updating stock levels."""
+    current_stock: Optional[float] = None
+    reorder_point: Optional[float] = None
+
+class InventoryItemResponse(InventoryItemBase):
+    """Full response schema for the Inventory Dashboard."""
+    id: int
+    shop_id: int
+    model_config = ConfigDict(from_attributes=True)
+
 # --- MACHINE SCHEMAS ---
 
 class MachineBase(BaseModel):
@@ -78,7 +102,7 @@ class MachineBase(BaseModel):
     
     accumulated_detergent: float = 0.0   
     accumulated_electricity: float = 0.0  
-    accumulated_water: float = 0.0         
+    accumulated_water: float = 0.0        
 
 class MachineCreate(MachineBase):
     """Used for initial hardware registration."""

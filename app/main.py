@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
-from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes
+# Import inventory_routes here
+from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes
 from sqlalchemy.orm import Session
 
 # --- DATABASE SEEDING & DATA INTEGRITY LOGIC ---
@@ -29,7 +30,7 @@ def seed_settings(db: Session):
             comforter_price=150.0,    
             electricity_rate=12.0,
             water_rate=50.0,
-            deterget_cost_per_load=10.0,
+            detergent_cost_per_load=10.0,
             off_peak_hours="8:00 AM - 11:00 AM"
         )
         db.add(default_settings)
@@ -148,7 +149,7 @@ app.add_middleware(
         "http://localhost:5174", # Vite Web Alt
         "http://localhost:3000", # React
         "http://localhost:49552", # Specific Flutter Web Port (from your error)
-        "*",                      # ALLOW ALL (Essential for mobile emulators/testing)
+        "*",                     # ALLOW ALL (Essential for mobile emulators/testing)
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -162,6 +163,7 @@ app.include_router(booking_routes.router)
 app.include_router(machine_routes.router)
 app.include_router(setting_routes.router)
 app.include_router(analytics_routes.router)
+app.include_router(inventory_routes.router) # Registered inventory routes
 
 # --- ROOT HEALTH CHECK ---
 
@@ -172,6 +174,6 @@ def read_root():
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
         "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "Bookings", "Machines", "Settings", "Analytics"],
+        "modules_active": ["Auth", "Bookings", "Machines", "Settings", "Analytics", "Inventory"],
         "environment": "Development Sprint"
     }

@@ -19,6 +19,7 @@ class Shop(Base):
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
     machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
+    inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
     
     # One-to-one relationship with shop-specific configuration
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
@@ -29,6 +30,31 @@ class Shop(Base):
             "shop_name": self.shop_name,
             "address": self.address,
             "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+class InventoryItem(Base):
+    """
+    Tracks stock levels of laundry consumables with predictive reorder points.
+    """
+    __tablename__ = "inventory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_name = Column(String, index=True, nullable=False)
+    current_stock = Column(Float, default=0.0)
+    reorder_point = Column(Float, default=5.0)
+    unit = Column(String, default="kg") # e.g., 'kg', 'liters', 'pieces'
+    
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="inventory")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "item_name": self.item_name,
+            "current_stock": self.current_stock,
+            "reorder_point": self.reorder_point,
+            "unit": self.unit,
+            "shop_id": self.shop_id
         }
 
 class Setting(Base):
