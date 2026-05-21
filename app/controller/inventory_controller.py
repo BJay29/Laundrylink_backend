@@ -99,3 +99,74 @@ def delete_item(db: Session, item_id: int):
         db.rollback()
         print(f"Database Error in delete_item: {e}")
         return None
+
+def get_item_analytics(db: Session, item_id: int, days: int = 7):
+    """
+    Retrieves analytics and usage graph data for a specific item.
+    Returns item details with consumption history for charting.
+    """
+    try:
+        from app.services.inventory_service import get_inventory_analytics
+        
+        db_item = get_item(db, item_id)
+        if not db_item:
+            return None
+        
+        # Get usage history from service
+        usage_history = get_inventory_analytics(db, item_id=item_id, days=days)
+        
+        return {
+            "item_id": db_item.id,
+            "item_name": db_item.item_name,
+            "unit": db_item.unit,
+            "current_stock": db_item.current_stock,
+            "reorder_point": db_item.reorder_point,
+            "usage_history": usage_history
+        }
+    except Exception as e:
+        print(f"Error in get_item_analytics: {e}")
+        return None
+
+def get_inventory_dashboard_stats(db: Session, shop_id: int):
+    """
+    Retrieves complete inventory dashboard statistics including low stock alerts.
+    """
+    try:
+        from app.services.inventory_service import check_low_stock_alerts
+        
+        # Get all items for this shop
+        all_items = get_inventory(db, shop_id=shop_id)
+        
+        # Get low stock alerts
+        low_stock_items = check_low_stock_alerts(db, shop_id=shop_id)
+        
+        # Calculate statistics
+        total_items = len(all_items)
+        items_critical = sum(1 for item in all_items if item.current_stock <= (item.reorder_point * 0.5))
+        items_low = sum(1 for item in all_items if item.reorder_point * 0.5 < item.current_stock <= item.reorder_point)
+        items_ok = total_items - items_critical - items_low
+        
+        # Format alerts
+        alerts = []
+        for item in low_stock_items:
+            status = "CRITICAL" if item.current_stock <= (item.reorder_point * 0.5) else "LOW"
+            alerts.append({
+                "id": item.id,
+                "item_name": item.item_name,
+                "current_stock": item.current_stock,
+                "reorder_point": item.reorder_point,
+                "unit": item.unit,
+                "status": status
+            })
+        
+        return {
+            "total_items": total_items,
+            "items_ok": items_ok,
+            "items_low": items_low,
+            "items_critical": items_critical,
+            "total_stock_value": sum(item.current_stock for item in all_items),
+            "low_stock_alerts": alerts
+        }
+    except Exception as e:
+        print(f"Error in get_inventory_dashboard_stats: {e}")
+        return None

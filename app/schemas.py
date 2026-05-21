@@ -96,6 +96,43 @@ class InventoryItemResponse(InventoryItemBase):
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
 
+# --- INVENTORY ANALYTICS SCHEMAS ---
+
+class InventoryUsageData(BaseModel):
+    """Single data point for usage graph."""
+    date: str
+    usage: float
+
+class InventoryAnalyticsResponse(BaseModel):
+    """Graph data for inventory consumption trends."""
+    item_id: int
+    item_name: str
+    unit: str
+    current_stock: float
+    reorder_point: float
+    usage_history: List[InventoryUsageData]
+    model_config = ConfigDict(from_attributes=True)
+
+class LowStockAlert(BaseModel):
+    """Alert for inventory items below reorder point."""
+    id: int
+    item_name: str
+    current_stock: float
+    reorder_point: float
+    unit: str
+    status: str  # "CRITICAL", "LOW", "OK"
+    model_config = ConfigDict(from_attributes=True)
+
+class InventoryDashboardStats(BaseModel):
+    """Overall inventory statistics for dashboard summary."""
+    total_items: int
+    items_ok: int
+    items_low: int
+    items_critical: int
+    total_stock_value: float
+    low_stock_alerts: List[LowStockAlert]
+    model_config = ConfigDict(from_attributes=True)
+
 # --- MACHINE SCHEMAS ---
 
 class MachineBase(BaseModel):

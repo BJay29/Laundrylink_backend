@@ -1,10 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List
 
 from app.database import get_db
 from app.controller import inventory_controller
-from app.schemas import InventoryItemCreate, InventoryItemUpdate, InventoryItemResponse
+from app.schemas import (
+    InventoryItemCreate, 
+    InventoryItemUpdate, 
+    InventoryItemResponse,
+    InventoryAnalyticsResponse,
+    InventoryDashboardStats
+)
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
 
@@ -76,3 +82,33 @@ def delete_inventory_item(item_id: int, db: Session = Depends(get_db)):
     if not deleted_item:
         raise HTTPException(status_code=404, detail="Item not found")
     return None
+
+@router.get("/{item_id}/analytics", response_model=InventoryAnalyticsResponse)
+def get_item_analytics(item_id: int, days: int = Query(7, ge=1, le=90), db: Session = Depends(get_db)):
+    """
+    Retrieves usage analytics and graph data for a specific inventory item.
+    Shows consumption trends over the last N days (default 7, max 90).
+    """
+    try:
+        analytics = inventory_controller.get_item_analytics(db, item_id=item_id, days=days)
+        if not analytics:
+            raise HTTPException(status_code=404, detail="Item not found or no usage data available")
+        return analytics
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/shop/{shop_id}/alerts", response_model=InventoryDashboardStats)
+def get_low_stock_alerts(shop_id: int, db: Session = Depends(get_db)):
+    """
+    Retrieves inventory status dashboard with low stock alerts and inventory statistics.
+    Shows critical items, low items, and overall inventory health.
+    """
+    try:
+        stats = inventory_controller.get_inventory_dashboard_stats(db, shop_id=shop_id)
+        return stats
+    except Exception as e:
+        print(f"Error fetching inventory stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
