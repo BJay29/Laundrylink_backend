@@ -16,12 +16,17 @@ def read_inventory(shop_id: int, db: Session = Depends(get_db)):
 
 @router.post("/", response_model=InventoryItemResponse)
 def create_inventory_item(item_data: InventoryItemCreate, db: Session = Depends(get_db)):
-    """Adds a new item to the inventory."""
+    """
+    Adds a new item to the inventory. 
+    Expects 'usage_rate' in the request body to enable auto-deduction.
+    """
     return inventory_controller.create_item(db, item_data=item_data)
 
 @router.put("/{item_id}", response_model=InventoryItemResponse)
 def update_inventory_item(item_id: int, item_data: InventoryItemUpdate, db: Session = Depends(get_db)):
-    """Updates stock levels or reorder points for an existing item."""
+    """
+    Updates stock levels, reorder points, or usage rates for an existing item.
+    """
     updated_item = inventory_controller.update_item(db, item_id=item_id, item_data=item_data)
     if not updated_item:
         raise HTTPException(status_code=404, detail="Item not found")

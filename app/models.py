@@ -35,6 +35,7 @@ class Shop(Base):
 class InventoryItem(Base):
     """
     Tracks stock levels of laundry consumables with predictive reorder points.
+    Added usage_rate to support automated deduction during bookings.
     """
     __tablename__ = "inventory"
 
@@ -43,6 +44,9 @@ class InventoryItem(Base):
     current_stock = Column(Float, default=0.0)
     reorder_point = Column(Float, default=5.0)
     unit = Column(String, default="kg") # e.g., 'kg', 'liters', 'pieces'
+    
+    # New field: defines how much stock is deducted per single 'add_detergent' usage
+    usage_rate = Column(Float, default=0.05) 
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="inventory")
@@ -54,6 +58,7 @@ class InventoryItem(Base):
             "current_stock": self.current_stock,
             "reorder_point": self.reorder_point,
             "unit": self.unit,
+            "usage_rate": self.usage_rate,
             "shop_id": self.shop_id
         }
 
@@ -67,14 +72,12 @@ class Setting(Base):
     id = Column(Integer, primary_key=True, index=True)
     
     # --- Service Pricing ---
-    # Standardized naming to ensure compatibility with frontend and seeding scripts.
     full_service_price = Column(Float, default=210.0)
     regular_wash_price = Column(Float, default=65.0) 
     titan_wash_price = Column(Float, default=100.0)
     comforter_price = Column(Float, default=150.0)
     
     # --- Operating Costs ---
-    # These unit rates are used by the Prediction Service for net profit calculations.
     electricity_rate = Column(Float, default=12.0)   # PHP per kWh
     water_rate = Column(Float, default=50.0)         # PHP per Cubic Meter (m3)
     detergent_cost_per_load = Column(Float, default=10.0) # Estimated PHP per cycle
@@ -135,22 +138,16 @@ class Machine(Base):
     machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
     machine_number = Column(Integer, nullable=False)
     
-    # Real-time Telemetry state for the UI Monitoring Hub
-    status = Column(String, default="Available") # 'Available', 'Busy', 'Maintenance'
+    # Real-time Telemetry state
+    status = Column(String, default="Available") 
     current_service_type = Column(String, default="None")
     current_price = Column(Float, default=0.0)
-    
-    # Persistent countdown timer for frontend synchronization across refreshes
     remaining_time = Column(Integer, default=0) 
-    
-    # Operational Analytics for Lifecycle tracking
     total_cycles = Column(Integer, default=0)
     
-    # Financial metrics calculated by the Prediction Service
+    # Financial metrics
     net_profit_accumulated = Column(Float, default=0.0)
     profitability_rate = Column(Float, default=0.0) 
-    
-    # Aggregated Utility Costs tracked per machine
     accumulated_electricity = Column(Float, default=0.0) 
     accumulated_water = Column(Float, default=0.0)       
     accumulated_detergent = Column(Float, default=0.0)   
@@ -158,23 +155,11 @@ class Machine(Base):
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")
 
-    # Transaction history relationships
-    washer_bookings = relationship(
-        "Booking", 
-        foreign_keys="[Booking.washer_id]", 
-        back_populates="washer"
-    )
-    dryer_bookings = relationship(
-        "Booking", 
-        foreign_keys="[Booking.dryer_id]", 
-        back_populates="dryer"
-    )
+    washer_bookings = relationship("Booking", foreign_keys="[Booking.washer_id]", back_populates="washer")
+    dryer_bookings = relationship("Booking", foreign_keys="[Booking.dryer_id]", back_populates="dryer")
 
     def to_dict(self):
-        overhead = (self.accumulated_electricity or 0.0) + \
-                   (self.accumulated_water or 0.0) + \
-                   (self.accumulated_detergent or 0.0)
-        
+        overhead = (self.accumulated_electricity or 0.0) + (self.accumulated_water or 0.0) + (self.accumulated_detergent or 0.0)
         return {
             "id": self.id,
             "machine_type": self.machine_type,
@@ -198,60 +183,33 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customer service requests to hardware units.
-    This table provides the source data for actual service volume and weight analytics.
     """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
     customer_name = Column(String, nullable=False)
-    
-    # Service Configuration: Values must strictly match the following for dashboard filtering:
-    # 'Full Service', 'Titan Wash', 'Regular Wash', 'Comforter'
     service_type = Column(String, nullable=False) 
     category = Column(String, nullable=False)
-    
-    # Used for calculating the 'Total Load' metric in the dashboard breakdown
     weight = Column(Float, nullable=False)
     loads = Column(Integer, default=1)
-    
-    # Financial fields captured at the time of creation
     total_price = Column(Float, nullable=False)
-    booking_mode = Column(String, nullable=False) # 'Self-Service' or 'Full Service'
-    
+    booking_mode = Column(String, nullable=False)
     service_duration = Column(Integer, default=45) 
-    
-    # Boolean flags for additional service costs
     add_detergent = Column(Boolean, default=False)
     add_delivery = Column(Boolean, default=False)
     is_rush = Column(Boolean, default=False)
-
     status = Column(String, default="Pending") 
     
-    # Hardware mapping
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
-    
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
-    # Timestamps for tracking and historical volume analytics
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Relationships
     shop = relationship("Shop", back_populates="bookings")
-    
-    washer = relationship(
-        "Machine", 
-        foreign_keys=[washer_id], 
-        back_populates="washer_bookings",
-        lazy="joined" 
-    )
-    dryer = relationship(
-        "Machine", 
-        foreign_keys=[dryer_id], 
-        back_populates="dryer_bookings",
-        lazy="joined"
-    )
+    washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
+    dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
 
     def to_dict(self):
         return {

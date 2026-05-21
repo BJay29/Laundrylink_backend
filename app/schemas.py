@@ -75,6 +75,8 @@ class InventoryItemBase(BaseModel):
     current_stock: float
     reorder_point: float
     unit: str
+    # usage_rate is required for automated stock deduction during bookings
+    usage_rate: float = 0.05
 
 class InventoryItemCreate(InventoryItemBase):
     """Schema for adding new inventory items."""
@@ -84,6 +86,7 @@ class InventoryItemUpdate(BaseModel):
     """Schema for updating stock levels."""
     current_stock: Optional[float] = None
     reorder_point: Optional[float] = None
+    usage_rate: Optional[float] = None
 
 class InventoryItemResponse(InventoryItemBase):
     """Full response schema for the Inventory Dashboard."""

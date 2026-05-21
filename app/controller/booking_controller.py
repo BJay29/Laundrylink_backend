@@ -1,4 +1,4 @@
-from app.models import Booking, Machine, Setting
+from app.models import Booking, Machine, Setting, InventoryItem
 from app.schemas import BookingCreate
 from app.services.prediction_service import PredictionService
 from fastapi import HTTPException, status
@@ -8,12 +8,10 @@ from datetime import datetime, timezone
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
     Creates a new booking, updates machine status to 'Busy', and syncs telemetry.
-    This version fetches live Pricing Settings from the database to ensure 
-    the total_price reflects the most recent owner updates.
+    Automatically deducts detergent stock if 'add_detergent' is enabled.
     """
     
     # --- 1. FETCH LIVE PRICING SETTINGS ---
-    # This prevents the system from using old/hardcoded prices.
     settings = db.query(Setting).filter(Setting.shop_id == shop_id).first()
     if not settings:
         raise HTTPException(
@@ -21,7 +19,22 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
             detail="Shop settings not found. Please configure pricing in Settings."
         )
 
-    # Ensure the timestamp is timezone-aware for accurate forecasting
+    # --- 2. AUTOMATED INVENTORY DEDUCTION ---
+    # If the user selected 'add_detergent', we find the detergent item and reduce its stock
+    if booking_data.add_detergent:
+        detergent_item = db.query(InventoryItem).filter(
+            InventoryItem.shop_id == shop_id,
+            InventoryItem.item_name.ilike("%Detergent%")
+        ).first()
+
+        if detergent_item:
+            if detergent_item.current_stock >= detergent_item.usage_rate:
+                detergent_item.current_stock -= detergent_item.usage_rate
+            else:
+                # Optional: Raise error if out of stock, or proceed with warning
+                pass
+
+    # Ensure the timestamp is timezone-aware
     actual_booking_time = booking_data.booking_timestamp or datetime.now(timezone.utc)
 
     # Initialize the new booking record
@@ -31,7 +44,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         category=booking_data.category,
         weight=booking_data.weight,
         loads=booking_data.loads,
-        total_price=booking_data.total_price, # Calculated value passed from Frontend
+        total_price=booking_data.total_price,
         booking_mode=booking_data.booking_mode,
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
@@ -63,32 +76,29 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail=f"{machine.machine_type} #{machine.machine_number} is Offline for Maintenance."
             )
         
-        # --- 2. UPDATE MACHINE REAL-TIME STATUS ---
+        # --- 3. UPDATE MACHINE REAL-TIME STATUS ---
         machine.status = "Busy"
         machine.current_service_type = booking_data.service_type
         machine.current_price = booking_data.total_price
         machine.total_cycles += 1
 
-        # Calculate remaining runtime for the countdown timer
+        # Calculate remaining runtime
         machine.remaining_time = PredictionService.get_machine_runtime(
             machine.machine_type, booking_data.service_type
         )
 
-        # --- 3. DYNAMIC OVERHEAD & PROFIT TRACKING ---
-        # Fetch overhead rates (Electricity/Water/Detergent) based on current Settings
+        # --- 4. DYNAMIC OVERHEAD & PROFIT TRACKING ---
         overhead_data = PredictionService.get_overhead(machine.machine_type)
         
-        # Increment accumulated utility telemetry
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
 
-        # Calculate net profit for this transaction
+        # Calculate net profit
         overhead_total = overhead_data.get("total_overhead", 0.0)
         net_profit = booking_data.total_price - overhead_total
         machine.net_profit_accumulated += net_profit
 
-        # Update the profitability margin percentage
         if booking_data.total_price > 0:
             margin = (net_profit / booking_data.total_price) * 100
             machine.profitability_rate = max(0.0, min(100.0, margin))
@@ -99,7 +109,6 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.add(new_booking)
         db.commit()
 
-        # Re-fetch with relationships loaded to ensure the UI receives machine numbers
         return (
             db.query(Booking)
             .options(joinedload(Booking.washer), joinedload(Booking.dryer))
@@ -154,7 +163,6 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             ).all()
             
             for machine in machines:
-                # Do not release if manually set to Maintenance
                 if machine.status != "Maintenance":
                     machine.status = "Available"
                     machine.remaining_time = 0
@@ -163,7 +171,6 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     try:
         db.commit()
-        # Return updated booking with machine details
         return (
             db.query(Booking)
             .options(joinedload(Booking.washer), joinedload(Booking.dryer))

@@ -11,12 +11,13 @@ def get_item(db: Session, item_id: int):
     return db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
 
 def create_item(db: Session, item_data: InventoryItemCreate):
-    """Creates a new inventory item in the database."""
+    """Creates a new inventory item in the database with usage_rate support."""
     new_item = InventoryItem(
         item_name=item_data.item_name,
         current_stock=item_data.current_stock,
         reorder_point=item_data.reorder_point,
         unit=item_data.unit,
+        usage_rate=item_data.usage_rate, # Included usage_rate for automated deductions
         shop_id=item_data.shop_id
     )
     db.add(new_item)
@@ -25,13 +26,15 @@ def create_item(db: Session, item_data: InventoryItemCreate):
     return new_item
 
 def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate):
-    """Updates the stock level and reorder point of an existing item."""
+    """Updates the stock level, reorder point, and usage_rate of an existing item."""
     db_item = get_item(db, item_id)
     if db_item:
         if item_data.current_stock is not None:
             db_item.current_stock = item_data.current_stock
         if item_data.reorder_point is not None:
             db_item.reorder_point = item_data.reorder_point
+        if item_data.usage_rate is not None:
+            db_item.usage_rate = item_data.usage_rate
         
         db.commit()
         db.refresh(db_item)
