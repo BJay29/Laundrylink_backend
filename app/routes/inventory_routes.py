@@ -11,23 +11,37 @@ router = APIRouter(prefix="/inventory", tags=["Inventory"])
 @router.get("/", response_model=List[InventoryItemResponse])
 def read_inventory(shop_id: int, db: Session = Depends(get_db)):
     """Fetches all inventory items for a specific shop."""
-    items = inventory_controller.get_inventory(db, shop_id=shop_id)
-    return items
+    try:
+        return inventory_controller.get_inventory(db, shop_id=shop_id)
+    except Exception as e:
+        print(f"Error fetching inventory: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/", response_model=InventoryItemResponse)
 def create_inventory_item(item_data: InventoryItemCreate, db: Session = Depends(get_db)):
     """
     Adds a new item to the inventory. 
-    Expects 'usage_rate' in the request body to enable auto-deduction.
+    Added try-except block to catch database integrity errors (like NULL values or constraint violations).
     """
-    return inventory_controller.create_item(db, item_data=item_data)
+    try:
+        # Pass the item_data to the controller
+        result = inventory_controller.create_item(db, item_data=item_data)
+        
+        if not result:
+            raise HTTPException(status_code=400, detail="Failed to create item - possible database constraint violation.")
+            
+        return result
+    except Exception as e:
+        # Log the specific error here to check in Render Logs
+        print(f"CRITICAL ERROR in create_inventory_item: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Database error: {str(e)}"
+        )
 
 @router.post("/{item_id}/use", response_model=InventoryItemResponse)
 def record_item_usage(item_id: int, quantity: float, db: Session = Depends(get_db)):
-    """
-    Manually records consumption of an item.
-    This deducts from current stock and logs the entry for graph visualization.
-    """
+    """Manually records consumption of an item."""
     updated_item = inventory_controller.record_usage(db, item_id=item_id, quantity_used=quantity)
     if not updated_item:
         raise HTTPException(
@@ -38,9 +52,7 @@ def record_item_usage(item_id: int, quantity: float, db: Session = Depends(get_d
 
 @router.put("/{item_id}", response_model=InventoryItemResponse)
 def update_inventory_item(item_id: int, item_data: InventoryItemUpdate, db: Session = Depends(get_db)):
-    """
-    Updates stock levels, reorder points, or usage rates for an existing item.
-    """
+    """Updates existing inventory items."""
     updated_item = inventory_controller.update_item(db, item_id=item_id, item_data=item_data)
     if not updated_item:
         raise HTTPException(status_code=404, detail="Item not found")
