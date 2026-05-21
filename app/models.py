@@ -15,13 +15,10 @@ class Shop(Base):
     address = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    # Cascade deletion ensures that if a shop is removed, all related data is purged.
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
     machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
     inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
-    
-    # One-to-one relationship with shop-specific configuration
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
 
     def to_dict(self):
@@ -35,23 +32,19 @@ class Shop(Base):
 class InventoryItem(Base):
     """
     Tracks stock levels of laundry consumables with predictive reorder points.
-    Added usage_rate to support automated deduction during bookings.
     """
     __tablename__ = "inventory"
 
     id = Column(Integer, primary_key=True, index=True)
     item_name = Column(String, index=True, nullable=False)
-    category = Column(String, default="General") # Added category for filtering
+    category = Column(String, default="General")
     current_stock = Column(Float, default=0.0)
     reorder_point = Column(Float, default=5.0)
-    unit = Column(String, default="kg") # e.g., 'kg', 'liters', 'pieces'
-    
-    # New field: defines how much stock is deducted per single usage
+    unit = Column(String, default="kg")
     usage_rate = Column(Float, default=0.05) 
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="inventory")
-    # Link to logs for graph data
     logs = relationship("InventoryLog", back_populates="item", cascade="all, delete-orphan")
 
     def to_dict(self):
@@ -82,26 +75,23 @@ class InventoryLog(Base):
 class Setting(Base):
     """
     Global configuration for service pricing and operational unit costs.
-    Acts as the 'Single Source of Truth' for price calculations in the Booking Modal.
     """
     __tablename__ = "settings"
 
     id = Column(Integer, primary_key=True, index=True)
     
-    # --- Service Pricing ---
     full_service_price = Column(Float, default=210.0)
     regular_wash_price = Column(Float, default=65.0) 
     titan_wash_price = Column(Float, default=100.0)
     comforter_price = Column(Float, default=150.0)
     
-    # --- Operating Costs ---
-    electricity_rate = Column(Float, default=12.0)   # PHP per kWh
-    water_rate = Column(Float, default=50.0)         # PHP per Cubic Meter (m3)
-    detergent_cost_per_load = Column(Float, default=10.0) # Estimated PHP per cycle
+    electricity_rate = Column(Float, default=12.0)
+    water_rate = Column(Float, default=50.0)
+    detergent_cost_per_load = Column(Float, default=10.0)
     
-    # --- Optimization Settings ---
+    # These two columns caused the 500 error because they were missing in the DB
     off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
-    operation_start_hour = Column(Integer, default=8) # 24-hour format (0-23)
+    operation_start_hour = Column(Integer, default=8)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="settings")
@@ -130,7 +120,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False) 
-    role = Column(String, nullable=False) # 'owner' or 'staff'
+    role = Column(String, nullable=False)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
     is_active = Column(Boolean, default=True)
@@ -154,22 +144,20 @@ class Machine(Base):
     __tablename__ = "machines"
 
     id = Column(Integer, primary_key=True, index=True)
-    machine_type = Column(String, nullable=False) # 'Washer' or 'Dryer'
+    machine_type = Column(String, nullable=False)
     machine_number = Column(Integer, nullable=False)
     
-    # Real-time Telemetry state
     status = Column(String, default="Available") 
     current_service_type = Column(String, default="None")
     current_price = Column(Float, default=0.0)
     remaining_time = Column(Integer, default=0) 
     total_cycles = Column(Integer, default=0)
     
-    # Financial metrics
     net_profit_accumulated = Column(Float, default=0.0)
     profitability_rate = Column(Float, default=0.0) 
     accumulated_electricity = Column(Float, default=0.0) 
-    accumulated_water = Column(Float, default=0.0)         
-    accumulated_detergent = Column(Float, default=0.0)   
+    accumulated_water = Column(Float, default=0.0) 
+    accumulated_detergent = Column(Float, default=0.0) 
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="machines")

@@ -26,7 +26,8 @@ class AnalyticsController:
         """
         # 1. Fetch Operational Settings for Auto-Reset Logic
         settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
-        # Default to 8 AM if not set
+        
+        # Use safe access to avoid errors if settings are not found
         op_start_hour = settings.operation_start_hour if settings else 8 
         
         now = datetime.now()
@@ -55,8 +56,7 @@ class AnalyticsController:
             models.Booking.created_at >= seven_days_ago
         ).first()
 
-        # 4. Calculate Expenses (Assuming simple overhead logic)
-        # You can expand this based on your models
+        # 4. Calculate Expenses
         total_revenue_weekly = weekly_stats.revenue or 0.0
         total_expenses_weekly = total_revenue_weekly * 0.35 # Example: 35% operational cost
 
@@ -113,11 +113,11 @@ class AnalyticsController:
         }
 
     @staticmethod
-    def get_forecast_data(db: Session, shop_id: int = 1):
-        ai = AIEngine()
-        raw_forecast = ai.get_weekly_forecast(is_rainy_forecast=False)
-        ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
-
+    def get_weekly_history(db: Session, shop_id: int = 1):
+        """
+        Provides historical income data for the last 7 days.
+        This fixes the 'no attribute get_weekly_history_data' error.
+        """
         history_data = []
         for i in range(6, -1, -1):
             target_date = datetime.now().date() - timedelta(days=i)
@@ -130,10 +130,17 @@ class AnalyticsController:
                 "label": target_date.strftime("%b %d"),
                 "actual_income": round(float(actual_income), 2)
             })
+        return history_data
+
+    @staticmethod
+    def get_forecast_data(db: Session, shop_id: int = 1):
+        ai = AIEngine()
+        raw_forecast = ai.get_weekly_forecast(is_rainy_forecast=False)
+        ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
 
         return {
             "forecast": raw_forecast,
-            "history": history_data,
+            "history": AnalyticsController.get_weekly_history(db, shop_id),
             "ai_generated_insight": ai_narrative
         }
 

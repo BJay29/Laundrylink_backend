@@ -100,8 +100,8 @@ def get_weekly_history(db: Session = Depends(get_db)):
     Provides a daily breakdown for the past 7 days to facilitate detailed financial review.
     """
     try:
-        # Calls the controller to get daily breakdown of revenue vs expenses
-        history = AnalyticsController.get_weekly_history_data(db, shop_id=1)
+        # UPDATED: Corrected the call from get_weekly_history_data to get_weekly_history
+        history = AnalyticsController.get_weekly_history(db, shop_id=1)
         return history
     except Exception as e:
         raise HTTPException(
