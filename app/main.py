@@ -13,17 +13,15 @@ def seed_settings(db: Session):
     """
     Ensures that default optimization settings exist for shop_id=1.
     This runs ONLY if the settings table is empty for this shop.
-    Initializes pricing based on the standard project requirements.
     """
     existing_settings = db.query(models.Setting).filter(models.Setting.shop_id == 1).first()
     
     if not existing_settings:
         print("Initial boot detected: No settings found for Shop 1. Seeding factory defaults...")
         
-        # Default configuration used only for first-time setup.
-        # Once seeded, the system will prioritize user updates in the DB.
         default_settings = models.Setting(
             shop_id=1,
+            operation_start_hour=8,
             full_service_price=210.0,
             regular_wash_price=65.0,  
             titan_wash_price=100.0,   
@@ -39,60 +37,28 @@ def seed_settings(db: Session):
     else:
         print("Shop settings already initialized. Preserving user modifications.")
 
-def seed_machines():
+def seed_hardware_and_inventory():
     """
-    1. Verifies existing hardware and updates any legacy NULL shop_ids to 1.
-    2. Populates an empty machine table with 6 Washers and 6 Dryers.
+    1. Initializes settings, machines, and ensures database tables are ready.
+    2. Acts as a safety layer to prevent crashes on startup.
     """
     db = SessionLocal()
     try:
-        # Initialize Settings first to ensure the shop structure exists
+        # Initialize Settings
         seed_settings(db)
 
-        # Fix legacy data: Convert machines with NULL shop_id to default shop_id=1
+        # Fix legacy machine records
         null_machines = db.query(models.Machine).filter(models.Machine.shop_id == None).all()
-        if null_machines:
-            print(f"Repair Mode: Found {len(null_machines)} machines with NULL shop_id. Fixing...")
-            for m in null_machines:
-                m.shop_id = 1
-            db.commit()
-            print("Legacy hardware records successfully mapped to shop_id=1.")
+        for m in null_machines:
+            m.shop_id = 1
+        db.commit()
 
-        # Initial hardware seeding for fresh database installations
-        machine_count = db.query(models.Machine).count()
-        
-        if machine_count == 0:
-            print("Hardware Hub empty. Seeding 12 units for Shop 1...")
-            
-            machines_to_add = []
-            
-            # Create 6 Washers
-            for i in range(1, 7):
-                machines_to_add.append(
-                    models.Machine(
-                        machine_number=i, 
-                        machine_type="Washer", 
-                        status="Available",
-                        shop_id=1
-                    )
-                )
-            
-            # Create 6 Dryers
-            for i in range(1, 7):
-                machines_to_add.append(
-                    models.Machine(
-                        machine_number=i, 
-                        machine_type="Dryer", 
-                        status="Available",
-                        shop_id=1
-                    )
-                )
-            
-            db.add_all(machines_to_add)
+        # Check machines
+        if db.query(models.Machine).count() == 0:
+            print("Seeding default 12 hardware units...")
+            machines = [models.Machine(machine_number=i, machine_type="Washer" if i<=6 else "Dryer", status="Available", shop_id=1) for i in range(1, 13)]
+            db.add_all(machines)
             db.commit()
-            print(f"Successfully deployed {len(machines_to_add)} hardware units to Shop 1.")
-        else:
-            print(f"Machine Hub active: {machine_count} units detected. Seed skipped.")
             
     except Exception as e:
         print(f"Database Initialization/Seeding Error: {e}")
@@ -106,7 +72,6 @@ def seed_machines():
 async def lifespan(app: FastAPI):
     """
     Handles backend startup and shutdown sequences.
-    Ensures PostgreSQL table synchronization and data seeding on boot.
     """
     print("====================================================")
     print("LaundryLink Backend: Initialization Sequence Started")
@@ -116,8 +81,8 @@ async def lifespan(app: FastAPI):
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Schema Synchronization: COMPLETE")
         
-        # Trigger data seeding and hardware integrity checks
-        seed_machines()
+        # Trigger data seeding
+        seed_hardware_and_inventory()
         
     except Exception as e:
         print(f"Critical System Boot Error: {e}")
@@ -139,18 +104,10 @@ app = FastAPI(
 )
 
 # --- CORS MIDDLEWARE FIX ---
-# Updated to allow Flutter Web, Localhost, and Wildcard for mobile testing
 
 app.add_middleware(
     CORSMiddleware,
-    # Use ["*"] to allow all origins during development, or list specific ones:
-    allow_origins=[
-        "http://localhost:5173", # Vite Web
-        "http://localhost:5174", # Vite Web Alt
-        "http://localhost:3000", # React
-        "http://localhost:49552", # Specific Flutter Web Port (from your error)
-        "*",                     # ALLOW ALL (Essential for mobile emulators/testing)
-    ],
+    allow_origins=["*"], # Wildcard is safe for dev, but restrict to your frontend URL for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -163,17 +120,15 @@ app.include_router(booking_routes.router)
 app.include_router(machine_routes.router)
 app.include_router(setting_routes.router)
 app.include_router(analytics_routes.router)
-app.include_router(inventory_routes.router) # Registered inventory routes
+app.include_router(inventory_routes.router)
 
 # --- ROOT HEALTH CHECK ---
 
 @app.get("/")
 def read_root():
-    """Returns the operational status and active modules of the backend."""
     return {
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
         "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "Bookings", "Machines", "Settings", "Analytics", "Inventory"],
-        "environment": "Development Sprint"
+        "modules_active": ["Auth", "Bookings", "Machines", "Settings", "Analytics", "Inventory"]
     }
