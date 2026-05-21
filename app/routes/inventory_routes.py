@@ -22,6 +22,20 @@ def create_inventory_item(item_data: InventoryItemCreate, db: Session = Depends(
     """
     return inventory_controller.create_item(db, item_data=item_data)
 
+@router.post("/{item_id}/use", response_model=InventoryItemResponse)
+def record_item_usage(item_id: int, quantity: float, db: Session = Depends(get_db)):
+    """
+    Manually records consumption of an item.
+    This deducts from current stock and logs the entry for graph visualization.
+    """
+    updated_item = inventory_controller.record_usage(db, item_id=item_id, quantity_used=quantity)
+    if not updated_item:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Insufficient stock or item not found"
+        )
+    return updated_item
+
 @router.put("/{item_id}", response_model=InventoryItemResponse)
 def update_inventory_item(item_id: int, item_data: InventoryItemUpdate, db: Session = Depends(get_db)):
     """

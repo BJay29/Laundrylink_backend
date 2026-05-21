@@ -41,26 +41,43 @@ class InventoryItem(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     item_name = Column(String, index=True, nullable=False)
+    category = Column(String, default="General") # Added category for filtering
     current_stock = Column(Float, default=0.0)
     reorder_point = Column(Float, default=5.0)
     unit = Column(String, default="kg") # e.g., 'kg', 'liters', 'pieces'
     
-    # New field: defines how much stock is deducted per single 'add_detergent' usage
+    # New field: defines how much stock is deducted per single usage
     usage_rate = Column(Float, default=0.05) 
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="inventory")
+    # Link to logs for graph data
+    logs = relationship("InventoryLog", back_populates="item", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
             "id": self.id,
             "item_name": self.item_name,
+            "category": self.category,
             "current_stock": self.current_stock,
             "reorder_point": self.reorder_point,
             "unit": self.unit,
             "usage_rate": self.usage_rate,
             "shop_id": self.shop_id
         }
+
+class InventoryLog(Base):
+    """
+    Records historical inventory usage data for trend visualization and graphs.
+    """
+    __tablename__ = "inventory_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("inventory.id"), nullable=False)
+    quantity_used = Column(Float, nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    
+    item = relationship("InventoryItem", back_populates="logs")
 
 class Setting(Base):
     """
@@ -84,6 +101,7 @@ class Setting(Base):
     
     # --- Optimization Settings ---
     off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
+    operation_start_hour = Column(Integer, default=8) # 24-hour format (0-23)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="settings")
@@ -99,6 +117,7 @@ class Setting(Base):
             "water_rate": self.water_rate,
             "detergent_cost_per_load": self.detergent_cost_per_load,
             "off_peak_hours": self.off_peak_hours,
+            "operation_start_hour": self.operation_start_hour,
             "shop_id": self.shop_id
         }
 
@@ -149,7 +168,7 @@ class Machine(Base):
     net_profit_accumulated = Column(Float, default=0.0)
     profitability_rate = Column(Float, default=0.0) 
     accumulated_electricity = Column(Float, default=0.0) 
-    accumulated_water = Column(Float, default=0.0)       
+    accumulated_water = Column(Float, default=0.0)         
     accumulated_detergent = Column(Float, default=0.0)   
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)

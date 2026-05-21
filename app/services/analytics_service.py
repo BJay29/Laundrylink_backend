@@ -38,8 +38,9 @@ class AnalyticsService:
         actual_metrics = AnalyticsController.get_dashboard_summary(self.db, shop_id)
         
         # Calculate trends for Revenue and Bookings
-        current_rev = actual_metrics.get("today_revenue", 0)
-        previous_rev = actual_metrics.get("last_week_revenue", 1) # Ensure default is 1 to avoid div by zero
+        # Note: We now use weekly_revenue for a more stable trend comparison
+        current_rev = actual_metrics.get("weekly_revenue", 0)
+        previous_rev = actual_metrics.get("last_week_revenue", 1) 
         
         current_book = actual_metrics.get("total_bookings", 0)
         previous_book = actual_metrics.get("last_week_bookings", 1)

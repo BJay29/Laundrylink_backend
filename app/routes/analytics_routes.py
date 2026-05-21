@@ -34,14 +34,11 @@ def get_insights(db: Session = Depends(get_db)):
 @router.get("/dashboard-summary")
 def get_summary(db: Session = Depends(get_db)):
     """
-    Fetch comprehensive dashboard KPIs, service counters, and historical trend comparisons.
-    Returns:
-    - Active revenue tracking and weekly growth metrics.
-    - AI-predicted customer volumes vs projected daily target earnings.
-    - Breakdown of services and total load capacity metrics in kilograms.
+    Fetch comprehensive dashboard KPIs, including daily revenue (auto-reset),
+    weekly income, expenses, service counters, and historical trend comparisons.
     """
     try:
-        # Fetching summary which now includes last_week_revenue/bookings for trend calculation
+        # Fetching summary which now includes weekly_revenue, weekly_expenses, and auto-reset daily revenue
         summary = AnalyticsController.get_dashboard_summary(db, shop_id=1)
         return summary
     except Exception as e:
@@ -94,4 +91,20 @@ def get_ai_accuracy(db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=500,
             detail=f"Error executing AI accuracy model evaluation: {str(e)}"
+        )
+
+@router.get("/weekly-history")
+def get_weekly_history(db: Session = Depends(get_db)):
+    """
+    Retrieve aggregated weekly income and expense history for the History Modal.
+    Provides a daily breakdown for the past 7 days to facilitate detailed financial review.
+    """
+    try:
+        # Calls the controller to get daily breakdown of revenue vs expenses
+        history = AnalyticsController.get_weekly_history_data(db, shop_id=1)
+        return history
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching weekly history data: {str(e)}"
         )

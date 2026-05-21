@@ -22,40 +22,57 @@ class AnalyticsController:
     def get_dashboard_summary(db: Session, shop_id: int = 1):
         """
         Calculates aggregate summary statistics including current performance 
-        and historical comparison for trends.
+        (reset based on operational hours), weekly totals, and expenses.
         """
-        today = datetime.now().date()
-        # Define date ranges for comparison
-        seven_days_ago = today - timedelta(days=7)
-        last_week_start = today - timedelta(days=14)
-        last_week_end = today - timedelta(days=8)
+        # 1. Fetch Operational Settings for Auto-Reset Logic
+        settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
+        # Default to 8 AM if not set
+        op_start_hour = settings.operation_start_hour if settings else 8 
+        
+        now = datetime.now()
+        # Define reset time: Today at op_start_hour
+        today_reset_time = now.replace(hour=op_start_hour, minute=0, second=0, microsecond=0)
+        
+        # If current time is before reset time, shift to yesterday's reset time
+        if now < today_reset_time:
+            today_reset_time -= timedelta(days=1)
 
-        # 1. Fetch Current Week Stats (Last 7 days)
-        current_week_stats = db.query(
+        # 2. Fetch "Today" Revenue (Since operation start)
+        today_stats = db.query(
             func.sum(models.Booking.total_price).label("revenue"),
             func.count(models.Booking.id).label("bookings")
         ).filter(
             models.Booking.shop_id == shop_id,
-            func.date(models.Booking.created_at) >= seven_days_ago
+            models.Booking.created_at >= today_reset_time
         ).first()
 
-        # 2. Fetch Previous Week Stats (For comparison)
+        # 3. Fetch Weekly Summary (Last 7 days)
+        seven_days_ago = now - timedelta(days=7)
+        weekly_stats = db.query(
+            func.sum(models.Booking.total_price).label("revenue")
+        ).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.created_at >= seven_days_ago
+        ).first()
+
+        # 4. Calculate Expenses (Assuming simple overhead logic)
+        # You can expand this based on your models
+        total_revenue_weekly = weekly_stats.revenue or 0.0
+        total_expenses_weekly = total_revenue_weekly * 0.35 # Example: 35% operational cost
+
+        # Previous week comparison logic
+        last_week_start = now - timedelta(days=14)
+        last_week_end = now - timedelta(days=8)
         last_week_stats = db.query(
             func.sum(models.Booking.total_price).label("revenue"),
             func.count(models.Booking.id).label("bookings")
         ).filter(
             models.Booking.shop_id == shop_id,
-            func.date(models.Booking.created_at) >= last_week_start,
-            func.date(models.Booking.created_at) <= last_week_end
+            models.Booking.created_at >= last_week_start,
+            models.Booking.created_at <= last_week_end
         ).first()
 
-        today_revenue = current_week_stats.revenue or 0.0
-        last_week_revenue = last_week_stats.revenue or 0.0
-        
-        today_bookings = current_week_stats.bookings or 0
-        last_week_bookings = last_week_stats.bookings or 0
-
-        # 3. Aggregate Service Volumes
+        # 5. Aggregate Service Volumes
         service_counts = db.query(
             models.Booking.service_type, 
             func.count(models.Booking.id).label("total")
@@ -63,12 +80,12 @@ class AnalyticsController:
         
         service_map = {item.service_type: item.total for item in service_counts}
 
-        # 4. Total Weight Volume (kg)
+        # 6. Total Weight Volume (kg)
         total_kg = db.query(func.sum(models.Booking.weight)).filter(
             models.Booking.shop_id == shop_id
         ).scalar() or 0.0
 
-        # 5. AI Engine Data
+        # 7. AI Engine Data
         ai = AIEngine()
         predicted_count_today = ai.get_predicted_bookings(datetime.now())
         projected_income_today = ai.calculate_projected_income(predicted_count_today)
@@ -79,10 +96,12 @@ class AnalyticsController:
         ).count()
 
         return {
-            "today_revenue": round(float(today_revenue), 2),
-            "last_week_revenue": round(float(last_week_revenue), 2),
-            "total_bookings": today_bookings,
-            "last_week_bookings": last_week_bookings,
+            "today_revenue": round(float(today_stats.revenue or 0.0), 2),
+            "weekly_revenue": round(float(total_revenue_weekly), 2),
+            "weekly_expenses": round(float(total_expenses_weekly), 2),
+            "last_week_revenue": round(float(last_week_stats.revenue or 0.0), 2),
+            "total_bookings": today_stats.bookings or 0,
+            "last_week_bookings": last_week_stats.bookings or 0,
             "active_machines": active_machines,
             "predicted_bookings_today": predicted_count_today,
             "projected_income_today": projected_income_today,
