@@ -5,4 +5,3 @@ __pycache__/
 # Environments
 venv/
 .env
-ml_models/
