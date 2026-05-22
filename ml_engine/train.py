@@ -104,6 +104,12 @@ def train_forecast_model(shop_id: int = 1) -> dict:
     _save_accuracy_report(validation_frame, validation_predictions)
     return artifact["metrics"]
 
+# --- ADDED THIS FUNCTION TO FIX YOUR IMPORT ERROR ---
+def run_training_pipeline():
+    """
+    Wrapper function to be called by PredictionService.
+    """
+    return train_forecast_model()
 
 def main() -> None:
     metrics = train_forecast_model()

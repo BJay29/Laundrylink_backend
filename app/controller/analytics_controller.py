@@ -3,7 +3,7 @@ from sqlalchemy import func
 from datetime import datetime, timedelta
 from typing import Dict, Any
 from pathlib import Path
-import json # Added for reading metrics
+import json 
 from app import models
 from app.services.ai_engine import AIEngine
 from app.services.prediction_service import PredictionService
@@ -157,8 +157,9 @@ class AnalyticsController:
     def get_ai_prediction_metrics(db: Session) -> Dict[str, Any]:
         """
         Retrieves real-time accuracy metrics from the dynamic model_metrics.json file.
+        This function remains consistent with the updated PredictionService model.
         """
-        metrics_path = Path("app/ml_models/model_metrics.json")
+        metrics_path = PredictionService.METRICS_PATH
         if not metrics_path.exists():
             return {"status": "error", "message": "Metrics configuration not found"}
             

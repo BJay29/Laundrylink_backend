@@ -6,6 +6,9 @@ from app import models
 # Import inventory_routes here
 from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes
 from sqlalchemy.orm import Session
+# New imports for 24-hour automated retraining
+from apscheduler.schedulers.background import BackgroundScheduler
+from app.services.prediction_service import PredictionService
 
 # --- DATABASE SEEDING & DATA INTEGRITY LOGIC ---
 
@@ -83,6 +86,12 @@ async def lifespan(app: FastAPI):
         
         # Trigger data seeding
         seed_hardware_and_inventory()
+
+        # Initialize Automated 24-hour Retraining Scheduler
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(PredictionService.retrain_model, 'interval', hours=24)
+        scheduler.start()
+        print("AI Engine Scheduler: Automated 24-hour Training ONLINE")
         
     except Exception as e:
         print(f"Critical System Boot Error: {e}")

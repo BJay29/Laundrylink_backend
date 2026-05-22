@@ -1,10 +1,12 @@
 import numpy as np
 from typing import Dict, Any
 import pickle
-import json  # Added for reading metrics
-import os    # Added for path management
+import json 
+import os 
 from datetime import datetime, timedelta
 from pathlib import Path
+# I-import ang training logic mula sa iyong ml_engine
+from ml_engine.train import run_training_pipeline 
 
 class PredictionService:
     """
@@ -28,7 +30,20 @@ class PredictionService:
     }
 
     MODEL_PATH = Path(__file__).resolve().parents[2] / "ml_models" / "forecast.pkl"
-    METRICS_PATH = Path(__file__).resolve().parents[2] / "ml_models" / "model_metrics.json" # Added path
+    METRICS_PATH = Path(__file__).resolve().parents[2] / "ml_models" / "model_metrics.json"
+
+    @classmethod
+    def retrain_model(cls):
+        """
+        Triggers the machine learning training pipeline.
+        This method is called by the background scheduler every 24 hours.
+        """
+        try:
+            print(f"[{datetime.now()}] Automated training sequence initiated.")
+            run_training_pipeline() 
+            print(f"[{datetime.now()}] Automated training completed successfully.")
+        except Exception as e:
+            print(f"[{datetime.now()}] Error during automated training: {e}")
 
     @classmethod
     def _load_forecast_artifact(cls) -> Dict[str, Any]:
