@@ -13,7 +13,6 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
     
     # --- 1. FETCH LIVE PRICING SETTINGS ---
-    # This prevents the system from using old/hardcoded prices.
     settings = db.query(Setting).filter(Setting.shop_id == shop_id).first()
     if not settings:
         raise HTTPException(
@@ -38,10 +37,10 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail="Selected inventory item not found for this shop."
             )
 
+        # Calculate usage based on load or provided value
         quantity_to_use = booking_data.inventory_quantity_used
-        if quantity_to_use is None:
-            # Automatically calculate usage based on the selected inventory item rate.
-            quantity_to_use = max(booking_data.loads * inventory_item.usage_rate, 0.01)
+        if quantity_to_use is None or quantity_to_use <= 0:
+            quantity_to_use = max(booking_data.loads * (inventory_item.usage_rate or 1.0), 0.01)
 
         if inventory_item.current_stock < quantity_to_use:
             raise HTTPException(
@@ -49,6 +48,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 detail="Inventory item has insufficient stock for the booking."
             )
 
+        # Deduct stock and log the transaction
         inventory_item.current_stock -= quantity_to_use
         usage_log = InventoryLog(item_id=inventory_item.id, quantity_used=quantity_to_use)
         db.add(usage_log)
@@ -61,7 +61,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         category=booking_data.category,
         weight=booking_data.weight,
         loads=booking_data.loads,
-        total_price=booking_data.total_price, # Calculated value passed from Frontend
+        total_price=booking_data.total_price,
         booking_mode=booking_data.booking_mode,
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
@@ -106,20 +106,16 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         )
 
         # --- 3. DYNAMIC OVERHEAD & PROFIT TRACKING ---
-        # Fetch overhead rates (Electricity/Water/Detergent) based on current Settings
         overhead_data = PredictionService.get_overhead(machine.machine_type)
         
-        # Increment accumulated utility telemetry
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
 
-        # Calculate net profit for this transaction
         overhead_total = overhead_data.get("total_overhead", 0.0)
         net_profit = booking_data.total_price - overhead_total
         machine.net_profit_accumulated += net_profit
 
-        # Update the profitability margin percentage
         if booking_data.total_price > 0:
             margin = (net_profit / booking_data.total_price) * 100
             machine.profitability_rate = max(0.0, min(100.0, margin))
@@ -129,6 +125,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     try:
         db.add(new_booking)
         db.commit()
+        db.refresh(new_booking)
 
         # Re-fetch with relationships loaded to ensure the UI receives machine numbers
         return (
