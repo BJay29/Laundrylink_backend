@@ -84,11 +84,19 @@ class InventoryItemCreate(InventoryItemBase):
     shop_id: int
 
 class InventoryItemUpdate(BaseModel):
-    """Schema for updating stock levels."""
+    """
+    Schema for updating an existing inventory item.
+    All fields are optional so partial updates are supported.
+    item_name and unit were previously missing, which caused the backend
+    to silently ignore name and unit edits sent from the frontend.
+    """
+    item_name: Optional[str] = None
+    category: Optional[str] = None
     current_stock: Optional[float] = None
     reorder_point: Optional[float] = None
     usage_rate: Optional[float] = None
-    category: Optional[str] = None
+    unit: Optional[str] = None
+    shop_id: Optional[int] = None
 
 class InventoryItemResponse(InventoryItemBase):
     """Full response schema for the Inventory Dashboard."""
