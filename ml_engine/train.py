@@ -8,6 +8,8 @@ Run from the project root:
 from __future__ import annotations
 
 import pickle
+import json  # Added for metrics storage
+import os    # Added for path management
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = PROJECT_ROOT / "ml_models"
 MODEL_PATH = MODEL_DIR / "forecast.pkl"
 REPORT_PATH = MODEL_DIR / "accuracy_report.png"
+METRICS_PATH = MODEL_DIR / "model_metrics.json" # Added path for JSON
 
 
 def _split_validation(frame):
@@ -90,6 +93,14 @@ def train_forecast_model(shop_id: int = 1) -> dict:
     with MODEL_PATH.open("wb") as model_file:
         pickle.dump(artifact, model_file)
 
+    # Save accuracy metrics to JSON for dynamic dashboard display
+    metrics_data = {
+        "demand_forecasting_model": artifact["metrics"],
+        "last_updated": artifact["trained_at"]
+    }
+    with open(METRICS_PATH, "w") as f:
+        json.dump(metrics_data, f, indent=4)
+
     _save_accuracy_report(validation_frame, validation_predictions)
     return artifact["metrics"]
 
@@ -98,6 +109,7 @@ def main() -> None:
     metrics = train_forecast_model()
     print(f"Model saved to {MODEL_PATH}")
     print(f"Accuracy report saved to {REPORT_PATH}")
+    print(f"Metrics saved to {METRICS_PATH}")
     print(metrics)
 
 
