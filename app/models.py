@@ -209,6 +209,7 @@ class Booking(Base):
     
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory.id"), nullable=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -217,6 +218,7 @@ class Booking(Base):
     shop = relationship("Shop", back_populates="bookings")
     washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
     dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
+    inventory_item = relationship("InventoryItem", lazy="joined")
 
     def to_dict(self):
         return {
@@ -235,6 +237,8 @@ class Booking(Base):
             "add_delivery": self.add_delivery,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
+            "inventory_item_id": self.inventory_item_id,
+            "inventory_item_name": self.inventory_item.item_name if self.inventory_item else None,
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,

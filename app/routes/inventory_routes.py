@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Dict
 
 from app.database import get_db
 from app.controller import inventory_controller
@@ -21,6 +21,15 @@ def read_inventory(shop_id: int, db: Session = Depends(get_db)):
         return inventory_controller.get_inventory(db, shop_id=shop_id)
     except Exception as e:
         print(f"Error fetching inventory: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/categories", response_model=Dict[str, List[InventoryItemResponse]])
+def read_inventory_by_category(shop_id: int, db: Session = Depends(get_db)):
+    """Fetches inventory items grouped by category for category/item dropdowns."""
+    try:
+        return inventory_controller.get_inventory_grouped_by_category(db, shop_id=shop_id)
+    except Exception as e:
+        print(f"Error fetching inventory by category: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/", response_model=InventoryItemResponse)

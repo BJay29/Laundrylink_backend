@@ -1,5 +1,8 @@
 import numpy as np
 from typing import Dict, Any
+import pickle
+from datetime import datetime, timedelta
+from pathlib import Path
 
 class PredictionService:
     """
@@ -21,6 +24,66 @@ class PredictionService:
         "washer": 45,
         "dryer":  40,
     }
+
+    MODEL_PATH = Path(__file__).resolve().parents[2] / "ml_models" / "forecast.pkl"
+
+    @classmethod
+    def _load_forecast_artifact(cls) -> Dict[str, Any]:
+        if not cls.MODEL_PATH.exists() or cls.MODEL_PATH.stat().st_size == 0:
+            raise FileNotFoundError(
+                f"Forecast model not found at {cls.MODEL_PATH}. Run `python -m ml_engine.train` first."
+            )
+
+        with cls.MODEL_PATH.open("rb") as model_file:
+            return pickle.load(model_file)
+
+    @classmethod
+    def get_revenue_forecast(cls, days: int = 7) -> list[Dict[str, Any]]:
+        """
+        Load the trained Linear Regression artifact and generate frontend-ready forecast rows.
+        """
+        artifact = cls._load_forecast_artifact()
+        model = artifact["model"]
+        feature_columns = artifact["feature_columns"]
+        average_ticket = max(float(artifact.get("average_ticket", 150.0)), 1.0)
+        average_loads_per_booking = max(float(artifact.get("average_loads_per_booking", 1.0)), 1.0)
+
+        today = datetime.now()
+        forecast_rows = []
+        for offset in range(1, days + 1):
+            target_date = today + timedelta(days=offset)
+            day_of_week = target_date.weekday()
+            historical_day_index = int(artifact["last_day_index"]) + offset
+            estimated_bookings = 18 if day_of_week in (5, 6) else 12
+            estimated_loads = max(1, round(estimated_bookings * average_loads_per_booking))
+
+            feature_map = {
+                "day_index": historical_day_index,
+                "day_of_week": day_of_week,
+                "is_weekend": 1 if day_of_week in (5, 6) else 0,
+                "booking_count": estimated_bookings,
+                "total_loads": estimated_loads,
+            }
+            features = [[feature_map[column] for column in feature_columns]]
+            projected_income = max(float(model.predict(features)[0]), 0.0)
+            predicted_bookings = max(0, round(projected_income / average_ticket))
+
+            forecast_rows.append(
+                {
+                    "date": target_date.strftime("%Y-%m-%d"),
+                    "label": target_date.strftime("%b %d, %a"),
+                    "predicted_bookings": predicted_bookings,
+                    "projected_income": round(projected_income, 2),
+                    "is_peak": day_of_week in (0, 4, 5, 6),
+                }
+            )
+
+        return forecast_rows
+
+    @classmethod
+    def calculate_forecast_accuracy(cls) -> Dict[str, Any]:
+        artifact = cls._load_forecast_artifact()
+        return artifact.get("metrics", {})
 
     @classmethod
     def calculate_cycle_cost(cls, machine_type: str, duration_minutes: int) -> Dict[str, float]:

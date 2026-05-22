@@ -1,4 +1,4 @@
-from app.models import Booking, Machine, Setting
+from app.models import Booking, Machine, Setting, InventoryItem, InventoryLog
 from app.schemas import BookingCreate
 from app.services.prediction_service import PredictionService
 from fastapi import HTTPException, status
@@ -24,6 +24,36 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     # Ensure the timestamp is timezone-aware for accurate forecasting
     actual_booking_time = booking_data.booking_timestamp or datetime.now(timezone.utc)
 
+    # Attempt to reserve inventory when an item is chosen in the booking modal.
+    inventory_item_id = None
+    if booking_data.inventory_item_id is not None:
+        inventory_item = db.query(InventoryItem).filter(
+            InventoryItem.id == booking_data.inventory_item_id,
+            InventoryItem.shop_id == shop_id
+        ).first()
+
+        if not inventory_item:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Selected inventory item not found for this shop."
+            )
+
+        quantity_to_use = booking_data.inventory_quantity_used
+        if quantity_to_use is None:
+            # Automatically calculate usage based on the selected inventory item rate.
+            quantity_to_use = max(booking_data.loads * inventory_item.usage_rate, 0.01)
+
+        if inventory_item.current_stock < quantity_to_use:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inventory item has insufficient stock for the booking."
+            )
+
+        inventory_item.current_stock -= quantity_to_use
+        usage_log = InventoryLog(item_id=inventory_item.id, quantity_used=quantity_to_use)
+        db.add(usage_log)
+        inventory_item_id = inventory_item.id
+
     # Initialize the new booking record
     new_booking = Booking(
         customer_name=booking_data.customer_name,
@@ -39,6 +69,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         status="In Progress",
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
+        inventory_item_id=inventory_item_id,
         shop_id=shop_id,
         booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)

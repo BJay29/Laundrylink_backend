@@ -205,6 +205,8 @@ class BookingCreate(BaseModel):
 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
+    inventory_item_id: Optional[int] = None
+    inventory_quantity_used: Optional[float] = None
 
     add_detergent: bool = False
     add_delivery: bool = False
@@ -236,6 +238,8 @@ class BookingResponse(BaseModel):
     shop_id: int 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
+    inventory_item_id: Optional[int] = None
+    inventory_item_name: Optional[str] = None
     
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None

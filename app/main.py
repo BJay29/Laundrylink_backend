@@ -3,8 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
-# Import inventory_routes here
-from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes
+# Import inventory_routes and all other modules
+from app.routes import (
+    auth_routes, 
+    booking_routes, 
+    machine_routes, 
+    setting_routes, 
+    analytics_routes, 
+    inventory_routes
+)
 from sqlalchemy.orm import Session
 
 # --- DATABASE SEEDING & DATA INTEGRITY LOGIC ---
@@ -107,7 +114,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Wildcard is safe for dev, but restrict to your frontend URL for production
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -115,12 +122,12 @@ app.add_middleware(
 
 # --- ROUTER REGISTRATION ---
 
-app.include_router(auth_routes.router)
-app.include_router(booking_routes.router)
-app.include_router(machine_routes.router)
-app.include_router(setting_routes.router)
-app.include_router(analytics_routes.router)
-app.include_router(inventory_routes.router)
+app.include_router(auth_routes.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(booking_routes.router, prefix="/api/bookings", tags=["Bookings"])
+app.include_router(machine_routes.router, prefix="/api/machines", tags=["Machines"])
+app.include_router(setting_routes.router, prefix="/api/settings", tags=["Settings"])
+app.include_router(analytics_routes.router, prefix="/api/analytics", tags=["Analytics"])
+app.include_router(inventory_routes.router, prefix="/api/inventory", tags=["Inventory"])
 
 # --- ROOT HEALTH CHECK ---
 

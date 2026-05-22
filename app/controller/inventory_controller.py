@@ -10,6 +10,15 @@ def get_item(db: Session, item_id: int):
     """Retrieves a single inventory item by its ID."""
     return db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
 
+def get_inventory_grouped_by_category(db: Session, shop_id: int):
+    """Returns inventory organized by category for dropdown UI support."""
+    items = get_inventory(db, shop_id=shop_id)
+    grouped = {}
+    for item in items:
+        category = item.category or "General"
+        grouped.setdefault(category, []).append(item)
+    return grouped
+
 def create_item(db: Session, item_data: InventoryItemCreate):
     """Creates a new inventory item in the database with usage_rate and category support."""
     try:
