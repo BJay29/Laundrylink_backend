@@ -48,10 +48,15 @@ def create_item(db: Session, item_data: InventoryItemCreate):
         return None
 
 def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate):
-    """Updates the stock level, reorder point, and usage_rate of an existing item."""
+    """Updates all editable fields of an existing inventory item including item_name."""
     try:
         db_item = get_item(db, item_id)
         if db_item:
+            # Update item_name if provided — this was previously missing,
+            # which caused item name edits to be silently ignored
+            if item_data.item_name is not None:
+                db_item.item_name = item_data.item_name
+
             if item_data.current_stock is not None:
                 db_item.current_stock = item_data.current_stock
             if item_data.reorder_point is not None:
@@ -60,7 +65,9 @@ def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate):
                 db_item.usage_rate = item_data.usage_rate
             if item_data.category is not None:
                 db_item.category = item_data.category
-            
+            if item_data.unit is not None:
+                db_item.unit = item_data.unit
+
             db.commit()
             db.refresh(db_item)
         return db_item
