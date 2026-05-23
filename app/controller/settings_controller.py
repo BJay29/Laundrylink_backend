@@ -1,6 +1,10 @@
 from sqlalchemy.orm import Session
 from .. import models, schemas
 import logging
+from passlib.context import CryptContext # Added for password hashing
+
+# Set up password hashing context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Set up logging to track if the system is falling back to defaults
 logger = logging.getLogger(__name__)
@@ -18,6 +22,8 @@ SYSTEM_DEFAULTS = {
     "detergent_cost_per_load": 10.0,
     "off_peak_hours": "8:00 AM - 11:00 AM"
 }
+
+# --- SETTINGS FUNCTIONS ---
 
 def get_settings(db: Session, shop_id: int):
     """
@@ -107,3 +113,39 @@ def get_pricing_for_booking(db: Session, shop_id: int):
         "Comforter": float(settings.comforter_price),
         "detergent_fee": float(settings.detergent_cost_per_load)
     }
+
+# --- PROFILE & SECURITY FUNCTIONS (NEW) ---
+
+def update_shop_profile(db: Session, shop_id: int, profile_data: schemas.ShopProfileUpdate):
+    """
+    Updates the shop's contact information and business profile.
+    """
+    db_shop = db.query(models.Shop).filter(models.Shop.id == shop_id).first()
+    if not db_shop:
+        return None
+    
+    update_data = profile_data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        if hasattr(db_shop, key):
+            setattr(db_shop, key, value)
+            
+    db.commit()
+    db.refresh(db_shop)
+    return db_shop
+
+def update_user_password(db: Session, user_id: int, password_data: schemas.PasswordUpdate):
+    """
+    Validates the old password and updates to a new hashed password.
+    """
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        return {"error": "User not found"}
+    
+    # Verify old password
+    if not pwd_context.verify(password_data.old_password, db_user.hashed_password):
+        return {"error": "Incorrect old password"}
+    
+    # Update to new hashed password
+    db_user.hashed_password = pwd_context.hash(password_data.new_password)
+    db.commit()
+    return {"message": "Password updated successfully"}

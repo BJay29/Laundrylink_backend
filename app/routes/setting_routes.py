@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import schemas
-from ..controller import settings_controller
+from ..controller import settings_controller, auth_controller # Assuming auth_controller handles user session
 
 # Define the router with a prefix for clean API organization
 router = APIRouter(
@@ -92,3 +92,25 @@ def get_booking_pricing(shop_id: int, db: Session = Depends(get_db)):
             detail="Pricing data unavailable for the booking transaction"
         )
     return pricing
+
+# --- PROFILE & PASSWORD ROUTES (NEW) ---
+
+@router.put("/{shop_id}/profile", response_model=schemas.ShopProfileResponse)
+def update_shop_profile(shop_id: int, profile_update: schemas.ShopProfileUpdate, db: Session = Depends(get_db)):
+    """
+    Update shop name, address, and contact email.
+    """
+    updated_shop = settings_controller.update_shop_profile(db, shop_id, profile_update)
+    if not updated_shop:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    return updated_shop
+
+@router.put("/user/{user_id}/password")
+def update_password(user_id: int, password_update: schemas.PasswordUpdate, db: Session = Depends(get_db)):
+    """
+    Update user password after verifying current credentials.
+    """
+    result = settings_controller.update_user_password(db, user_id, password_update)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result

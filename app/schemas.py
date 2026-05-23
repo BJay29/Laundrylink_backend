@@ -305,4 +305,31 @@ class InsightResponse(BaseModel):
     impactDetail: str
     suggestions: List[str]
 
+    # --- SETTINGS & PROFILE SCHEMAS ---
+
+class ShopProfileUpdate(BaseModel):
+    """
+    Schema for updating the shop information.
+    Allows partial updates for shop name, address, or contact email.
+    """
+    shop_name: Optional[str] = None
+    address: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+class PasswordUpdate(BaseModel):
+    """
+    Schema for validating password change requests.
+    Includes the old password for security verification.
+    """
+    old_password: str
+    new_password: str
+
+class ShopProfileResponse(BaseModel):
+    """
+    Schema for returning the current shop profile data.
+    """
+    shop_name: str
+    address: str
+    email: str
+
     model_config = ConfigDict(from_attributes=True)
