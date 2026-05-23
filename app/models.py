@@ -13,7 +13,6 @@ class Shop(Base):
     id = Column(Integer, primary_key=True, index=True)
     shop_name = Column(String, unique=True, nullable=False)
     address = Column(String, nullable=True)
-    email = Column(String, nullable=True) # Added for shop contact email
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
@@ -27,7 +26,6 @@ class Shop(Base):
             "id": self.id,
             "shop_name": self.shop_name,
             "address": self.address,
-            "email": self.email, # Included in dictionary
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
@@ -91,6 +89,7 @@ class Setting(Base):
     water_rate = Column(Float, default=50.0)
     detergent_cost_per_load = Column(Float, default=10.0)
     
+    # These two columns caused the 500 error because they were missing in the DB
     off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
     operation_start_hour = Column(Integer, default=8)
     
@@ -115,13 +114,13 @@ class Setting(Base):
 class User(Base):
     """
     Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
+    Column is named 'hashed_password' to match the existing database schema.
     """
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    # Kept hashed_password as per your database schema
-    hashed_password = Column(String, nullable=False) 
+    hashed_password = Column(String, nullable=False)  # matches the actual database column name
     role = Column(String, nullable=False)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
