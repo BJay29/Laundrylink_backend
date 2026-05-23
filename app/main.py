@@ -1,3 +1,5 @@
+import os
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -141,3 +143,10 @@ def read_root():
         "database": "PostgreSQL Connected",
         "modules_active": ["Auth", "Bookings", "Machines", "Settings", "Analytics", "Inventory"]
     }
+
+# --- PRODUCTION ENTRY POINT ---
+
+if __name__ == "__main__":
+    # Ensure Render's PORT environment variable is used, defaulting to 10000
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
