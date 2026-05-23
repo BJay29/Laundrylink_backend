@@ -83,6 +83,8 @@ async def lifespan(app: FastAPI):
     
     try:
         # Syncing SQLAlchemy models with the database schema
+        # NOTE: If columns like 'hashed_password' are missing, this will NOT add them.
+        # You must ensure the DB is updated via SQL (ALTER TABLE) or Drop/Recreate.
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Schema Synchronization: COMPLETE")
         
@@ -118,7 +120,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Wildcard is safe for dev, but restrict to your frontend URL for production
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -147,6 +149,7 @@ def read_root():
 # --- PRODUCTION ENTRY POINT ---
 
 if __name__ == "__main__":
-    # Ensure Render's PORT environment variable is used, defaulting to 10000
+    # Render assigns the port dynamically. If not set, default to 10000
     port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
+    # Passing the 'app' instance directly avoids module pathing issues in production
+    uvicorn.run(app, host="0.0.0.0", port=port)
