@@ -1,158 +1,248 @@
-import os
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from app.database import engine, SessionLocal
-from app import models
-# Import inventory_routes here
-from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes
-from sqlalchemy.orm import Session
-# New imports for 24-hour automated retraining
-from apscheduler.schedulers.background import BackgroundScheduler
-from app.services.prediction_service import PredictionService
+from app.database import Base
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy.orm import relationship
+from datetime import datetime, timezone
 
-# --- DATABASE SEEDING & DATA INTEGRITY LOGIC ---
+class Shop(Base):
+    """
+    Represents a laundry business entity.
+    Acts as the parent container for machines, users, transactions, and settings.
+    """
+    __tablename__ = "shops"
 
-def seed_settings(db: Session):
+    id = Column(Integer, primary_key=True, index=True)
+    shop_name = Column(String, unique=True, nullable=False)
+    address = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
+    machines = relationship("Machine", back_populates="shop", cascade="all, delete-orphan")
+    bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
+    inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
+    settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "shop_name": self.shop_name,
+            "address": self.address,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+class InventoryItem(Base):
     """
-    Ensures that default optimization settings exist for shop_id=1.
-    This runs ONLY if the settings table is empty for this shop.
+    Tracks stock levels of laundry consumables with predictive reorder points.
     """
-    existing_settings = db.query(models.Setting).filter(models.Setting.shop_id == 1).first()
+    __tablename__ = "inventory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_name = Column(String, index=True, nullable=False)
+    category = Column(String, default="General")
+    current_stock = Column(Float, default=0.0)
+    reorder_point = Column(Float, default=5.0)
+    unit = Column(String, default="kg")
+    usage_rate = Column(Float, default=0.05) 
     
-    if not existing_settings:
-        print("Initial boot detected: No settings found for Shop 1. Seeding factory defaults...")
-        
-        default_settings = models.Setting(
-            shop_id=1,
-            operation_start_hour=8,
-            full_service_price=210.0,
-            regular_wash_price=65.0,  
-            titan_wash_price=100.0,   
-            comforter_price=150.0,    
-            electricity_rate=12.0,
-            water_rate=50.0,
-            detergent_cost_per_load=10.0,
-            off_peak_hours="8:00 AM - 11:00 AM"
-        )
-        db.add(default_settings)
-        db.commit()
-        print("Default shop settings successfully seeded.")
-    else:
-        print("Shop settings already initialized. Preserving user modifications.")
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="inventory")
+    logs = relationship("InventoryLog", back_populates="item", cascade="all, delete-orphan")
 
-def seed_hardware_and_inventory():
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "item_name": self.item_name,
+            "category": self.category,
+            "current_stock": self.current_stock,
+            "reorder_point": self.reorder_point,
+            "unit": self.unit,
+            "usage_rate": self.usage_rate,
+            "shop_id": self.shop_id
+        }
+
+class InventoryLog(Base):
     """
-    1. Initializes settings, machines, and ensures database tables are ready.
-    2. Acts as a safety layer to prevent crashes on startup.
+    Records historical inventory usage data for trend visualization and graphs.
     """
-    db = SessionLocal()
-    try:
-        # Initialize Settings
-        seed_settings(db)
+    __tablename__ = "inventory_logs"
 
-        # Fix legacy machine records
-        null_machines = db.query(models.Machine).filter(models.Machine.shop_id == None).all()
-        for m in null_machines:
-            m.shop_id = 1
-        db.commit()
-
-        # Check machines
-        if db.query(models.Machine).count() == 0:
-            print("Seeding default 12 hardware units...")
-            machines = [models.Machine(machine_number=i, machine_type="Washer" if i<=6 else "Dryer", status="Available", shop_id=1) for i in range(1, 13)]
-            db.add_all(machines)
-            db.commit()
-            
-    except Exception as e:
-        print(f"Database Initialization/Seeding Error: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-# --- LIFESPAN MANAGER ---
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Handles backend startup and shutdown sequences.
-    """
-    print("====================================================")
-    print("LaundryLink Backend: Initialization Sequence Started")
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("inventory.id"), nullable=False)
+    quantity_used = Column(Float, nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     
-    try:
-        # Syncing SQLAlchemy models with the database schema
-        models.Base.metadata.create_all(bind=engine)
-        print("PostgreSQL Schema Synchronization: COMPLETE")
-        
-        # Trigger data seeding
-        seed_hardware_and_inventory()
+    item = relationship("InventoryItem", back_populates="logs")
 
-        # Initialize Automated 24-hour Retraining Scheduler
-        scheduler = BackgroundScheduler()
-        scheduler.add_job(PredictionService.retrain_model, 'interval', hours=24)
-        scheduler.start()
-        print("AI Engine Scheduler: Automated 24-hour Training ONLINE")
-        
-    except Exception as e:
-        print(f"Critical System Boot Error: {e}")
-        
-    print("Status: Profit Optimization Engine Online")
-    print("====================================================")
+class Setting(Base):
+    """
+    Global configuration for service pricing and operational unit costs.
+    """
+    __tablename__ = "settings"
+
+    id = Column(Integer, primary_key=True, index=True)
     
-    yield  
+    full_service_price = Column(Float, default=210.0)
+    regular_wash_price = Column(Float, default=65.0) 
+    titan_wash_price = Column(Float, default=100.0)
+    comforter_price = Column(Float, default=150.0)
     
-    print("LaundryLink Backend: Initiating Graceful Shutdown...")
+    electricity_rate = Column(Float, default=12.0)
+    water_rate = Column(Float, default=50.0)
+    detergent_cost_per_load = Column(Float, default=10.0)
+    
+    # These two columns caused the 500 error because they were missing in the DB
+    off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
+    operation_start_hour = Column(Integer, default=8)
+    
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="settings")
 
-# --- FASTAPI INSTANCE ---
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "full_service_price": self.full_service_price,
+            "regular_wash_price": self.regular_wash_price,
+            "titan_wash_price": self.titan_wash_price,
+            "comforter_price": self.comforter_price,
+            "electricity_rate": self.electricity_rate,
+            "water_rate": self.water_rate,
+            "detergent_cost_per_load": self.detergent_cost_per_load,
+            "off_peak_hours": self.off_peak_hours,
+            "operation_start_hour": self.operation_start_hour,
+            "shop_id": self.shop_id
+        }
 
-app = FastAPI(
-    title="LaundryLink API",
-    description="Intelligent Backend for Laundry Income Optimization & Hardware Management",
-    version="1.2.1",
-    lifespan=lifespan
-)
+class User(Base):
+    """
+    Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
+    Column is named 'hashed_password' to match the existing database schema.
+    """
+    __tablename__ = "users"
 
-# --- CORS MIDDLEWARE FIX ---
-# Added both Vercel production URL and common Localhost ports for flexibility
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://laundry-link-kappa.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173"
-    ], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)  # matches the actual database column name
+    role = Column(String, nullable=False)
+    
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-# --- ROUTER REGISTRATION ---
+    shop = relationship("Shop", back_populates="users")
 
-app.include_router(auth_routes.router)
-app.include_router(booking_routes.router)
-app.include_router(machine_routes.router)
-app.include_router(setting_routes.router)
-app.include_router(analytics_routes.router)
-app.include_router(inventory_routes.router)
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "email": self.email,
+            "role": self.role,
+            "shop_id": self.shop_id,
+            "is_active": self.is_active
+        }
 
-# --- ROOT HEALTH CHECK ---
+class Machine(Base):
+    """
+    Hardware units (Washers/Dryers) tracking real-time status and financial performance.
+    """
+    __tablename__ = "machines"
 
-@app.get("/")
-def read_root():
-    return {
-        "status": "Online",
-        "system": "LaundryLink Optimization Engine",
-        "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "Bookings", "Machines", "Settings", "Analytics", "Inventory"]
-    }
+    id = Column(Integer, primary_key=True, index=True)
+    machine_type = Column(String, nullable=False)
+    machine_number = Column(Integer, nullable=False)
+    
+    status = Column(String, default="Available") 
+    current_service_type = Column(String, default="None")
+    current_price = Column(Float, default=0.0)
+    remaining_time = Column(Integer, default=0) 
+    total_cycles = Column(Integer, default=0)
+    
+    net_profit_accumulated = Column(Float, default=0.0)
+    profitability_rate = Column(Float, default=0.0) 
+    accumulated_electricity = Column(Float, default=0.0) 
+    accumulated_water = Column(Float, default=0.0) 
+    accumulated_detergent = Column(Float, default=0.0) 
+    
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="machines")
 
-# --- PRODUCTION ENTRY POINT ---
+    washer_bookings = relationship("Booking", foreign_keys="[Booking.washer_id]", back_populates="washer")
+    dryer_bookings = relationship("Booking", foreign_keys="[Booking.dryer_id]", back_populates="dryer")
 
-if __name__ == "__main__":
-    # Render assigns the port dynamically. If not set, default to 10000
-    port = int(os.environ.get("PORT", 10000))
-    # Passing the 'app' instance directly avoids module pathing issues in production
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    def to_dict(self):
+        overhead = (self.accumulated_electricity or 0.0) + (self.accumulated_water or 0.0) + (self.accumulated_detergent or 0.0)
+        return {
+            "id": self.id,
+            "machine_type": self.machine_type,
+            "machine_number": self.machine_number,
+            "status": self.status,
+            "current_service_type": self.current_service_type,
+            "current_price": self.current_price,
+            "remaining_time": self.remaining_time,
+            "total_cycles": self.total_cycles,
+            "net_profit_accumulated": round(self.net_profit_accumulated or 0.0, 2),
+            "profitability_rate": round(self.profitability_rate or 0.0, 2),
+            "metrics": {
+                "electricity_cost": round(self.accumulated_electricity or 0.0, 2),
+                "water_cost": round(self.accumulated_water or 0.0, 2),
+                "detergent_cost": round(self.accumulated_detergent or 0.0, 2),
+                "total_overhead": round(overhead, 2)
+            },
+            "shop_id": self.shop_id
+        }
+
+class Booking(Base):
+    """
+    Laundry transactions linking customer service requests to hardware units.
+    """
+    __tablename__ = "bookings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_name = Column(String, nullable=False)
+    service_type = Column(String, nullable=False) 
+    category = Column(String, nullable=False)
+    weight = Column(Float, nullable=False)
+    loads = Column(Integer, default=1)
+    total_price = Column(Float, nullable=False)
+    booking_mode = Column(String, nullable=False)
+    service_duration = Column(Integer, default=45) 
+    add_detergent = Column(Boolean, default=False)
+    add_delivery = Column(Boolean, default=False)
+    is_rush = Column(Boolean, default=False)
+    status = Column(String, default="Pending") 
+    
+    washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
+    dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory.id"), nullable=True)
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    
+    booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    shop = relationship("Shop", back_populates="bookings")
+    washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
+    dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
+    inventory_item = relationship("InventoryItem", lazy="joined")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "customer_name": self.customer_name,
+            "service_type": self.service_type,
+            "category": self.category,
+            "weight": self.weight,
+            "loads": self.loads,
+            "total_price": round(self.total_price or 0.0, 2),
+            "booking_mode": self.booking_mode,
+            "status": self.status,
+            "service_duration": self.service_duration,
+            "is_rush": self.is_rush,
+            "add_detergent": self.add_detergent,
+            "add_delivery": self.add_delivery,
+            "washer_id": self.washer_id,
+            "dryer_id": self.dryer_id,
+            "inventory_item_id": self.inventory_item_id,
+            "inventory_item_name": self.inventory_item.item_name if self.inventory_item else None,
+            "washer_number": self.washer.machine_number if self.washer else None,
+            "dryer_number": self.dryer.machine_number if self.dryer else None,
+            "shop_id": self.shop_id,
+            "booking_timestamp": self.booking_timestamp.isoformat() if self.booking_timestamp else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
