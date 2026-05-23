@@ -48,10 +48,10 @@ class AnalyticsService:
         and trend analysis for the dashboard frontend.
         """
         # Fetch actual metrics and historical context from the controller
+        # This now includes 'avg_per_service' from the controller update
         actual_metrics = AnalyticsController.get_dashboard_summary(self.db, shop_id)
         
         # Calculate trends for Revenue and Bookings
-        # Note: We now use weekly_revenue for a more stable trend comparison
         current_rev = actual_metrics.get("weekly_revenue", 0)
         previous_rev = actual_metrics.get("last_week_revenue", 1) 
         

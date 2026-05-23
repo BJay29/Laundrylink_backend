@@ -87,6 +87,11 @@ class AnalyticsController:
             models.Booking.shop_id == shop_id
         ).scalar() or 0.0
 
+        # --- ADDED: Calculate Average Per Service ---
+        total_rev_all_time = db.query(func.sum(models.Booking.total_price)).filter(models.Booking.shop_id == shop_id).scalar() or 0.0
+        total_bookings_all_time = db.query(func.count(models.Booking.id)).filter(models.Booking.shop_id == shop_id).scalar() or 0
+        avg_per_service = (total_rev_all_time / total_bookings_all_time) if total_bookings_all_time > 0 else 0
+
         # 7. AI Engine Data
         ai = AIEngine()
         predicted_count_today = ai.get_predicted_bookings(datetime.now())
@@ -111,7 +116,8 @@ class AnalyticsController:
             "titan_wash": service_map.get("Titan Wash", 0),
             "regular_wash": service_map.get("Regular Wash", 0),
             "comforter": service_map.get("Comforter", 0),
-            "total_kg": round(float(total_kg), 2)
+            "total_kg": round(float(total_kg), 2),
+            "avg_per_service": round(float(avg_per_service), 2) # Added to return object
         }
 
     @staticmethod
