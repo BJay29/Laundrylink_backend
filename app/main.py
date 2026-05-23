@@ -83,8 +83,6 @@ async def lifespan(app: FastAPI):
     
     try:
         # Syncing SQLAlchemy models with the database schema
-        # NOTE: If columns like 'hashed_password' are missing, this will NOT add them.
-        # You must ensure the DB is updated via SQL (ALTER TABLE) or Drop/Recreate.
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Schema Synchronization: COMPLETE")
         
@@ -117,10 +115,15 @@ app = FastAPI(
 )
 
 # --- CORS MIDDLEWARE FIX ---
-
+# Added both Vercel production URL and common Localhost ports for flexibility
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=[
+        "https://laundry-link-kappa.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173"
+    ], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
