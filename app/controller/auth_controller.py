@@ -34,7 +34,7 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     
     new_user = models.User(
         email=user.email,
-        password_hash=hashed_pass,
+        hashed_password=hashed_pass, # Updated to match database column
         role="owner",
         shop_id=new_shop.id
     )
@@ -62,7 +62,7 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
     # 2. Verify password
     if not user or not bcrypt.checkpw(
         credentials.password.encode('utf-8'), 
-        user.password_hash.encode('utf-8')
+        user.hashed_password.encode('utf-8') # Updated to match database column
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
@@ -77,17 +77,17 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
         )
 
     # 4. Build response payload
-    # FIX: Dinagdag ang 'role' — kinukuha ito ng UserResponse schema
+    # FIX: Included 'role' — captured by the UserResponse schema
     user_payload = {
         "email": user.email,
-        "role": user.role,                                  
+        "role": user.role,                                         
         "shop_id": user.shop_id,
         "shop_name": user.shop.shop_name if user.shop else None,
         "address": user.shop.address if user.shop else None,
     }
 
     return {
-        "access_token": "token_placeholder",  # TODO: palitan ng real JWT
+        "access_token": "token_placeholder",  # TODO: replace with real JWT
         "token_type": "bearer",
         "user": user_payload
     }

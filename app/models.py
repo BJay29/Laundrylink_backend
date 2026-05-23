@@ -120,7 +120,8 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False) # Renamed to hashed_password for clarity
+    # Kept hashed_password as per your database schema
+    hashed_password = Column(String, nullable=False) 
     role = Column(String, nullable=False)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
