@@ -34,7 +34,7 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     
     new_user = models.User(
         email=user.email,
-        hashed_password=hashed_pass, # Updated to match database column
+        hashed_password=hashed_pass, 
         role="owner",
         shop_id=new_shop.id
     )
@@ -59,10 +59,17 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
         models.User.email == credentials.email
     ).first()
 
-    # 2. Verify password
-    if not user or not bcrypt.checkpw(
+    # 2. Verify existence and password
+    # Added defensive check to avoid AttributeError if user is None
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Invalid email or password"
+        )
+        
+    if not bcrypt.checkpw(
         credentials.password.encode('utf-8'), 
-        user.hashed_password.encode('utf-8') # Updated to match database column
+        user.hashed_password.encode('utf-8')
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
@@ -76,14 +83,13 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
             detail="Account is inactive. Contact your administrator."
         )
 
-    # 4. Build response payload
-    # FIX: Included 'role' — captured by the UserResponse schema
+    # 4. Build response payload with safe checks for 'shop' relationship
     user_payload = {
         "email": user.email,
         "role": user.role,                                         
         "shop_id": user.shop_id,
-        "shop_name": user.shop.shop_name if user.shop else None,
-        "address": user.shop.address if user.shop else None,
+        "shop_name": getattr(user.shop, 'shop_name', None) if user.shop else None,
+        "address": getattr(user.shop, 'address', None) if user.shop else None,
     }
 
     return {
@@ -108,6 +114,6 @@ def get_current_user_profile(db: Session, user_id: int):
         "email": user.email,
         "role": user.role,
         "shop_id": user.shop_id,
-        "shop_name": user.shop.shop_name if user.shop else None,
-        "address": user.shop.address if user.shop else None,
+        "shop_name": getattr(user.shop, 'shop_name', None) if user.shop else None,
+        "address": getattr(user.shop, 'address', None) if user.shop else None,
     }
