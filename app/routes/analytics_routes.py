@@ -3,8 +3,6 @@ ANALYTICS ROUTES — app/routes/analytics_routes.py
 ==================================================
 Exposes all analytics, forecasting, and AI-driven endpoints
 consumed by the LaundryLink dashboard frontend.
-
-NEW: /analytics/customer-segments — K-Means behavioral segmentation.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -108,13 +106,12 @@ def retrain_model():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CUSTOMER SEGMENTATION  — NEW ENDPOINT
+# CUSTOMER SEGMENTATION ENDPOINT
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/customer-segments")
 def get_customer_segments(db: Session = Depends(get_db)):
     """
-    NEW ENDPOINT
     Returns a list of customers segmented into behavioral tiers
     using K-Means clustering on visit frequency and total spending.
 

@@ -79,10 +79,8 @@ class AnalyticsService:
         Combines real-time database metrics with AI-driven insights
         and trend analysis for the dashboard frontend.
         """
-        # Fetch actual metrics and historical context from the controller
         actual_metrics = AnalyticsController.get_dashboard_summary(self.db, shop_id)
 
-        # Calculate trends for Revenue and Bookings
         current_rev  = actual_metrics.get("weekly_revenue", 0)
         previous_rev = actual_metrics.get("last_week_revenue", 1)
 
@@ -95,7 +93,6 @@ class AnalyticsService:
         distribution = AnalyticsController.get_service_distribution(self.db, shop_id)
         graph_data   = AnalyticsController.get_forecast_data(self.db, shop_id)
 
-        # Fetch dynamic AI accuracy metrics
         ai_metrics = self.get_ai_accuracy_metrics()
 
         return {
@@ -115,9 +112,6 @@ class AnalyticsService:
         }
 
     def _generate_ai_recommendation(self, metrics: dict) -> str:
-        """
-        Internal logic to generate a recommendation based on revenue performance.
-        """
         actual    = metrics.get("today_revenue", 0)
         projected = metrics.get("projected_income_today", 0)
 
@@ -133,10 +127,6 @@ class AnalyticsService:
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_service_efficiency(self, shop_id: int = 1):
-        """
-        Calculates efficiency by comparing total weight processed
-        against the number of bookings.
-        """
         summary   = AnalyticsController.get_dashboard_summary(self.db, shop_id)
         total_kg  = summary.get("total_kg", 0)
 
@@ -183,7 +173,6 @@ class AnalyticsService:
         """
 
         # --- Step 1: Aggregate booking data per customer name ---
-        # Groups by customer_name and calculates visit count + total spend.
         rows = (
             self.db.query(
                 models.Booking.customer_name,
@@ -195,7 +184,6 @@ class AnalyticsService:
             .all()
         )
 
-        # Return empty list immediately when the booking table has no data
         if not rows:
             return []
 
@@ -211,7 +199,7 @@ class AnalyticsService:
 
         df = pd.DataFrame(customer_data)
 
-        # Compute average spend per visit (for display purposes only, not used in clustering)
+        # Compute average spend per visit (for display only, not used in clustering)
         df["avg_per_visit"] = (
             df["total_spent"] / df["visit_frequency"].replace(0, 1)
         ).round(2)
@@ -220,7 +208,7 @@ class AnalyticsService:
         if len(df) >= 3:
             # Enough data → run K-Means clustering
             result   = train_customer_clusters(df)
-            segments = result["segments"]   # list of segment names, one per row
+            segments = result["segments"]
         else:
             # Too few customers → use simple rule-based thresholds as fallback
             segments = [
@@ -228,7 +216,7 @@ class AnalyticsService:
                 for _, row in df.iterrows()
             ]
 
-        # --- Step 4: Attach segment labels and color tokens to each customer ---
+        # --- Step 4: Attach segment labels and color tokens ---
         df["segment"]       = segments
         df["segment_color"] = df["segment"].apply(get_segment_color)
 
