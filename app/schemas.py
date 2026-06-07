@@ -76,7 +76,6 @@ class InventoryItemBase(BaseModel):
     current_stock: float
     reorder_point: float
     unit: str
-    # usage_rate is required for automated stock deduction during bookings
     usage_rate: float = 0.05
 
 class InventoryItemCreate(InventoryItemBase):
@@ -84,12 +83,7 @@ class InventoryItemCreate(InventoryItemBase):
     shop_id: int
 
 class InventoryItemUpdate(BaseModel):
-    """
-    Schema for updating an existing inventory item.
-    All fields are optional so partial updates are supported.
-    item_name and unit were previously missing, which caused the backend
-    to silently ignore name and unit edits sent from the frontend.
-    """
+    """Schema for updating an existing inventory item. All fields optional."""
     item_name: Optional[str] = None
     category: Optional[str] = None
     current_stock: Optional[float] = None
@@ -201,7 +195,11 @@ class MachineNested(BaseModel):
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
-    """Schema for creating a laundry transaction."""
+    """
+    Schema for creating a laundry transaction.
+    washer_id and dryer_id are fully optional — if both are None,
+    the backend will set the booking status to 'Pending'.
+    """
     customer_name: str
     service_type: str  
     category: str
@@ -223,6 +221,20 @@ class BookingCreate(BaseModel):
     booking_timestamp: Optional[datetime] = Field(default=None)
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class BookingAssignMachine(BaseModel):
+    """
+    NEW SCHEMA
+    Used when assigning a machine to an existing Pending booking
+    from the Service Terminal. At least one of washer_id or dryer_id
+    must be provided (validated in the controller).
+    """
+    washer_id: Optional[int] = None
+    dryer_id: Optional[int] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
 
 class BookingStatusUpdate(BaseModel):
     """Transitions a booking through lifecycle states."""
@@ -308,26 +320,18 @@ class InsightResponse(BaseModel):
     # --- SETTINGS & PROFILE SCHEMAS ---
 
 class ShopProfileUpdate(BaseModel):
-    """
-    Schema for updating the shop information.
-    Allows partial updates for shop name, address, or contact email.
-    """
+    """Schema for updating the shop information."""
     shop_name: Optional[str] = None
     address: Optional[str] = None
     email: Optional[EmailStr] = None
 
 class PasswordUpdate(BaseModel):
-    """
-    Schema for validating password change requests.
-    Includes the old password for security verification.
-    """
+    """Schema for validating password change requests."""
     old_password: str
     new_password: str
 
 class ShopProfileResponse(BaseModel):
-    """
-    Schema for returning the current shop profile data.
-    """
+    """Schema for returning the current shop profile data."""
     shop_name: str
     address: str
     email: str
