@@ -6,10 +6,10 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
-# Import inventory_routes here
+# Import routes
 from app.routes import auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes
 from sqlalchemy.orm import Session
-# New imports for 24-hour automated retraining
+# Imports for 24-hour automated retraining
 from apscheduler.schedulers.background import BackgroundScheduler
 from app.services.prediction_service import PredictionService
 
@@ -53,13 +53,13 @@ def seed_hardware_and_inventory():
         # Initialize Settings
         seed_settings(db)
 
-        # Fix legacy machine records
+        # Fix legacy machine records by assigning them to shop_id 1
         null_machines = db.query(models.Machine).filter(models.Machine.shop_id == None).all()
         for m in null_machines:
             m.shop_id = 1
         db.commit()
 
-        # Check machines
+        # Seed machines if none exist
         if db.query(models.Machine).count() == 0:
             print("Seeding default 12 hardware units...")
             machines = [models.Machine(machine_number=i, machine_type="Washer" if i<=6 else "Dryer", status="Available", shop_id=1) for i in range(1, 13)]
@@ -82,6 +82,9 @@ async def lifespan(app: FastAPI):
     print("====================================================")
     print("LaundryLink Backend: Initialization Sequence Started")
     
+    # Initialize Scheduler
+    scheduler = BackgroundScheduler()
+    
     try:
         # Syncing SQLAlchemy models with the database schema
         models.Base.metadata.create_all(bind=engine)
@@ -91,7 +94,6 @@ async def lifespan(app: FastAPI):
         seed_hardware_and_inventory()
 
         # Initialize Automated 24-hour Retraining Scheduler
-        scheduler = BackgroundScheduler()
         scheduler.add_job(PredictionService.retrain_model, 'interval', hours=24)
         scheduler.start()
         print("AI Engine Scheduler: Automated 24-hour Training ONLINE")
@@ -102,9 +104,12 @@ async def lifespan(app: FastAPI):
     print("Status: Profit Optimization Engine Online")
     print("====================================================")
     
-    yield  
+    yield  # Application runs here
     
+    # Graceful shutdown
     print("LaundryLink Backend: Initiating Graceful Shutdown...")
+    scheduler.shutdown()
+    print("AI Engine Scheduler: SHUTDOWN")
 
 # --- FASTAPI INSTANCE ---
 
@@ -115,10 +120,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# --- ALLOWED ORIGINS ---
-# List every frontend origin that is permitted to call this API.
-# CORS headers are attached to ALL responses including 4xx and 5xx
-# so the browser never sees a missing Access-Control-Allow-Origin even on errors.
+# --- CORS MIDDLEWARE ---
 ALLOWED_ORIGINS = [
     "https://laundry-link-kappa.vercel.app",
     "http://localhost:5173",
@@ -126,9 +128,6 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
-# --- CORS MIDDLEWARE ---
-# Must be registered BEFORE any other middleware or route so it runs first
-# and attaches CORS headers even when a downstream handler throws a 500.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -139,21 +138,16 @@ app.add_middleware(
 )
 
 # --- GLOBAL EXCEPTION HANDLER ---
-# Catches any unhandled 500-level exceptions and returns a JSON response
-# that still carries the correct CORS headers, preventing the browser from
-# showing a misleading "CORS blocked" error when the real cause is a server crash.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     origin = request.headers.get("origin", "")
     headers = {}
 
-    # Only attach CORS header if the request comes from a known origin
     if origin in ALLOWED_ORIGINS:
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
 
     print(f"Unhandled server error on {request.method} {request.url}: {exc}")
-
     return JSONResponse(
         status_code=500,
         content={"detail": f"Internal server error: {str(exc)}"},
@@ -183,7 +177,5 @@ def read_root():
 # --- PRODUCTION ENTRY POINT ---
 
 if __name__ == "__main__":
-    # Render assigns the port dynamically. If not set, default to 10000
     port = int(os.environ.get("PORT", 10000))
-    # Passing the 'app' instance directly avoids module pathing issues in production
     uvicorn.run(app, host="0.0.0.0", port=port)

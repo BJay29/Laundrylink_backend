@@ -12,6 +12,7 @@ import pandas as pd
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+# Add project root to sys.path to ensure local imports work correctly
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -19,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.database import SessionLocal
 from app.models import Booking
 
-
+# Feature columns used by the machine learning model
 FEATURE_COLUMNS = ["day_index", "day_of_week", "is_weekend", "booking_count", "total_loads"]
 
 
@@ -56,8 +57,11 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     if frame.empty:
         return frame
 
+    # Prepare time-series features
     frame["booking_date"] = pd.to_datetime(frame["booking_date"])
     first_date = frame["booking_date"].min()
+    
+    # Calculate index, weekday, and weekend status for the AI model
     frame["day_index"] = (frame["booking_date"] - first_date).dt.days.astype(int)
     frame["day_of_week"] = frame["booking_date"].dt.weekday.astype(int)
     frame["is_weekend"] = frame["day_of_week"].isin([5, 6]).astype(int)
@@ -77,6 +81,9 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
 
 
 def load_training_data(shop_id: int = 1) -> pd.DataFrame:
+    """
+    Establishes a database session and retrieves the booking data frame.
+    """
     db = SessionLocal()
     try:
         return fetch_daily_booking_frame(db, shop_id=shop_id)
@@ -85,5 +92,6 @@ def load_training_data(shop_id: int = 1) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
+    # Test script to print the last 10 entries of processed data
     df = load_training_data()
     print(df.tail(10).to_string(index=False) if not df.empty else "No booking data available.")

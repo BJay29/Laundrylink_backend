@@ -38,7 +38,6 @@ def get_summary(db: Session = Depends(get_db)):
     weekly income, expenses, service counters, and historical trend comparisons.
     """
     try:
-        # Fetching summary which now includes weekly_revenue, weekly_expenses, and auto-reset daily revenue
         summary = AnalyticsController.get_dashboard_summary(db, shop_id=1)
         return summary
     except Exception as e:
@@ -78,14 +77,15 @@ def get_distribution(db: Session = Depends(get_db)):
         )
 
 @router.get("/accuracy")
-def get_ai_accuracy(db: Session = Depends(get_db)):
+def get_ai_accuracy():
     """
-    Retrieve statistical model accuracy calibrations and calibration configurations.
-    Evaluates historical telemetry metrics to map variance indices for predictive 
-    demand subsystems alongside utility consumption checking matrices.
+    Retrieve statistical model accuracy calibrations from the generated metrics JSON.
+    This endpoint allows the frontend to display the model health (MAE, R2 Score).
     """
     try:
-        accuracy_metrics = AnalyticsController.get_ai_prediction_metrics(db)
+        # We call the PredictionService directly here since this is a file-based metric read
+        from app.services.prediction_service import PredictionService
+        accuracy_metrics = PredictionService.calculate_forecast_accuracy()
         return accuracy_metrics
     except Exception as e:
         raise HTTPException(
@@ -100,7 +100,6 @@ def get_weekly_history(db: Session = Depends(get_db)):
     Provides a daily breakdown for the past 7 days to facilitate detailed financial review.
     """
     try:
-        # UPDATED: Corrected the call from get_weekly_history_data to get_weekly_history
         history = AnalyticsController.get_weekly_history(db, shop_id=1)
         return history
     except Exception as e:
