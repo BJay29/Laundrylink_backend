@@ -1,18 +1,42 @@
+"""
+ANALYTICS SERVICE — app/services/analytics_service.py
+======================================================
+Service layer that orchestrates data between the AnalyticsController
+and the AIEngine. Also hosts the customer segmentation pipeline
+which calls the K-Means cluster engine.
+"""
+
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import json
 import os
+import pandas as pd
+
 from app.controller.analytics_controller import AnalyticsController
 from app.services.ai_engine import AIEngine
+from app import models
+from ml_engine.cluster_engine import (
+    train_customer_clusters,
+    rule_based_segment,
+    get_segment_color,
+    SEGMENT_LABELS,
+)
+
 
 class AnalyticsService:
     """
-    Service layer responsible for orchestrating data between the 
+    Service layer responsible for orchestrating data between the
     AnalyticsController and the AIEngine for the Laundry Management System.
+    Also manages the K-Means customer segmentation pipeline.
     """
 
     def __init__(self, db: Session):
         self.db = db
         self.ai = AIEngine()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # AI ACCURACY METRICS
+    # ─────────────────────────────────────────────────────────────────────────
 
     def get_ai_accuracy_metrics(self) -> dict:
         """
@@ -25,6 +49,10 @@ class AnalyticsService:
                 return json.load(f)
         return {"error": "Metrics not found"}
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # TREND CALCULATION
+    # ─────────────────────────────────────────────────────────────────────────
+
     def _calculate_percentage_trend(self, current: float, previous: float) -> dict:
         """
         Calculates the percentage difference between two values.
@@ -32,15 +60,19 @@ class AnalyticsService:
         """
         if previous == 0:
             return {"trend": "0%", "status": "equal"}
-        
+
         diff = current - previous
         percent = (diff / previous) * 100
         status = 'up' if percent > 0.5 else ('down' if percent < -0.5 else 'equal')
-        
+
         return {
             "trend": f"{abs(round(percent, 1))}%",
             "status": status
         }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # COMPLETE DASHBOARD DATA
+    # ─────────────────────────────────────────────────────────────────────────
 
     def get_complete_dashboard_data(self, shop_id: int = 1):
         """
@@ -48,36 +80,35 @@ class AnalyticsService:
         and trend analysis for the dashboard frontend.
         """
         # Fetch actual metrics and historical context from the controller
-        # This now includes 'avg_per_service' from the controller update
         actual_metrics = AnalyticsController.get_dashboard_summary(self.db, shop_id)
-        
+
         # Calculate trends for Revenue and Bookings
-        current_rev = actual_metrics.get("weekly_revenue", 0)
-        previous_rev = actual_metrics.get("last_week_revenue", 1) 
-        
-        current_book = actual_metrics.get("total_bookings", 0)
+        current_rev  = actual_metrics.get("weekly_revenue", 0)
+        previous_rev = actual_metrics.get("last_week_revenue", 1)
+
+        current_book  = actual_metrics.get("total_bookings", 0)
         previous_book = actual_metrics.get("last_week_bookings", 1)
 
-        rev_trend = self._calculate_percentage_trend(current_rev, previous_rev)
+        rev_trend  = self._calculate_percentage_trend(current_rev, previous_rev)
         book_trend = self._calculate_percentage_trend(current_book, previous_book)
-        
-        distribution = AnalyticsController.get_service_distribution(self.db, shop_id) 
-        graph_data = AnalyticsController.get_forecast_data(self.db, shop_id)
-        
+
+        distribution = AnalyticsController.get_service_distribution(self.db, shop_id)
+        graph_data   = AnalyticsController.get_forecast_data(self.db, shop_id)
+
         # Fetch dynamic AI accuracy metrics
         ai_metrics = self.get_ai_accuracy_metrics()
 
         return {
             "summary": actual_metrics,
             "trends": {
-                "revenue": rev_trend,
+                "revenue":  rev_trend,
                 "bookings": book_trend
             },
             "distribution": distribution,
             "charts": graph_data,
             "ai_status": {
-                "engine_active": True,
-                "last_sync": "Just now",
+                "engine_active":  True,
+                "last_sync":      "Just now",
                 "accuracy_metrics": ai_metrics,
                 "recommendation": self._generate_ai_recommendation(actual_metrics)
             }
@@ -87,7 +118,7 @@ class AnalyticsService:
         """
         Internal logic to generate a recommendation based on revenue performance.
         """
-        actual = metrics.get("today_revenue", 0)
+        actual    = metrics.get("today_revenue", 0)
         projected = metrics.get("projected_income_today", 0)
 
         if actual >= projected:
@@ -97,25 +128,109 @@ class AnalyticsService:
         else:
             return "Revenue is slightly below target. Check machine availability and turnover speed."
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # SERVICE EFFICIENCY
+    # ─────────────────────────────────────────────────────────────────────────
+
     def get_service_efficiency(self, shop_id: int = 1):
         """
-        Calculates efficiency by comparing total weight processed 
+        Calculates efficiency by comparing total weight processed
         against the number of bookings.
         """
-        summary = AnalyticsController.get_dashboard_summary(self.db, shop_id)
-        total_kg = summary.get("total_kg", 0)
-        
+        summary   = AnalyticsController.get_dashboard_summary(self.db, shop_id)
+        total_kg  = summary.get("total_kg", 0)
+
         total_bookings = (
-            summary.get("full_service", 0) + 
-            summary.get("titan_wash", 0) + 
-            summary.get("regular_wash", 0) + 
-            summary.get("comforter", 0)
+            summary.get("full_service", 0) +
+            summary.get("titan_wash",   0) +
+            summary.get("regular_wash", 0) +
+            summary.get("comforter",    0)
         )
 
         avg_load = total_kg / total_bookings if total_bookings > 0 else 0
-        
+
         return {
-            "total_processed_kg": total_kg,
-            "total_bookings": total_bookings,
-            "average_kg_per_load": round(avg_load, 2)
+            "total_processed_kg":   total_kg,
+            "total_bookings":       total_bookings,
+            "average_kg_per_load":  round(avg_load, 2)
         }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CUSTOMER SEGMENTATION  (K-Means via cluster_engine.py)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_customer_segments(self, shop_id: int = 1) -> list:
+        """
+        Fetches customer booking data, prepares a behavioral DataFrame,
+        runs K-Means clustering via the cluster engine, and returns a
+        list of customer objects each annotated with a 'segment' key.
+
+        Workflow:
+            1. Query Booking table for per-customer aggregates.
+            2. Build a pandas DataFrame with 'total_spent' and 'visit_frequency'.
+            3. If data is sufficient (>= 3 customers) → use K-Means clustering.
+            4. If data is sparse (< 3 customers)       → use rule-based fallback.
+            5. Return enriched list for the API response.
+
+        Returns:
+            List of dicts, each containing:
+                - customer_name   (str)
+                - visit_frequency (int)   : number of bookings
+                - total_spent     (float) : cumulative spend
+                - avg_per_visit   (float) : average spend per booking
+                - segment         (str)   : "Occasional" | "Regular" | "VIP"
+                - segment_color   (str)   : Tailwind color token for the badge
+        """
+
+        # --- Step 1: Aggregate booking data per customer name ---
+        # Groups by customer_name and calculates visit count + total spend.
+        rows = (
+            self.db.query(
+                models.Booking.customer_name,
+                func.count(models.Booking.id).label("visit_frequency"),
+                func.sum(models.Booking.total_price).label("total_spent")
+            )
+            .filter(models.Booking.shop_id == shop_id)
+            .group_by(models.Booking.customer_name)
+            .all()
+        )
+
+        # Return empty list immediately when the booking table has no data
+        if not rows:
+            return []
+
+        # --- Step 2: Build the customer DataFrame ---
+        customer_data = [
+            {
+                "customer_name":   row.customer_name or "Walk-in Client",
+                "visit_frequency": int(row.visit_frequency or 0),
+                "total_spent":     float(row.total_spent or 0.0),
+            }
+            for row in rows
+        ]
+
+        df = pd.DataFrame(customer_data)
+
+        # Compute average spend per visit (for display purposes only, not used in clustering)
+        df["avg_per_visit"] = (
+            df["total_spent"] / df["visit_frequency"].replace(0, 1)
+        ).round(2)
+
+        # --- Step 3: Assign segments ---
+        if len(df) >= 3:
+            # Enough data → run K-Means clustering
+            result   = train_customer_clusters(df)
+            segments = result["segments"]   # list of segment names, one per row
+        else:
+            # Too few customers → use simple rule-based thresholds as fallback
+            segments = [
+                rule_based_segment(row["total_spent"], row["visit_frequency"])
+                for _, row in df.iterrows()
+            ]
+
+        # --- Step 4: Attach segment labels and color tokens to each customer ---
+        df["segment"]       = segments
+        df["segment_color"] = df["segment"].apply(get_segment_color)
+
+        # --- Step 5: Convert to list of dicts for JSON serialization ---
+        return df.to_dict(orient="records")
