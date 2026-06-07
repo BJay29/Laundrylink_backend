@@ -65,13 +65,16 @@ class PredictionService:
         feature_columns = artifact["feature_columns"]
         average_ticket = max(float(artifact.get("average_ticket", 150.0)), 1.0)
         average_loads_per_booking = max(float(artifact.get("average_loads_per_booking", 1.0)), 1.0)
+        
+        # FIX: Get last_day_index safely, fallback to 0 if not present in artifact
+        last_day_index = int(artifact.get("last_day_index", 0))
 
         today = datetime.now()
         forecast_rows = []
         for offset in range(1, days + 1):
             target_date = today + timedelta(days=offset)
             day_of_week = target_date.weekday()
-            historical_day_index = int(artifact["last_day_index"]) + offset
+            historical_day_index = last_day_index + offset
             estimated_bookings = 18 if day_of_week in (5, 6) else 12
             estimated_loads = max(1, round(estimated_bookings * average_loads_per_booking))
 
