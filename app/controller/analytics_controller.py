@@ -1,11 +1,3 @@
-"""
-ANALYTICS CONTROLLER — app/controller/analytics_controller.py
-=============================================================
-Handles core operational logic for data aggregation, comparison,
-and AI-driven forecasting. Also exposes the customer segmentation
-endpoint powered by the K-Means cluster engine.
-"""
-
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
@@ -79,8 +71,8 @@ class AnalyticsController:
         ).first()
 
         # 4. Calculate Expenses
-        total_revenue_weekly   = weekly_stats.revenue or 0.0
-        total_expenses_weekly  = total_revenue_weekly * 0.35  # 35% operational cost estimate
+        total_revenue_weekly  = weekly_stats.revenue or 0.0
+        total_expenses_weekly = total_revenue_weekly * 0.35  # 35% operational cost estimate
 
         # Previous week comparison
         last_week_start = now - timedelta(days=14)
@@ -134,21 +126,21 @@ class AnalyticsController:
         ).count()
 
         return {
-            "today_revenue":          round(float(today_stats.revenue or 0.0), 2),
-            "weekly_revenue":         round(float(total_revenue_weekly), 2),
-            "weekly_expenses":        round(float(total_expenses_weekly), 2),
-            "last_week_revenue":      round(float(last_week_stats.revenue or 0.0), 2),
-            "total_bookings":         today_stats.bookings or 0,
-            "last_week_bookings":     last_week_stats.bookings or 0,
-            "active_machines":        active_machines,
+            "today_revenue":            round(float(today_stats.revenue or 0.0), 2),
+            "weekly_revenue":           round(float(total_revenue_weekly), 2),
+            "weekly_expenses":          round(float(total_expenses_weekly), 2),
+            "last_week_revenue":        round(float(last_week_stats.revenue or 0.0), 2),
+            "total_bookings":           today_stats.bookings or 0,
+            "last_week_bookings":       last_week_stats.bookings or 0,
+            "active_machines":          active_machines,
             "predicted_bookings_today": predicted_count_today,
-            "projected_income_today": projected_income_today,
-            "full_service":           service_map.get("Full Service", 0),
-            "titan_wash":             service_map.get("Titan Wash",   0),
-            "regular_wash":           service_map.get("Regular Wash", 0),
-            "comforter":              service_map.get("Comforter",    0),
-            "total_kg":               round(float(total_kg), 2),
-            "avg_per_service":        round(float(avg_per_service), 2),
+            "projected_income_today":   projected_income_today,
+            "full_service":             service_map.get("Full Service", 0),
+            "titan_wash":               service_map.get("Titan Wash",   0),
+            "regular_wash":             service_map.get("Regular Wash", 0),
+            "comforter":                service_map.get("Comforter",    0),
+            "total_kg":                 round(float(total_kg), 2),
+            "avg_per_service":          round(float(avg_per_service), 2),
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -171,7 +163,7 @@ class AnalyticsController:
             ).scalar() or 0.0
 
             history_data.append({
-                "label":        target_date.strftime("%b %d"),
+                "label":         target_date.strftime("%b %d"),
                 "actual_income": round(float(actual_income), 2)
             })
         return history_data
@@ -182,8 +174,8 @@ class AnalyticsController:
 
     @staticmethod
     def get_forecast_data(db: Session, shop_id: int = 1):
-        raw_forecast  = PredictionService.get_revenue_forecast(days=7)
-        ai_narrative  = insight_engine.generate_forecast_insight(raw_forecast)
+        raw_forecast = PredictionService.get_revenue_forecast(days=7)
+        ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
 
         return {
             "forecast":             raw_forecast,
@@ -222,15 +214,14 @@ class AnalyticsController:
         with open(metrics_path, "r") as f:
             data = json.load(f)
 
-        # Updated to match flat JSON structure: accuracy_percentage and r2_score
         return {
-            "status": "success",
+            "status":                   "success",
             "demand_forecasting_model": data.get("accuracy_percentage", 0.0),
-            "utility_telemetry_model": data.get("r2_score", 0.0) * 100
+            "utility_telemetry_model":  data.get("r2_score", 0.0) * 100
         }
 
     # ─────────────────────────────────────────────────────────────────────────
-    # CUSTOMER SEGMENTS
+    # CUSTOMER SEGMENTS  (Phase 3: 18-day window + mock data exclusion)
     # ─────────────────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -239,8 +230,12 @@ class AnalyticsController:
         Returns a list of customer objects, each annotated with a behavioral
         segment assigned by the K-Means cluster engine.
 
-        Delegates all ML logic to AnalyticsService.get_customer_segments()
-        to keep the controller layer thin.
+        Phase 3 behaviour:
+            - Delegates to AnalyticsService.get_customer_segments() which
+              applies an 18-day rolling window and mock data exclusion before
+              passing data to the cluster engine.
+            - The 404 message now explicitly mentions the 18-day window so
+              operators understand why they might see no data.
 
         Returns:
             List[dict] — each item contains:
@@ -250,13 +245,15 @@ class AnalyticsController:
                 - avg_per_visit   (float)
                 - segment         (str)   "Occasional" | "Regular" | "VIP"
                 - segment_color   (str)   Tailwind color token for the badge
+                - data_window     (str)   ISO start date of the 18-day window
 
         Raises:
-            HTTPException 404 if no booking data is found for this shop.
-            HTTPException 500 on unexpected ML or database errors.
+            HTTPException 404 — no real bookings in the last 18 days.
+            HTTPException 422 — input data is malformed or missing columns.
+            HTTPException 500 — unexpected ML or database error.
         """
-        # Import here to avoid circular dependency between controller and service
-        from app.services.analytics_service import AnalyticsService
+        # Deferred import to avoid circular dependency between controller and service
+        from app.services.analytics_service import AnalyticsService, SEGMENTATION_WINDOW_DAYS
         from fastapi import HTTPException
 
         try:
@@ -266,7 +263,11 @@ class AnalyticsController:
             if not segments:
                 raise HTTPException(
                     status_code=404,
-                    detail="No booking records found. Add bookings to generate customer segments."
+                    detail=(
+                        f"No real booking records found in the last "
+                        f"{SEGMENTATION_WINDOW_DAYS} days. "
+                        "Add bookings or wait for recent data to generate segments."
+                    )
                 )
 
             return segments
@@ -275,7 +276,7 @@ class AnalyticsController:
             # Re-raise FastAPI HTTP exceptions unchanged
             raise
         except ValueError as ve:
-            # Raised by cluster_engine when input data is malformed
+            # Raised by cluster_engine when the DataFrame is malformed
             raise HTTPException(
                 status_code=422,
                 detail=f"Segmentation data error: {str(ve)}"

@@ -1,13 +1,3 @@
-"""
-CLUSTER ENGINE — ml_engine/cluster_engine.py
-=============================================
-Implements K-Means clustering to segment laundry customers into
-three behavioral tiers based on spending and visit frequency.
-
-This module is called by analytics_service.py to generate
-real-time customer segments for the dashboard.
-"""
-
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
@@ -100,7 +90,7 @@ def train_customer_clusters(dataframe: pd.DataFrame) -> dict:
     # StandardScaler transforms each feature to mean=0, std=1.
     # This prevents 'total_spent' (large numbers) from overwhelming
     # 'visit_frequency' (small integers) during distance calculations.
-    scaler = StandardScaler()
+    scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
     # --- 4. K-MEANS TRAINING ---
@@ -126,8 +116,8 @@ def train_customer_clusters(dataframe: pd.DataFrame) -> dict:
         .sort_values()  # ascending: lowest spend → index 0
     )
 
-    # cluster_means.index contains the original K-Means cluster IDs
-    # sorted from lowest to highest mean spend.
+    # cluster_means.index holds the original K-Means cluster IDs sorted
+    # from lowest to highest mean spend.
     # Map them to our stable segment indices 0, 1, 2.
     rank_mapping = {
         original_id: stable_rank
@@ -146,9 +136,9 @@ def train_customer_clusters(dataframe: pd.DataFrame) -> dict:
     return {
         "model":    kmeans,
         "scaler":   scaler,
-        "labels":   stable_labels,          # np.ndarray, one per customer row
-        "segments": segment_names,          # list of strings, one per customer row
-        "mapping":  segment_mapping         # {0: "Occasional", 1: "Regular", 2: "VIP"}
+        "labels":   stable_labels,    # np.ndarray, one per customer row
+        "segments": segment_names,    # list of strings, one per customer row
+        "mapping":  segment_mapping   # {0: "Occasional", 1: "Regular", 2: "VIP"}
     }
 
 
@@ -168,16 +158,16 @@ def predict_segment(
     K-Means model and scaler.
 
     Args:
-        model          : Fitted KMeans instance from train_customer_clusters()
-        scaler         : Fitted StandardScaler instance from train_customer_clusters()
-        mapping        : Segment mapping dict from train_customer_clusters()
-        total_spent    : Customer's cumulative spend (float)
-        visit_frequency: Customer's total number of bookings (int)
+        model           : Fitted KMeans instance from train_customer_clusters()
+        scaler          : Fitted StandardScaler instance from train_customer_clusters()
+        mapping         : Segment mapping dict from train_customer_clusters()
+        total_spent     : Customer's cumulative spend (float)
+        visit_frequency : Customer's total number of bookings (int)
 
     Returns:
         str: One of "Occasional", "Regular", "VIP"
     """
-    X_new = np.array([[total_spent, visit_frequency]], dtype=float)
+    X_new    = np.array([[total_spent, visit_frequency]], dtype=float)
     X_scaled = scaler.transform(X_new)
     raw_label = int(model.predict(X_scaled)[0])
     return mapping.get(raw_label, "Occasional")
@@ -189,12 +179,13 @@ def predict_segment(
 
 def rule_based_segment(total_spent: float, visit_frequency: int) -> str:
     """
-    Simple threshold-based fallback used when there are fewer than
-    3 distinct customers (K-Means cannot converge with < n_clusters rows).
+    Simple threshold-based fallback used when fewer than 3 distinct customers
+    exist within the active data window (K-Means cannot converge with
+    < n_clusters rows).
 
     Thresholds (adjustable based on shop pricing):
-        VIP      : spent >= 5000 OR visits >= 20
-        Regular  : spent >= 1500 OR visits >= 8
+        VIP       : spent >= 5000 OR visits >= 20
+        Regular   : spent >= 1500 OR visits >= 8
         Occasional: everything else
     """
     if total_spent >= 5000 or visit_frequency >= 20:

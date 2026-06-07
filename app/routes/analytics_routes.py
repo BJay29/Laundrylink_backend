@@ -1,15 +1,10 @@
-"""
-ANALYTICS ROUTES — app/routes/analytics_routes.py
-==================================================
-Exposes all analytics, forecasting, and AI-driven endpoints
-consumed by the LaundryLink dashboard frontend.
-"""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
 from app.database import get_db
 from app.controller.analytics_controller import AnalyticsController
-from app.services.analytics_service import AnalyticsService
+from app.services.analytics_service import AnalyticsService, SEGMENTATION_WINDOW_DAYS
 
 router = APIRouter(
     prefix="/analytics",
@@ -106,37 +101,53 @@ def retrain_model():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CUSTOMER SEGMENTATION ENDPOINT
+# CUSTOMER SEGMENTATION ENDPOINT  (Phase 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/customer-segments")
 def get_customer_segments(db: Session = Depends(get_db)):
     """
-    Returns a list of customers segmented into behavioral tiers
-    using K-Means clustering on visit frequency and total spending.
+    Returns a list of customers segmented into behavioral tiers using
+    K-Means clustering on visit frequency and total spending.
 
-    Segments:
-        - Occasional : low visit count and low total spend
-        - Regular    : moderate visit count and spend
-        - VIP        : high visit count and/or high total spend
+    PHASE 3 BEHAVIOUR:
+        - Only bookings from the last 18 days are included (rolling window).
+        - Mock / test records (is_mock = True) are excluded before clustering.
+        - Falls back to rule-based thresholds when fewer than 3 unique real
+          customers exist within the 18-day window.
 
-    Falls back to rule-based thresholds when fewer than 3 unique
-    customers exist in the database.
-
-    Response shape per customer:
+    Response envelope:
         {
-            "customer_name":   "Juan Dela Cruz",
-            "visit_frequency": 12,
-            "total_spent":     2580.00,
-            "avg_per_visit":   215.00,
-            "segment":         "Regular",
-            "segment_color":   "sky"
+            "window_days":  18,
+            "window_start": "2026-05-20",
+            "customers": [
+                {
+                    "customer_name":   "Juan Dela Cruz",
+                    "visit_frequency": 12,
+                    "total_spent":     2580.00,
+                    "avg_per_visit":   215.00,
+                    "segment":         "Regular",
+                    "segment_color":   "sky",
+                    "data_window":     "2026-05-20"
+                },
+                ...
+            ]
         }
 
     Error responses:
-        404 — No booking data found for this shop.
+        404 — No real bookings found in the last 18 days.
         422 — Input data is malformed or missing required fields.
         500 — Unexpected ML or database error.
     """
-    shop_id = 1
-    return AnalyticsController.get_customer_segments(db, shop_id)
+    shop_id      = 1
+    window_start = (datetime.now() - timedelta(days=SEGMENTATION_WINDOW_DAYS)).strftime("%Y-%m-%d")
+
+    # Delegate to controller — raises HTTPException on error
+    customers = AnalyticsController.get_customer_segments(db, shop_id)
+
+    # Wrap in an envelope that exposes the active window to the frontend
+    return {
+        "window_days":  SEGMENTATION_WINDOW_DAYS,
+        "window_start": window_start,
+        "customers":    customers,
+    }

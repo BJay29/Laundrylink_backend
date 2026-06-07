@@ -1,13 +1,8 @@
-"""
-ANALYTICS SERVICE — app/services/analytics_service.py
-======================================================
-Service layer that orchestrates data between the AnalyticsController
-and the AIEngine. Also hosts the customer segmentation pipeline
-which calls the K-Means cluster engine.
-"""
+
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from datetime import datetime, timedelta
 import json
 import os
 import pandas as pd
@@ -21,6 +16,14 @@ from ml_engine.cluster_engine import (
     get_segment_color,
     SEGMENT_LABELS,
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Only bookings created within this many days are used for segmentation.
+# Keeps segments fresh and prevents stale / historical data from skewing clusters.
+SEGMENTATION_WINDOW_DAYS = 18
 
 
 class AnalyticsService:
@@ -61,12 +64,12 @@ class AnalyticsService:
         if previous == 0:
             return {"trend": "0%", "status": "equal"}
 
-        diff = current - previous
+        diff    = current - previous
         percent = (diff / previous) * 100
-        status = 'up' if percent > 0.5 else ('down' if percent < -0.5 else 'equal')
+        status  = 'up' if percent > 0.5 else ('down' if percent < -0.5 else 'equal')
 
         return {
-            "trend": f"{abs(round(percent, 1))}%",
+            "trend":  f"{abs(round(percent, 1))}%",
             "status": status
         }
 
@@ -81,33 +84,31 @@ class AnalyticsService:
         """
         actual_metrics = AnalyticsController.get_dashboard_summary(self.db, shop_id)
 
-        current_rev  = actual_metrics.get("weekly_revenue", 0)
-        previous_rev = actual_metrics.get("last_week_revenue", 1)
-
+        current_rev   = actual_metrics.get("weekly_revenue", 0)
+        previous_rev  = actual_metrics.get("last_week_revenue", 1)
         current_book  = actual_metrics.get("total_bookings", 0)
         previous_book = actual_metrics.get("last_week_bookings", 1)
 
-        rev_trend  = self._calculate_percentage_trend(current_rev, previous_rev)
+        rev_trend  = self._calculate_percentage_trend(current_rev,  previous_rev)
         book_trend = self._calculate_percentage_trend(current_book, previous_book)
 
         distribution = AnalyticsController.get_service_distribution(self.db, shop_id)
         graph_data   = AnalyticsController.get_forecast_data(self.db, shop_id)
-
-        ai_metrics = self.get_ai_accuracy_metrics()
+        ai_metrics   = self.get_ai_accuracy_metrics()
 
         return {
-            "summary": actual_metrics,
+            "summary":      actual_metrics,
             "trends": {
                 "revenue":  rev_trend,
                 "bookings": book_trend
             },
             "distribution": distribution,
-            "charts": graph_data,
+            "charts":       graph_data,
             "ai_status": {
-                "engine_active":  True,
-                "last_sync":      "Just now",
+                "engine_active":    True,
+                "last_sync":        "Just now",
                 "accuracy_metrics": ai_metrics,
-                "recommendation": self._generate_ai_recommendation(actual_metrics)
+                "recommendation":   self._generate_ai_recommendation(actual_metrics)
             }
         }
 
@@ -127,8 +128,12 @@ class AnalyticsService:
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_service_efficiency(self, shop_id: int = 1):
-        summary   = AnalyticsController.get_dashboard_summary(self.db, shop_id)
-        total_kg  = summary.get("total_kg", 0)
+        """
+        Calculates efficiency by comparing total weight processed
+        against the number of bookings.
+        """
+        summary  = AnalyticsController.get_dashboard_summary(self.db, shop_id)
+        total_kg = summary.get("total_kg", 0)
 
         total_bookings = (
             summary.get("full_service", 0) +
@@ -140,10 +145,62 @@ class AnalyticsService:
         avg_load = total_kg / total_bookings if total_bookings > 0 else 0
 
         return {
-            "total_processed_kg":   total_kg,
-            "total_bookings":       total_bookings,
-            "average_kg_per_load":  round(avg_load, 2)
+            "total_processed_kg":  total_kg,
+            "total_bookings":      total_bookings,
+            "average_kg_per_load": round(avg_load, 2)
         }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 3 — PRIVATE HELPER: Build the filtered booking query
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_segmentation_query(self, shop_id: int):
+        """
+        Constructs the SQLAlchemy query for customer segmentation with
+        two mandatory filters applied BEFORE grouping:
+
+            1. 18-day rolling window  — only bookings created in the last
+               SEGMENTATION_WINDOW_DAYS days are included. This keeps
+               segments current and prevents stale data from skewing clusters.
+
+            2. Mock / test data exclusion — records where `is_mock` is True
+               (or 1) are stripped out so that seeded / development data never
+               pollutes production segments.
+
+               NOTE: If your Booking model does not have an `is_mock` column,
+               remove the `models.Booking.is_mock == False` filter line below.
+               The rest of the function works without it.
+
+        Returns:
+            A SQLAlchemy Query object (not yet executed) that yields
+            (customer_name, visit_frequency, total_spent) rows grouped
+            by customer_name.
+        """
+        cutoff_date = datetime.now() - timedelta(days=SEGMENTATION_WINDOW_DAYS)
+
+        query = (
+            self.db.query(
+                models.Booking.customer_name,
+                func.count(models.Booking.id).label("visit_frequency"),
+                func.sum(models.Booking.total_price).label("total_spent")
+            )
+            .filter(
+                # Filter 1: Restrict to this shop only
+                models.Booking.shop_id == shop_id,
+
+                # Filter 2: Only bookings within the last 18 days
+                models.Booking.created_at >= cutoff_date,
+            )
+            .group_by(models.Booking.customer_name)
+        )
+
+        # Filter 3: Exclude mock / test records if the column exists on the model.
+        # Wrapped in hasattr so the service does not crash on schema versions
+        # that predate the is_mock column migration.
+        if hasattr(models.Booking, 'is_mock'):
+            query = query.filter(models.Booking.is_mock == False)  # noqa: E712
+
+        return query
 
     # ─────────────────────────────────────────────────────────────────────────
     # CUSTOMER SEGMENTATION  (K-Means via cluster_engine.py)
@@ -151,43 +208,45 @@ class AnalyticsService:
 
     def get_customer_segments(self, shop_id: int = 1) -> list:
         """
-        Fetches customer booking data, prepares a behavioral DataFrame,
-        runs K-Means clustering via the cluster engine, and returns a
-        list of customer objects each annotated with a 'segment' key.
+        Fetches customer booking data filtered to the last 18 days (Phase 3),
+        prepares a behavioral DataFrame, runs K-Means clustering via the cluster
+        engine, and returns a list of customer objects each annotated with a
+        'segment' key.
+
+        Phase 3 Changes vs Phase 2:
+            - Query is scoped to the last SEGMENTATION_WINDOW_DAYS (18) days.
+            - Records flagged as mock/test data (is_mock = True) are excluded.
+            - Each row in the response now includes a `data_window` field
+              (ISO date string) so the frontend can display the active window.
 
         Workflow:
-            1. Query Booking table for per-customer aggregates.
+            1. Query Booking table with 18-day window + mock data filters.
             2. Build a pandas DataFrame with 'total_spent' and 'visit_frequency'.
-            3. If data is sufficient (>= 3 customers) → use K-Means clustering.
-            4. If data is sparse (< 3 customers)       → use rule-based fallback.
+            3. If data is sufficient (>= 3 customers) -> use K-Means clustering.
+            4. If data is sparse (< 3 customers)       -> use rule-based fallback.
             5. Return enriched list for the API response.
 
         Returns:
             List of dicts, each containing:
                 - customer_name   (str)
-                - visit_frequency (int)   : number of bookings
-                - total_spent     (float) : cumulative spend
+                - visit_frequency (int)   : bookings in the 18-day window
+                - total_spent     (float) : cumulative spend in the window
                 - avg_per_visit   (float) : average spend per booking
                 - segment         (str)   : "Occasional" | "Regular" | "VIP"
                 - segment_color   (str)   : Tailwind color token for the badge
+                - data_window     (str)   : ISO start date of the 18-day window
         """
 
-        # --- Step 1: Aggregate booking data per customer name ---
-        rows = (
-            self.db.query(
-                models.Booking.customer_name,
-                func.count(models.Booking.id).label("visit_frequency"),
-                func.sum(models.Booking.total_price).label("total_spent")
-            )
-            .filter(models.Booking.shop_id == shop_id)
-            .group_by(models.Booking.customer_name)
-            .all()
-        )
+        # ── Step 1: Run the filtered aggregation query ──────────────────────
+        cutoff_date = datetime.now() - timedelta(days=SEGMENTATION_WINDOW_DAYS)
+        rows        = self._build_segmentation_query(shop_id).all()
 
+        # Return empty list when the filtered window yields no data.
+        # The controller converts this to a 404 with a clear message.
         if not rows:
             return []
 
-        # --- Step 2: Build the customer DataFrame ---
+        # ── Step 2: Build the customer DataFrame ────────────────────────────
         customer_data = [
             {
                 "customer_name":   row.customer_name or "Walk-in Client",
@@ -199,26 +258,30 @@ class AnalyticsService:
 
         df = pd.DataFrame(customer_data)
 
-        # Compute average spend per visit (for display only, not used in clustering)
+        # Average spend per visit — display only, not used as a clustering feature
         df["avg_per_visit"] = (
             df["total_spent"] / df["visit_frequency"].replace(0, 1)
         ).round(2)
 
-        # --- Step 3: Assign segments ---
+        # Stamp each row with the window start date so the frontend can show
+        # "Segments based on bookings from <data_window> to today"
+        df["data_window"] = cutoff_date.strftime("%Y-%m-%d")
+
+        # ── Step 3: Assign segments ─────────────────────────────────────────
         if len(df) >= 3:
-            # Enough data → run K-Means clustering
+            # Sufficient customers in the 18-day window -> K-Means clustering
             result   = train_customer_clusters(df)
             segments = result["segments"]
         else:
-            # Too few customers → use simple rule-based thresholds as fallback
+            # Too few customers in the window -> rule-based threshold fallback
             segments = [
                 rule_based_segment(row["total_spent"], row["visit_frequency"])
                 for _, row in df.iterrows()
             ]
 
-        # --- Step 4: Attach segment labels and color tokens ---
+        # ── Step 4: Attach segment labels and Tailwind color tokens ─────────
         df["segment"]       = segments
         df["segment_color"] = df["segment"].apply(get_segment_color)
 
-        # --- Step 5: Convert to list of dicts for JSON serialization ---
+        # ── Step 5: Serialize to a JSON-safe list of dicts ──────────────────
         return df.to_dict(orient="records")
