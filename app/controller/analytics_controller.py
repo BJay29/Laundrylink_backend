@@ -171,7 +171,7 @@ class AnalyticsController:
             ).scalar() or 0.0
 
             history_data.append({
-                "label":         target_date.strftime("%b %d"),
+                "label":        target_date.strftime("%b %d"),
                 "actual_income": round(float(actual_income), 2)
             })
         return history_data
@@ -222,10 +222,11 @@ class AnalyticsController:
         with open(metrics_path, "r") as f:
             data = json.load(f)
 
+        # Updated to match flat JSON structure: accuracy_percentage and r2_score
         return {
             "status": "success",
-            "demand_forecasting_model":  data.get("demand_forecasting_model",  {}).get("accuracy_percentage", 0.0),
-            "utility_telemetry_model":   data.get("utility_telemetry_model",   {}).get("accuracy_percentage", 98.25)
+            "demand_forecasting_model": data.get("accuracy_percentage", 0.0),
+            "utility_telemetry_model": data.get("r2_score", 0.0) * 100
         }
 
     # ─────────────────────────────────────────────────────────────────────────
