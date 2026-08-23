@@ -89,7 +89,6 @@ class Setting(Base):
     water_rate = Column(Float, default=50.0)
     detergent_cost_per_load = Column(Float, default=10.0)
     
-    # These two columns caused the 500 error because they were missing in the DB
     off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
     operation_start_hour = Column(Integer, default=8)
     
@@ -136,6 +135,33 @@ class User(Base):
             "role": self.role,
             "shop_id": self.shop_id,
             "is_active": self.is_active
+        }
+
+class Customer(Base):
+    """
+    Identity management for mobile app customers (laundry service bookers).
+    Kept separate from User (shop owners/staff) since customers are not tied
+    to a single shop_id and have a different registration flow.
+    """
+    __tablename__ = "customers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    full_name = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    mobile_number = Column(String, nullable=False)
+    hashed_password = Column(String, nullable=False)  # consistent naming with User model
+
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "full_name": self.full_name,
+            "email": self.email,
+            "mobile_number": self.mobile_number,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
 class Machine(Base):

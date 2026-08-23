@@ -32,6 +32,36 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
 
+# --- CUSTOMER (MOBILE APP) SCHEMAS ---
+
+class CustomerCreate(BaseModel):
+    """Schema for customer self-registration via the mobile app."""
+    full_name: str
+    email: EmailStr
+    mobile_number: str
+    password: str
+
+class CustomerLogin(BaseModel):
+    """Schema for customer authentication requests from the mobile app."""
+    email: EmailStr
+    password: str
+
+class CustomerResponse(BaseModel):
+    """Profile data returned after successful customer login or registration."""
+    id: int
+    full_name: str
+    email: str
+    mobile_number: str
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+class CustomerLoginResponse(BaseModel):
+    """Standardized OAuth2-compatible login response for customers."""
+    access_token: str
+    token_type: str = "bearer"
+    customer: CustomerResponse
+
 # --- SETTINGS SCHEMAS ---
 
 class SettingBase(BaseModel):
