@@ -152,6 +152,10 @@ class Customer(Base):
     hashed_password = Column(String, nullable=False)  # consistent naming with User model
 
     is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
+    verification_code = Column(String, nullable=True)
+    verification_expires_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
@@ -161,6 +165,7 @@ class Customer(Base):
             "email": self.email,
             "mobile_number": self.mobile_number,
             "is_active": self.is_active,
+            "is_verified": self.is_verified,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 

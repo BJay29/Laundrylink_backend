@@ -14,9 +14,26 @@ router = APIRouter(
 def register_customer(customer: schemas.CustomerCreate, db: Session = Depends(get_db)):
     """
     Endpoint for customer self-registration via the Flutter mobile app.
-    Creates a new customer account not tied to any specific shop.
+    Creates an unverified customer account and emails a 6-digit verification code.
     """
     return customer_auth_controller.register_customer(db, customer)
+
+# --- EMAIL VERIFICATION ---
+@router.post("/verify")
+def verify_email(payload: schemas.CustomerVerifyEmail, db: Session = Depends(get_db)):
+    """
+    Validates the 6-digit code submitted by the customer and activates the account.
+    """
+    return customer_auth_controller.verify_customer_email(db, payload)
+
+# --- RESEND VERIFICATION CODE ---
+@router.post("/resend-verification")
+def resend_verification(payload: schemas.CustomerResendCode, db: Session = Depends(get_db)):
+    """
+    Sends a new 6-digit verification code to the customer's email,
+    used when the original code expired or was not received.
+    """
+    return customer_auth_controller.resend_verification_code(db, payload)
 
 # --- CUSTOMER LOGIN (Mobile App) ---
 @router.post("/login")
@@ -24,6 +41,7 @@ def login(credentials: schemas.CustomerLogin, db: Session = Depends(get_db)):
     """
     Authentication endpoint for the Flutter mobile app.
     Validates credentials and returns the customer profile.
+    Login is blocked until the account's email has been verified.
     """
     return customer_auth_controller.authenticate_customer(db, credentials)
 

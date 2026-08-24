@@ -53,6 +53,7 @@ class CustomerResponse(BaseModel):
     email: str
     mobile_number: str
     is_active: bool
+    is_verified: bool
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -61,6 +62,15 @@ class CustomerLoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     customer: CustomerResponse
+
+class CustomerVerifyEmail(BaseModel):
+    """Schema for submitting the 6-digit verification code."""
+    email: EmailStr
+    code: str
+
+class CustomerResendCode(BaseModel):
+    """Schema for requesting a new verification code."""
+    email: EmailStr
 
 # --- SETTINGS SCHEMAS ---
 
