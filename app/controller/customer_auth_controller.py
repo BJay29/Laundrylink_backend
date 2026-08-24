@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from app import models, schemas
-from app.services.email_services import generate_verification_code, send_verification_email
+from app.services.email_service import generate_verification_code, send_verification_email
 
 CODE_EXPIRY_MINUTES = 10
 
