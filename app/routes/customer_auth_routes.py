@@ -61,3 +61,26 @@ def get_customer_session_data(customer_id: int, db: Session = Depends(get_db)):
         )
 
     return customer_data
+
+
+# --- TEMPORARY DEBUG ENDPOINT (remove after testing) ---
+@router.get("/test-email/{test_email}")
+def test_email(test_email: str):
+    """
+    TEMPORARY: Directly tests the Gmail SMTP connection and returns
+    the raw success/failure result, bypassing the database entirely.
+    """
+    from app.services.email_service import send_verification_email, GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD
+
+    config_check = {
+        "GMAIL_SENDER_EMAIL_set": bool(GMAIL_SENDER_EMAIL),
+        "GMAIL_APP_PASSWORD_set": bool(GMAIL_APP_PASSWORD),
+        "sender_email_value": GMAIL_SENDER_EMAIL,
+    }
+
+    result = send_verification_email(test_email, "Test User", "123456")
+
+    return {
+        "config": config_check,
+        "email_sent": result
+    }
