@@ -68,9 +68,10 @@ def get_customer_session_data(customer_id: int, db: Session = Depends(get_db)):
 def test_email(test_email: str):
     """
     TEMPORARY: Directly tests the Gmail SMTP connection and returns
-    the raw success/failure result, bypassing the database entirely.
+    the actual error message if it fails. Remove this endpoint once
+    the email delivery issue is resolved.
     """
-    from app.services.email_service import send_verification_email, GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD
+    from app.services.email_service import debug_send_email, GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD
 
     config_check = {
         "GMAIL_SENDER_EMAIL_set": bool(GMAIL_SENDER_EMAIL),
@@ -78,9 +79,9 @@ def test_email(test_email: str):
         "sender_email_value": GMAIL_SENDER_EMAIL,
     }
 
-    result = send_verification_email(test_email, "Test User", "123456")
+    result = debug_send_email(test_email)
 
     return {
         "config": config_check,
-        "email_sent": result
+        "result": result
     }

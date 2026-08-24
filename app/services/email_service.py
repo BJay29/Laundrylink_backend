@@ -52,3 +52,28 @@ def send_verification_email(to_email: str, full_name: str, code: str) -> bool:
     except Exception as e:
         print(f"Failed to send verification email: {e}")
         return False
+
+
+def debug_send_email(to_email: str) -> dict:
+    """
+    TEMPORARY DEBUG: Same as send_verification_email but returns the
+    actual exception message instead of just True/False. Remove this
+    function once the email delivery issue is resolved.
+    """
+    if not GMAIL_SENDER_EMAIL or not GMAIL_APP_PASSWORD:
+        return {"success": False, "error": "Missing GMAIL_SENDER_EMAIL or GMAIL_APP_PASSWORD"}
+
+    message = MIMEMultipart("alternative")
+    message["Subject"] = "LaundryLink Debug Test"
+    message["From"] = f"LaundryLink <{GMAIL_SENDER_EMAIL}>"
+    message["To"] = to_email
+    message.attach(MIMEText("<p>This is a debug test email.</p>", "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_SENDER_EMAIL, to_email, message.as_string())
+        return {"success": True, "error": None}
+    except Exception as e:
+        return {"success": False, "error": f"{type(e).__name__}: {str(e)}"}
