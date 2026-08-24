@@ -1,6 +1,7 @@
 import os
 import random
 import smtplib
+import socket
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -14,6 +15,21 @@ SMTP_PORT = 587
 def generate_verification_code() -> str:
     """Generates a random 6-digit verification code."""
     return str(random.randint(100000, 999999))
+
+
+def _connect_smtp() -> smtplib.SMTP:
+    """
+    Connects to Gmail's SMTP server using an explicit IPv4 address.
+    Render's network does not support outbound IPv6, which causes
+    'OSError: [Errno 101] Network is unreachable' if the hostname
+    resolves to an IPv6 address by default.
+    """
+    ipv4_address = socket.gethostbyname(SMTP_SERVER)
+    server = smtplib.SMTP(ipv4_address, SMTP_PORT, timeout=15)
+    server.ehlo(SMTP_SERVER)  # Gmail expects the real hostname in EHLO, not the raw IP
+    server.starttls()
+    server.ehlo(SMTP_SERVER)
+    return server
 
 
 def send_verification_email(to_email: str, full_name: str, code: str) -> bool:
@@ -44,10 +60,10 @@ def send_verification_email(to_email: str, full_name: str, code: str) -> bool:
     message.attach(MIMEText(body, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_SENDER_EMAIL, to_email, message.as_string())
+        server = _connect_smtp()
+        server.login(GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_SENDER_EMAIL, to_email, message.as_string())
+        server.quit()
         return True
     except Exception as e:
         print(f"Failed to send verification email: {e}")
@@ -70,10 +86,10 @@ def debug_send_email(to_email: str) -> dict:
     message.attach(MIMEText("<p>This is a debug test email.</p>", "html"))
 
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
-            server.starttls()
-            server.login(GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_SENDER_EMAIL, to_email, message.as_string())
+        server = _connect_smtp()
+        server.login(GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_SENDER_EMAIL, to_email, message.as_string())
+        server.quit()
         return {"success": True, "error": None}
     except Exception as e:
         return {"success": False, "error": f"{type(e).__name__}: {str(e)}"}
