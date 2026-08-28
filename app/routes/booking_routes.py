@@ -19,6 +19,11 @@ def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
     Machine assignment is optional:
     - No machine provided  → status = 'Pending'
     - Machine(s) provided  → status = 'In Progress', machines marked Busy
+
+    NOTE: The controller now validates that booking_data.service_type
+    matches an active ServiceType configured by this shop, and that the
+    weight meets the shop's configured minimum_weight_kg. Both walk-in
+    (web) and mobile app bookings go through this same validation.
     """
     shop_id = booking_data.shop_id or 1
     return booking_controller.create_booking(db, booking_data, shop_id)

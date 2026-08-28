@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from fastapi import HTTPException, status
 from .. import models, schemas
 import logging
 from passlib.context import CryptContext # Added for password hashing
@@ -10,16 +11,16 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 logger = logging.getLogger(__name__)
 
 # --- SYSTEM CONSTANTS ---
-# These are strictly "Factory Defaults" used ONLY for new shop initialization 
-# or manual resets. They should NOT be used for active calculations.
+# These are strictly "Factory Defaults" used ONLY for new shop initialization
+# or manual resets of OPERATIONAL RATES. They should NOT be used for active
+# calculations. Service pricing (Full Service, Regular Wash, etc.) is no
+# longer part of these defaults — shop owners define their own services
+# via the ServiceType table, starting from an empty catalog.
 SYSTEM_DEFAULTS = {
-    "full_service_price": 210.0,
-    "regular_wash_price": 65.0,
-    "titan_wash_price": 100.0,
-    "comforter_price": 150.0,
     "electricity_rate": 12.0,
     "water_rate": 50.0,
     "detergent_cost_per_load": 10.0,
+    "minimum_weight_kg": 6.0,
     "off_peak_hours": "8:00 AM - 11:00 AM"
 }
 
@@ -47,19 +48,20 @@ def get_settings(db: Session, shop_id: int):
 
 def get_factory_defaults():
     """
-    Returns the hardcoded system default values.
-    Provides the frontend with the 'Standard' reference prices.
+    Returns the hardcoded system default values for operational rates.
+    Provides the frontend with the 'Standard' reference values. Service
+    pricing is not included here since it is fully owner-defined.
     """
     return SYSTEM_DEFAULTS
 
 def update_settings(db: Session, shop_id: int, settings_data: schemas.SettingUpdate):
     """
-    Updates the business parameters and pricing in the database.
+    Updates the business parameters and operational rates in the database.
     This change triggers an immediate update for the Booking Modal and Analytics.
     """
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
-    # Exclude unset values to allow partial updates (e.g., only updating one price)
+    # Exclude unset values to allow partial updates (e.g., only updating one rate)
     update_data = settings_data.model_dump(exclude_unset=True)
 
     if not db_settings:
@@ -79,7 +81,9 @@ def update_settings(db: Session, shop_id: int, settings_data: schemas.SettingUpd
 
 def reset_to_system_defaults(db: Session, shop_id: int):
     """
-    Wipes custom pricing and reverts the shop's DB record to SYSTEM_DEFAULTS.
+    Wipes custom operational rates and reverts the shop's DB record to
+    SYSTEM_DEFAULTS. Does NOT touch ServiceType records — service pricing
+    is reset separately (or not at all) since it's fully owner-defined.
     """
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
@@ -95,24 +99,129 @@ def reset_to_system_defaults(db: Session, shop_id: int):
 
 def get_pricing_for_booking(db: Session, shop_id: int):
     """
-    Crucial helper for the Booking Modal. 
-    Maps database column values to the specific 'service_type' keys 
-    expected by the React frontend logic.
+    Crucial helper for the Booking Modal.
+    UPDATED: Instead of returning 4 hardcoded service keys, this now builds
+    the pricing map dynamically from whatever ServiceType records the shop
+    owner has configured. If the shop hasn't added any services yet, this
+    returns an empty pricing map (frontend should show an empty/"configure
+    your services" state rather than a fixed dropdown).
     """
-    # Fetch the LATEST settings directly from the DB
     settings = get_settings(db, shop_id)
-    
-    # Verification log to ensure the values fetched are correct
-    logger.info(f"Fetching Live Pricing for Shop {shop_id}: Full Service = {settings.full_service_price}")
 
-    # The keys here must match the 'service_type' selection in the Frontend
-    return {
-        "Full Service": float(settings.full_service_price),
-        "Regular Wash": float(settings.regular_wash_price),
-        "Titan Wash": float(settings.titan_wash_price),
-        "Comforter": float(settings.comforter_price),
-        "detergent_fee": float(settings.detergent_cost_per_load)
-    }
+    active_services = (
+        db.query(models.ServiceType)
+        .filter(models.ServiceType.shop_id == shop_id, models.ServiceType.is_active == True)
+        .order_by(models.ServiceType.id.asc())
+        .all()
+    )
+
+    pricing = {service.name: float(service.price) for service in active_services}
+
+    logger.info(f"Fetching Live Pricing for Shop {shop_id}: {len(pricing)} active service(s) found.")
+
+    pricing["detergent_fee"] = float(settings.detergent_cost_per_load)
+    pricing["minimum_weight_kg"] = float(settings.minimum_weight_kg or 6.0)
+
+    return pricing
+
+# --- SERVICE TYPE FUNCTIONS (NEW) ---
+
+def get_service_types(db: Session, shop_id: int):
+    """
+    Returns all services (active and inactive) configured for a shop,
+    for display and management on the Optimization Settings page.
+    """
+    return (
+        db.query(models.ServiceType)
+        .filter(models.ServiceType.shop_id == shop_id)
+        .order_by(models.ServiceType.id.asc())
+        .all()
+    )
+
+def create_service_type(db: Session, shop_id: int, service_data: schemas.ServiceTypeCreate):
+    """
+    Registers a new service (name + price) for the shop.
+    Prevents exact duplicate names (case-insensitive) for the same shop.
+    """
+    existing = (
+        db.query(models.ServiceType)
+        .filter(
+            models.ServiceType.shop_id == shop_id,
+            models.ServiceType.name.ilike(service_data.name)
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"A service named '{service_data.name}' already exists for this shop."
+        )
+
+    new_service = models.ServiceType(
+        name=service_data.name,
+        price=service_data.price,
+        is_active=service_data.is_active,
+        shop_id=shop_id
+    )
+    db.add(new_service)
+    db.commit()
+    db.refresh(new_service)
+    return new_service
+
+def update_service_type(db: Session, shop_id: int, service_id: int, service_data: schemas.ServiceTypeUpdate):
+    """
+    Edits an existing service's name, price, or active status.
+    """
+    service = (
+        db.query(models.ServiceType)
+        .filter(models.ServiceType.id == service_id, models.ServiceType.shop_id == shop_id)
+        .first()
+    )
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service type not found.")
+
+    update_data = service_data.model_dump(exclude_unset=True)
+
+    if "name" in update_data:
+        duplicate = (
+            db.query(models.ServiceType)
+            .filter(
+                models.ServiceType.shop_id == shop_id,
+                models.ServiceType.name.ilike(update_data["name"]),
+                models.ServiceType.id != service_id
+            )
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"A service named '{update_data['name']}' already exists for this shop."
+            )
+
+    for key, value in update_data.items():
+        setattr(service, key, value)
+
+    db.commit()
+    db.refresh(service)
+    return service
+
+def delete_service_type(db: Session, shop_id: int, service_id: int):
+    """
+    Removes a service from the shop's catalog.
+    Existing bookings keep their historical service_type string, so past
+    records are unaffected — only future bookings lose this as an option.
+    """
+    service = (
+        db.query(models.ServiceType)
+        .filter(models.ServiceType.id == service_id, models.ServiceType.shop_id == shop_id)
+        .first()
+    )
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service type not found.")
+
+    db.delete(service)
+    db.commit()
+    return {"message": f"Service '{service.name}' removed successfully."}
 
 # --- PROFILE & SECURITY FUNCTIONS (NEW) ---
 

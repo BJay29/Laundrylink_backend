@@ -1,4 +1,4 @@
-from app.models import Booking, Machine, Setting, InventoryItem, InventoryLog
+from app.models import Booking, Machine, Setting, ServiceType, InventoryItem, InventoryLog
 from app.schemas import BookingCreate, BookingAssignMachine
 from app.services.prediction_service import PredictionService
 from fastapi import HTTPException, status
@@ -9,24 +9,60 @@ from datetime import datetime, timezone
 def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
     Creates a new booking.
-    UPDATED LOGIC:
     - If washer_id and dryer_id are both None → status = "Pending"
       (no machine assigned yet, operator will assign later from the terminal)
     - If at least one machine is assigned → status = "In Progress"
       (machines are marked Busy and telemetry is updated as before)
+
+    UPDATED VALIDATION:
+    - service_type must match an ACTIVE ServiceType configured by this shop.
+      Since shop owners now define their own services (instead of 4 fixed
+      ones), a booking can no longer reference a service that doesn't
+      exist in the shop's catalog. This keeps the walk-in flow (owner
+      types it in) and the mobile app flow (customer picks from the same
+      list) consistent with whatever the owner has actually configured.
+    - weight must meet the shop's configured minimum_weight_kg (defaults
+      to 6kg), enforced here so the rule holds regardless of which client
+      (web terminal or mobile app) submitted the booking.
     """
 
-    # --- 1. FETCH LIVE PRICING SETTINGS ---
+    # --- 1. FETCH OPERATIONAL SETTINGS (utility rates, minimum weight) ---
     settings = db.query(Setting).filter(Setting.shop_id == shop_id).first()
     if not settings:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Shop settings not found. Please configure pricing in Settings."
+            detail="Shop settings not found. Please configure Optimization Settings first."
+        )
+
+    minimum_weight = settings.minimum_weight_kg or 6.0
+    if booking_data.weight < minimum_weight:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Minimum booking weight is {minimum_weight}kg. Please adjust the weight."
+        )
+
+    # --- 2. VALIDATE SERVICE TYPE AGAINST THE SHOP'S OWN CATALOG ---
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == shop_id,
+            ServiceType.name == booking_data.service_type,
+            ServiceType.is_active == True
+        )
+        .first()
+    )
+    if not service_type_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Service type '{booking_data.service_type}' is not configured for this shop. "
+                "Please add it in Optimization Settings before creating a booking."
+            )
         )
 
     actual_booking_time = booking_data.booking_timestamp or datetime.now(timezone.utc)
 
-    # --- 2. HANDLE INVENTORY ---
+    # --- 3. HANDLE INVENTORY ---
     inventory_item_id = None
     if booking_data.inventory_item_id is not None:
         inventory_item = db.query(InventoryItem).filter(
@@ -55,7 +91,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         db.add(usage_log)
         inventory_item_id = inventory_item.id
 
-    # --- 3. DETERMINE INITIAL STATUS ---
+    # --- 4. DETERMINE INITIAL STATUS ---
     # If no machine is assigned at booking time, set status to Pending.
     # The operator will assign a machine later via the terminal.
     assigned_ids = [
@@ -64,7 +100,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     ]
     initial_status = "In Progress" if assigned_ids else "Pending"
 
-    # --- 4. CREATE THE BOOKING RECORD ---
+    # --- 5. CREATE THE BOOKING RECORD ---
     new_booking = Booking(
         customer_name=booking_data.customer_name,
         service_type=booking_data.service_type,
@@ -85,7 +121,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         created_at=datetime.now(timezone.utc)
     )
 
-    # --- 5. UPDATE MACHINE TELEMETRY (only if machines are assigned) ---
+    # --- 6. UPDATE MACHINE TELEMETRY (only if machines are assigned) ---
     for m_id in assigned_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
@@ -150,7 +186,6 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
 def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", shop_id: int):
     """
-    NEW FUNCTION
     Assigns a washer and/or dryer to an existing Pending booking that has no machine.
     - Validates both machines belong to this shop and are available.
     - Marks machines as Busy and updates telemetry.

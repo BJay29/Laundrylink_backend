@@ -20,6 +20,7 @@ class Shop(Base):
     bookings = relationship("Booking", back_populates="shop", cascade="all, delete-orphan")
     inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
+    service_types = relationship("ServiceType", back_populates="shop", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -72,22 +73,56 @@ class InventoryLog(Base):
     
     item = relationship("InventoryItem", back_populates="logs")
 
+class ServiceType(Base):
+    """
+    NEW MODEL
+    Dynamic, per-shop service catalog. Replaces the old fixed pricing columns
+    on Setting (full_service_price, regular_wash_price, titan_wash_price,
+    comforter_price). A shop owner defines their own services and prices
+    here from the Optimization Settings page, and these records are what
+    populate the 'Service Type' dropdown in the Create Booking modal.
+
+    New shops intentionally start with ZERO service types (mirrors the
+    Machine Hub behavior) — the owner must configure at least one before
+    bookings referencing that service can be created.
+    """
+    __tablename__ = "service_types"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    price = Column(Float, nullable=False, default=0.0)
+    is_active = Column(Boolean, default=True)
+
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="service_types")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "price": self.price,
+            "is_active": self.is_active,
+            "shop_id": self.shop_id
+        }
+
 class Setting(Base):
     """
-    Global configuration for service pricing and operational unit costs.
+    Global configuration for operational unit costs and booking rules.
+    NOTE: Service-specific pricing (Full Service, Regular Wash, etc.) has
+    been moved to the ServiceType table so shop owners can define their
+    own services instead of being locked to 4 fixed categories.
     """
     __tablename__ = "settings"
 
     id = Column(Integer, primary_key=True, index=True)
     
-    full_service_price = Column(Float, default=210.0)
-    regular_wash_price = Column(Float, default=65.0) 
-    titan_wash_price = Column(Float, default=100.0)
-    comforter_price = Column(Float, default=150.0)
-    
     electricity_rate = Column(Float, default=12.0)
     water_rate = Column(Float, default=50.0)
     detergent_cost_per_load = Column(Float, default=10.0)
+
+    # Minimum billable weight (KG) enforced on the Create Booking modal.
+    # Defaults to 6kg but is configurable per shop via Optimization Settings.
+    minimum_weight_kg = Column(Float, default=6.0)
     
     off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
     operation_start_hour = Column(Integer, default=8)
@@ -98,13 +133,10 @@ class Setting(Base):
     def to_dict(self):
         return {
             "id": self.id,
-            "full_service_price": self.full_service_price,
-            "regular_wash_price": self.regular_wash_price,
-            "titan_wash_price": self.titan_wash_price,
-            "comforter_price": self.comforter_price,
             "electricity_rate": self.electricity_rate,
             "water_rate": self.water_rate,
             "detergent_cost_per_load": self.detergent_cost_per_load,
+            "minimum_weight_kg": self.minimum_weight_kg,
             "off_peak_hours": self.off_peak_hours,
             "operation_start_hour": self.operation_start_hour,
             "shop_id": self.shop_id

@@ -72,38 +72,103 @@ class CustomerResendCode(BaseModel):
     """Schema for requesting a new verification code."""
     email: EmailStr
 
+# --- SERVICE TYPE SCHEMAS (NEW) ---
+
+class ServiceTypeBase(BaseModel):
+    """
+    Base schema for a shop-defined service (replaces the old fixed
+    Full Service / Regular Wash / Titan Wash / Comforter columns).
+    Shop owners create these themselves from Optimization Settings.
+    """
+    name: str
+    price: float
+    is_active: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Service name cannot be empty.")
+        return cleaned
+
+    @field_validator("price")
+    @classmethod
+    def validate_price(cls, v):
+        if v < 0:
+            raise ValueError("Price cannot be negative.")
+        return v
+
+class ServiceTypeCreate(ServiceTypeBase):
+    """Schema for adding a new service to a shop's catalog."""
+    shop_id: int
+
+class ServiceTypeUpdate(BaseModel):
+    """Schema for editing an existing service. All fields optional (partial update)."""
+    name: Optional[str] = None
+    price: Optional[float] = None
+    is_active: Optional[bool] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v):
+        if v is not None:
+            cleaned = v.strip()
+            if not cleaned:
+                raise ValueError("Service name cannot be empty.")
+            return cleaned
+        return v
+
+    @field_validator("price")
+    @classmethod
+    def validate_price(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("Price cannot be negative.")
+        return v
+
+class ServiceTypeResponse(ServiceTypeBase):
+    """Full response schema for the Optimization Settings page and Booking Modal."""
+    id: int
+    shop_id: int
+    model_config = ConfigDict(from_attributes=True)
+
 # --- SETTINGS SCHEMAS ---
 
 class SettingBase(BaseModel):
     """
-    Base settings schema containing pricing and operational rates.
-    Hardcoded defaults are removed to ensure the system fetches live Database data.
+    Base settings schema containing operational rates and booking rules.
+    Service-specific pricing has moved to ServiceType — this now only
+    covers costs/rules that apply shop-wide regardless of service.
     """
-    full_service_price: float 
-    regular_wash_price: float 
-    titan_wash_price: float
-    comforter_price: float
-    
     electricity_rate: float
     water_rate: float
     detergent_cost_per_load: float
-    
+
+    # Minimum billable weight (in KG) enforced on the Create Booking modal.
+    # Defaults to 6kg but is configurable per shop from Optimization Settings.
+    minimum_weight_kg: float = 6.0
+
     off_peak_hours: str = "8:00 AM - 11:00 AM"
 
 class SettingUpdate(BaseModel):
     """Schema for updating shop parameters from the Optimization Settings page."""
-    full_service_price: Optional[float] = None
-    regular_wash_price: Optional[float] = None
-    titan_wash_price: Optional[float] = None
-    comforter_price: Optional[float] = None
-    
     electricity_rate: Optional[float] = None
     water_rate: Optional[float] = None
     detergent_cost_per_load: Optional[float] = None
+
+    minimum_weight_kg: Optional[float] = None
+
     off_peak_hours: Optional[str] = None
 
+    @field_validator("minimum_weight_kg")
+    @classmethod
+    def validate_minimum_weight(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("minimum_weight_kg must be greater than 0.")
+        return v
+
 class SettingResponse(SettingBase):
-    """Full response schema for syncing global pricing across all frontend modals."""
+    """Full response schema for syncing global operational rates across all frontend modals."""
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
 
