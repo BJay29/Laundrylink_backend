@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
@@ -20,22 +20,25 @@ def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
     - No machine provided  → status = 'Pending'
     - Machine(s) provided  → status = 'In Progress', machines marked Busy
 
-    NOTE: The controller now validates that booking_data.service_type
-    matches an active ServiceType configured by this shop, and that the
-    weight meets the shop's configured minimum_weight_kg. Both walk-in
-    (web) and mobile app bookings go through this same validation.
+    The controller validates that booking_data.service_type matches an
+    active ServiceType configured by this shop, and that the weight meets
+    the shop's configured minimum_weight_kg. Both walk-in (web) and
+    mobile app bookings go through this same validation.
     """
-    shop_id = booking_data.shop_id or 1
-    return booking_controller.create_booking(db, booking_data, shop_id)
+    if not booking_data.shop_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="shop_id is required to create a booking."
+        )
+    return booking_controller.create_booking(db, booking_data, booking_data.shop_id)
 
 
 @router.get("/active", response_model=List[BookingResponse])
-def get_active_bookings(db: Session = Depends(get_db)):
+def get_active_bookings(shop_id: int = Query(...), db: Session = Depends(get_db)):
     """
     Returns all non-finalized bookings for the Service Terminal.
     Includes both Pending (no machine assigned) and In Progress bookings.
     """
-    shop_id = 1
     return booking_controller.get_active_bookings(db, shop_id)
 
 
@@ -43,6 +46,7 @@ def get_active_bookings(db: Session = Depends(get_db)):
 def update_status(
     booking_id: int,
     status_data: BookingStatusUpdate,
+    shop_id: int = Query(...),
     db: Session = Depends(get_db)
 ):
     """
@@ -50,7 +54,6 @@ def update_status(
     Pending → In Progress → Ready → Claimed
     Releases machines back to Available on Ready / Claimed / Cancelled.
     """
-    shop_id = 1
     return booking_controller.update_booking_status(
         db, booking_id, status_data.status, shop_id
     )
@@ -60,6 +63,7 @@ def update_status(
 def assign_machine(
     booking_id: int,
     assign_data: BookingAssignMachine,
+    shop_id: int = Query(...),
     db: Session = Depends(get_db)
 ):
     """
@@ -69,7 +73,6 @@ def assign_machine(
     - Transitions booking status: Pending → In Progress
     Called from the Service Terminal when the operator clicks 'Assign Machine'.
     """
-    shop_id = 1
     return booking_controller.assign_machine_to_booking(
         db, booking_id, assign_data, shop_id
     )
