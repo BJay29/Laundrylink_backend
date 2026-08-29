@@ -297,6 +297,35 @@ class MachineNested(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+# --- BOOKING INVENTORY USAGE SCHEMAS (NEW) ---
+
+class BookingInventoryItemInput(BaseModel):
+    """
+    Isang inventory item na ginamit sa isang booking, kasama ang quantity.
+    Listahan nito ang mapupunta sa BookingCreate.inventory_items —
+    pinapayagan nitong maraming consumables (detergent, fabcon, atbp.)
+    sa iisang booking, bawat isa may sariling quantity.
+    """
+    inventory_item_id: int
+    quantity_used: float
+
+    @field_validator("quantity_used")
+    @classmethod
+    def validate_quantity(cls, v):
+        if v <= 0:
+            raise ValueError("quantity_used must be greater than 0.")
+        return v
+
+class BookingInventoryUsageResponse(BaseModel):
+    """Isang item na ginamit sa booking, para sa BookingResponse."""
+    id: int
+    inventory_item_id: int
+    item_name: Optional[str] = None
+    quantity_used: float
+    unit: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
@@ -316,8 +345,12 @@ class BookingCreate(BaseModel):
 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
-    inventory_item_id: Optional[int] = None
-    inventory_quantity_used: Optional[float] = None
+    # UPDATED: pinalitan ang single inventory_item_id/inventory_quantity_used
+    # ng listahan — pinapayagan na ngayon ang MARAMING consumables
+    # (hal. detergent + fabric conditioner) sa iisang booking. Optional
+    # pa rin — pwedeng walang laman kung walang consumable na ginamit
+    # (hal. walk-in na may sariling sabon).
+    inventory_items: List[BookingInventoryItemInput] = []
 
     add_detergent: bool = False
     add_delivery: bool = False
@@ -363,8 +396,9 @@ class BookingResponse(BaseModel):
     shop_id: int 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
-    inventory_item_id: Optional[int] = None
-    inventory_item_name: Optional[str] = None
+    # UPDATED: pinalitan ang inventory_item_id/inventory_item_name ng
+    # listahan ng lahat ng items na ginamit sa booking na ito.
+    inventory_items_used: List[BookingInventoryUsageResponse] = []
     
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None

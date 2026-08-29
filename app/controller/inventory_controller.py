@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from fastapi import HTTPException, status
 from app.models import InventoryItem, InventoryLog, Shop
 from app.schemas import InventoryItemCreate, InventoryItemUpdate
 
@@ -125,10 +126,17 @@ def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate, shop_
 def record_usage(db: Session, item_id: int, quantity_used: float, shop_id: int):
     """
     Deducts stock from an item and creates an InventoryLog record.
-    Used for tracking consumption trends.
+    Used for MANUAL consumption tracking (e.g. staff records usage
+    directly from the Inventory page, not tied to a booking).
 
     FIXED: shop_id filtering added via get_item(). Dating pwedeng
     ibawas ang stock ng ITEM NG IBANG SHOP kung alam lang ang item_id.
+
+    NOTE: hiwalay ito sa validate_and_deduct_stock() sa ibaba — ito ay
+    para sa STANDALONE na paggamit (may sariling commit), habang ang
+    validate_and_deduct_stock() ay para sa MULTI-ITEM na booking flow
+    (walang commit, dahil isang malaking transaction lang ang gagawin
+    sa booking_controller para sa lahat ng items nang sabay-sabay).
     """
     try:
         db_item = get_item(db, item_id, shop_id)
@@ -256,3 +264,40 @@ def get_inventory_dashboard_stats(db: Session, shop_id: int):
     except Exception as e:
         print(f"Error in get_inventory_dashboard_stats: {e}")
         return None
+
+
+def validate_and_deduct_stock(db: Session, item_id: int, quantity: float, shop_id: int) -> InventoryItem:
+    """
+    NEW — Reusable helper na tinatawag ng booking_controller sa loob ng
+    loop, isang beses kada item sa multi-item na booking (hal. detergent
+    + fabric conditioner sa iisang booking).
+
+    Isang lugar lang ito ginagawa (single source of truth) para sa
+    validation + deduction — ang booking_controller ang tumatawag dito
+    nang paulit-ulit para sa bawat item sa listahan.
+
+    Ibinabato ang HTTPException kung hindi mahanap ang item o kulang
+    ang stock — kailangang ma-stop agad ang buong transaction kung may
+    isang item na fail (all-or-nothing behavior).
+
+    NOTE: walang db.commit() dito sa sadya — ang caller (create_booking
+    sa booking_controller) ang bahalang mag-commit ng BUONG transaction
+    (booking + machine telemetry + lahat ng inventory deductions) nang
+    sabay-sabay, para hindi mangyari na may bahagyang na-deduct na stock
+    kahit fail ang buong booking.
+    """
+    item = get_item(db, item_id, shop_id)
+    if not item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Inventory item ID {item_id} not found for this shop."
+        )
+    if item.current_stock < quantity:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Insufficient stock for '{item.item_name}'. Available: {item.current_stock}{item.unit}, needed: {quantity}{item.unit}."
+        )
+
+    item.current_stock -= quantity
+    db.add(InventoryLog(item_id=item.id, quantity_used=quantity))
+    return item

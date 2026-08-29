@@ -73,6 +73,33 @@ class InventoryLog(Base):
     
     item = relationship("InventoryItem", back_populates="logs")
 
+class BookingInventoryUsage(Base):
+    """
+    NEW MODEL — Junction table na nag-uugnay ng isang Booking sa MARAMING
+    InventoryItem na ginamit dito (hal. detergent + fabric conditioner sa
+    iisang booking). Isang row dito = isang item na ginamit, kasama ang
+    quantity. Pinapalitan nito ang dating single inventory_item_id column
+    sa Booking, na sumusuporta lang dati sa ISANG item kada booking.
+    """
+    __tablename__ = "booking_inventory_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False)
+    inventory_item_id = Column(Integer, ForeignKey("inventory.id"), nullable=False)
+    quantity_used = Column(Float, nullable=False)
+
+    booking = relationship("Booking", back_populates="inventory_usages")
+    inventory_item = relationship("InventoryItem")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "inventory_item_id": self.inventory_item_id,
+            "item_name": self.inventory_item.item_name if self.inventory_item else None,
+            "quantity_used": self.quantity_used,
+            "unit": self.inventory_item.unit if self.inventory_item else None,
+        }
+
 class ServiceType(Base):
     """
     NEW MODEL
@@ -273,7 +300,9 @@ class Booking(Base):
     
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
-    inventory_item_id = Column(Integer, ForeignKey("inventory.id"), nullable=True)
+    # REMOVED: inventory_item_id — dating single-item na field, pinalitan
+    # na ng inventory_usages relationship sa ibaba, na sumusuporta na sa
+    # MARAMING inventory items kada booking (via BookingInventoryUsage).
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -282,7 +311,14 @@ class Booking(Base):
     shop = relationship("Shop", back_populates="bookings")
     washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
     dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
-    inventory_item = relationship("InventoryItem", lazy="joined")
+    # REMOVED: inventory_item relationship (single-item, lumang paraan)
+    # NEW: multiple items na, gamit ang junction table sa BookingInventoryUsage
+    inventory_usages = relationship(
+        "BookingInventoryUsage",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+        lazy="joined"
+    )
 
     def to_dict(self):
         return {
@@ -301,8 +337,9 @@ class Booking(Base):
             "add_delivery": self.add_delivery,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
-            "inventory_item_id": self.inventory_item_id,
-            "inventory_item_name": self.inventory_item.item_name if self.inventory_item else None,
+            # REMOVED: inventory_item_id, inventory_item_name (single-item fields)
+            # NEW: listahan ng lahat ng items na ginamit sa booking na ito
+            "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,

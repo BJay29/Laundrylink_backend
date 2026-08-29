@@ -1,6 +1,7 @@
-from app.models import Booking, Machine, Setting, ServiceType, InventoryItem, InventoryLog
+from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage
 from app.schemas import BookingCreate, BookingAssignMachine
 from app.services.prediction_service import PredictionService
+from app.controller import inventory_controller
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timezone
@@ -16,14 +17,19 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
     UPDATED VALIDATION:
     - service_type must match an ACTIVE ServiceType configured by this shop.
-      Since shop owners now define their own services (instead of 4 fixed
-      ones), a booking can no longer reference a service that doesn't
-      exist in the shop's catalog. This keeps the walk-in flow (owner
-      types it in) and the mobile app flow (customer picks from the same
-      list) consistent with whatever the owner has actually configured.
-    - weight must meet the shop's configured minimum_weight_kg (defaults
-      to 6kg), enforced here so the rule holds regardless of which client
-      (web terminal or mobile app) submitted the booking.
+    - weight must meet the shop's configured minimum_weight_kg.
+
+    INVENTORY (MULTI-ITEM, NEW):
+    - booking_data.inventory_items is now a LIST of
+      {inventory_item_id, quantity_used} pairs, instead of a single
+      inventory_item_id/inventory_quantity_used pair. This supports
+      real-world bookings that use multiple consumables at once
+      (e.g. detergent + fabric conditioner).
+    - ALL items are validated and deducted as ONE atomic transaction —
+      if any single item has insufficient stock, the ENTIRE booking
+      fails and NOTHING is deducted (no partial deductions). This is
+      enforced by only calling db.commit() once, at the very end,
+      after every item in the list has already passed validation.
     """
 
     # --- 1. FETCH OPERATIONAL SETTINGS (utility rates, minimum weight) ---
@@ -62,34 +68,22 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
     actual_booking_time = booking_data.booking_timestamp or datetime.now(timezone.utc)
 
-    # --- 3. HANDLE INVENTORY ---
-    inventory_item_id = None
-    if booking_data.inventory_item_id is not None:
-        inventory_item = db.query(InventoryItem).filter(
-            InventoryItem.id == booking_data.inventory_item_id,
-            InventoryItem.shop_id == shop_id
-        ).first()
-
-        if not inventory_item:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Selected inventory item not found for this shop."
-            )
-
-        quantity_to_use = booking_data.inventory_quantity_used
-        if quantity_to_use is None or quantity_to_use <= 0:
-            quantity_to_use = max(booking_data.loads * (inventory_item.usage_rate or 1.0), 0.01)
-
-        if inventory_item.current_stock < quantity_to_use:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Inventory item has insufficient stock for the booking."
-            )
-
-        inventory_item.current_stock -= quantity_to_use
-        usage_log = InventoryLog(item_id=inventory_item.id, quantity_used=quantity_to_use)
-        db.add(usage_log)
-        inventory_item_id = inventory_item.id
+    # --- 3. VALIDATE + DEDUCT INVENTORY (MULTI-ITEM, ATOMIC) ---
+    # Loop through every item in the list — each one is validated and
+    # deducted via the shared helper in inventory_controller. If ANY item
+    # fails (not found, or insufficient stock), an HTTPException is raised
+    # immediately, which stops execution here BEFORE db.commit() is ever
+    # called below — so nothing gets persisted, not even the items that
+    # were already "deducted in memory" earlier in the loop.
+    deducted_items = []  # [(InventoryItem, quantity_used), ...]
+    for item_usage in booking_data.inventory_items:
+        item = inventory_controller.validate_and_deduct_stock(
+            db=db,
+            item_id=item_usage.inventory_item_id,
+            quantity=item_usage.quantity_used,
+            shop_id=shop_id
+        )
+        deducted_items.append((item, item_usage.quantity_used))
 
     # --- 4. DETERMINE INITIAL STATUS ---
     # If no machine is assigned at booking time, set status to Pending.
@@ -115,7 +109,6 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         status=initial_status,
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
-        inventory_item_id=inventory_item_id,
         shop_id=shop_id,
         booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)
@@ -166,12 +159,29 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
     try:
         db.add(new_booking)
+        db.flush()  # kailangan para makuha ang new_booking.id bago gawin ang junction rows
+
+        # --- 7. GUMAWA NG BookingInventoryUsage ROW PARA SA BAWAT ITEM ---
+        for item, quantity_used in deducted_items:
+            db.add(BookingInventoryUsage(
+                booking_id=new_booking.id,
+                inventory_item_id=item.id,
+                quantity_used=quantity_used
+            ))
+
+        # ⬇️ ISANG COMMIT LANG PARA SA LAHAT — booking, machine telemetry,
+        # inventory deductions, at usage records, lahat sabay-sabay
+        # nase-save o sabay-sabay na iro-rollback kung may error.
         db.commit()
         db.refresh(new_booking)
 
         return (
             db.query(Booking)
-            .options(joinedload(Booking.washer), joinedload(Booking.dryer))
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages)
+            )
             .filter(Booking.id == new_booking.id)
             .first()
         )
@@ -190,6 +200,10 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     - Validates both machines belong to this shop and are available.
     - Marks machines as Busy and updates telemetry.
     - Transitions booking status from Pending → In Progress.
+
+    (Walang binago dito — hindi apektado ng multi-item inventory change,
+    dahil ang inventory deduction ay nangyayari sa create_booking lang,
+    hindi dito.)
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -282,7 +296,11 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         db.commit()
         return (
             db.query(Booking)
-            .options(joinedload(Booking.washer), joinedload(Booking.dryer))
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages)
+            )
             .filter(Booking.id == booking_id)
             .first()
         )
@@ -298,11 +316,15 @@ def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized tasks for the Terminal UI.
     Includes Pending bookings (no machine) and In Progress bookings.
-    Pre-loads Machine data to prevent null labels.
+    Pre-loads Machine and inventory usage data to prevent null labels.
     """
     return (
         db.query(Booking)
-        .options(joinedload(Booking.washer), joinedload(Booking.dryer))
+        .options(
+            joinedload(Booking.washer),
+            joinedload(Booking.dryer),
+            joinedload(Booking.inventory_usages)
+        )
         .filter(
             Booking.shop_id == shop_id,
             Booking.status.notin_(["Claimed", "Cancelled"])
@@ -315,6 +337,7 @@ def get_active_bookings(db: Session, shop_id: int):
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
+    (Walang binago dito.)
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -353,7 +376,11 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
         db.commit()
         return (
             db.query(Booking)
-            .options(joinedload(Booking.washer), joinedload(Booking.dryer))
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages)
+            )
             .filter(Booking.id == booking_id)
             .first()
         )
