@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from app import models, schemas
 from app.services.email_service import generate_verification_code, send_verification_email
+from app.security import create_customer_access_token  # ⬅️ BAGONG IMPORT
 
 CODE_EXPIRY_MINUTES = 10
 
@@ -136,7 +137,8 @@ def authenticate_customer(db: Session, credentials: schemas.CustomerLogin):
     """
     Authenticates a customer via email and password for the mobile app.
     Blocks login until the account has been verified.
-    Returns a unified payload consistent with the owner-side login response.
+    Returns a REAL signed JWT (type=customer) instead of a placeholder,
+    consistent with the owner-side login response.
     """
 
     # 1. Fetch customer by email
@@ -184,30 +186,20 @@ def authenticate_customer(db: Session, credentials: schemas.CustomerLogin):
         "is_verified": customer.is_verified,
     }
 
+    # 6. Generate a REAL signed JWT with "type": "customer" —
+    #    hindi ito magagamit para mag-access ng shop-owner-only
+    #    endpoints kahit valid ang signature nito.
+    token = create_customer_access_token(customer_id=customer.id)
+
     return {
-        "access_token": "token_placeholder",  # TODO: replace with real JWT
+        "access_token": token,
         "token_type": "bearer",
         "customer": customer_payload
     }
 
 
-def get_current_customer_profile(db: Session, customer_id: int):
-    """
-    Fetches basic profile info for the current customer session.
-    """
-    customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
-
-    if not customer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Customer not found"
-        )
-
-    return {
-        "id": customer.id,
-        "full_name": customer.full_name,
-        "email": customer.email,
-        "mobile_number": customer.mobile_number,
-        "is_active": customer.is_active,
-        "is_verified": customer.is_verified,
-    }
+# NOTE: Tinanggal na ang get_current_customer_profile(db, customer_id).
+# Pinalitan ito ng get_current_customer() dependency sa security.py,
+# na kumukuha na base sa verified JWT — hindi na sa pamamagitan ng
+# arbitrary customer_id sa URL (dating security hole: kahit sinong
+# customer_id, makikita ang profile ng ibang customer).

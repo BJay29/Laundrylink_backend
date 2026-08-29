@@ -2,6 +2,8 @@ import bcrypt
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from app import models, schemas
+from app.security import create_access_token  # ⬅️ BAGONG IMPORT
+
 
 def create_owner(db: Session, user: schemas.OwnerCreate):
     """
@@ -13,7 +15,7 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
 
@@ -28,13 +30,13 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
 
     # 3. Create the Owner account linked to the new shop
     hashed_pass = bcrypt.hashpw(
-        user.password.encode('utf-8'), 
+        user.password.encode('utf-8'),
         bcrypt.gensalt()
     ).decode('utf-8')
-    
+
     new_user = models.User(
         email=user.email,
-        hashed_password=hashed_pass, 
+        hashed_password=hashed_pass,
         role="owner",
         shop_id=new_shop.id
     )
@@ -45,34 +47,34 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     # 4. Attach shop details for the response
     new_user.shop_name = new_shop.shop_name
     new_user.address = new_shop.address
-    
+
     return new_user
+
 
 def authenticate_user(db: Session, credentials: schemas.UserLogin):
     """
     Authenticates administrative users (Owners/Staff) via email and password.
-    Returns a unified payload for both React and Flutter.
+    Returns a unified payload with a REAL signed JWT for both React and Flutter.
     """
-    
+
     # 1. Fetch user by email
     user = db.query(models.User).filter(
         models.User.email == credentials.email
     ).first()
 
     # 2. Verify existence and password
-    # Added defensive check to avoid AttributeError if user is None
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid email or password"
         )
-        
+
     if not bcrypt.checkpw(
-        credentials.password.encode('utf-8'), 
+        credentials.password.encode('utf-8'),
         user.hashed_password.encode('utf-8')
     ):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid email or password"
         )
 
@@ -83,37 +85,32 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
             detail="Account is inactive. Contact your administrator."
         )
 
-    # 4. Build response payload with safe checks for 'shop' relationship
+    # 4. Build response payload
     user_payload = {
-        "email": user.email,
-        "role": user.role,                                         
-        "shop_id": user.shop_id,
-        "shop_name": getattr(user.shop, 'shop_name', None) if user.shop else None,
-        "address": getattr(user.shop, 'address', None) if user.shop else None,
-    }
-
-    return {
-        "access_token": "token_placeholder",  # TODO: replace with real JWT
-        "token_type": "bearer",
-        "user": user_payload
-    }
-
-def get_current_user_profile(db: Session, user_id: int):
-    """
-    Fetches basic shop and user info for the current session.
-    """
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail="User not found"
-        )
-
-    return {
         "email": user.email,
         "role": user.role,
         "shop_id": user.shop_id,
         "shop_name": getattr(user.shop, 'shop_name', None) if user.shop else None,
         "address": getattr(user.shop, 'address', None) if user.shop else None,
     }
+
+    # 5. Generate a REAL signed JWT — shop_id at role naka-embed na dito.
+    #    Ito na ang magiging pinagmumulan ng shop scoping sa buong app,
+    #    hindi na yung shop_id na ipinapasa ng client.
+    token = create_access_token(
+        user_id=user.id,
+        shop_id=user.shop_id,
+        role=user.role
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": user_payload
+    }
+
+
+# NOTE: Tinanggal na ang get_current_user_profile(db, user_id) dito.
+# Pinalitan ito ng get_current_user() dependency sa security.py,
+# na kumukuha na base sa JWT — hindi na sa pamamagitan ng arbitrary
+# user_id sa URL (dating security hole: kahit sinong user_id, makikita).

@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app import schemas
+from app import schemas, models
 from app.controller import customer_auth_controller
+from app.security import get_current_customer  # ⬅️ BAGONG IMPORT
 
 router = APIRouter(
     prefix="/customer",
@@ -18,6 +19,7 @@ def register_customer(customer: schemas.CustomerCreate, db: Session = Depends(ge
     """
     return customer_auth_controller.register_customer(db, customer)
 
+
 # --- EMAIL VERIFICATION ---
 @router.post("/verify")
 def verify_email(payload: schemas.CustomerVerifyEmail, db: Session = Depends(get_db)):
@@ -25,6 +27,7 @@ def verify_email(payload: schemas.CustomerVerifyEmail, db: Session = Depends(get
     Validates the 6-digit code submitted by the customer and activates the account.
     """
     return customer_auth_controller.verify_customer_email(db, payload)
+
 
 # --- RESEND VERIFICATION CODE ---
 @router.post("/resend-verification")
@@ -35,53 +38,34 @@ def resend_verification(payload: schemas.CustomerResendCode, db: Session = Depen
     """
     return customer_auth_controller.resend_verification_code(db, payload)
 
+
 # --- CUSTOMER LOGIN (Mobile App) ---
-@router.post("/login")
+@router.post("/login", response_model=schemas.CustomerLoginResponse)
 def login(credentials: schemas.CustomerLogin, db: Session = Depends(get_db)):
     """
     Authentication endpoint for the Flutter mobile app.
-    Validates credentials and returns the customer profile.
+    Validates credentials and returns a REAL JWT + the customer profile.
     Login is blocked until the account's email has been verified.
     """
     return customer_auth_controller.authenticate_customer(db, credentials)
 
-# --- SESSION DATA FETCHING ---
-@router.get("/profile/{customer_id}", response_model=schemas.CustomerResponse)
-def get_customer_session_data(customer_id: int, db: Session = Depends(get_db)):
+
+# --- SESSION DATA FETCHING (PROTECTED, SELF ONLY) ---
+@router.get("/profile", response_model=schemas.CustomerResponse)
+def get_my_customer_profile(current_customer: models.Customer = Depends(get_current_customer)):
     """
-    Retrieves essential session details by Customer ID.
-    Used to persist customer info on the mobile app after a successful login.
+    Retrieves session details of the CURRENTLY LOGGED-IN customer only,
+    based on the verified JWT sent in the Authorization header.
+
+    Dating "/profile/{customer_id}" ay open sa kahit sino, basta alam
+    ang isang valid customer ID (1, 2, 3...) — walang authentication
+    check. Ngayon, base na sa verified JWT ang result, kaya imposibleng
+    makita ng isang customer ang profile ng iba.
     """
-    customer_data = customer_auth_controller.get_current_customer_profile(db, customer_id)
-
-    if not customer_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Customer session data not found"
-        )
-
-    return customer_data
+    return current_customer
 
 
-# --- TEMPORARY DEBUG ENDPOINT (remove after testing) ---
-@router.get("/test-email/{test_email}")
-def test_email(test_email: str):
-    """
-    TEMPORARY: Directly tests the Gmail SMTP connection and returns
-    the actual error message if it fails. Remove this endpoint once
-    the email delivery issue is resolved.
-    """
-    from app.services.email_service import debug_send_email, GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD
-
-    config_check = {
-        "GMAIL_SENDER_EMAIL_set": bool(GMAIL_SENDER_EMAIL),
-        "GMAIL_APP_PASSWORD_set": bool(GMAIL_APP_PASSWORD),
-        "sender_email_value": GMAIL_SENDER_EMAIL,
-    }
-
-    result = debug_send_email(test_email)
-
-    return {
-        "config": config_check,
-        "result": result
-    }
+# NOTE: Tinanggal na ang "/test-email/{test_email}" debug endpoint.
+# Nag-expose ito ng SMTP config info (env var presence) nang walang
+# authentication — dapat lang ito naka-enable habang nagte-test,
+# at tinanggal na ngayong secure na ang buong auth flow.
