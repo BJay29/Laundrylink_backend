@@ -11,25 +11,13 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     """
     Creates a new booking.
     - If washer_id and dryer_id are both None → status = "Pending"
-      (no machine assigned yet, operator will assign later from the terminal)
     - If at least one machine is assigned → status = "In Progress"
-      (machines are marked Busy and telemetry is updated as before)
 
-    UPDATED VALIDATION:
-    - service_type must match an ACTIVE ServiceType configured by this shop.
-    - weight must meet the shop's configured minimum_weight_kg.
-
-    INVENTORY (MULTI-ITEM, NEW):
-    - booking_data.inventory_items is now a LIST of
-      {inventory_item_id, quantity_used} pairs, instead of a single
-      inventory_item_id/inventory_quantity_used pair. This supports
-      real-world bookings that use multiple consumables at once
-      (e.g. detergent + fabric conditioner).
-    - ALL items are validated and deducted as ONE atomic transaction —
-      if any single item has insufficient stock, the ENTIRE booking
-      fails and NOTHING is deducted (no partial deductions). This is
-      enforced by only calling db.commit() once, at the very end,
-      after every item in the list has already passed validation.
+    UPDATED: machine.remaining_time now comes from the shop's own
+    configured ServiceType.duration_minutes instead of
+    PredictionService.get_machine_runtime()'s hardcoded estimate — the
+    Machine Monitoring card reflects what the shop owner actually set
+    in Optimization Settings.
     """
 
     # --- 1. FETCH OPERATIONAL SETTINGS (utility rates, minimum weight) ---
@@ -69,13 +57,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     actual_booking_time = booking_data.booking_timestamp or datetime.now(timezone.utc)
 
     # --- 3. VALIDATE + DEDUCT INVENTORY (MULTI-ITEM, ATOMIC) ---
-    # Loop through every item in the list — each one is validated and
-    # deducted via the shared helper in inventory_controller. If ANY item
-    # fails (not found, or insufficient stock), an HTTPException is raised
-    # immediately, which stops execution here BEFORE db.commit() is ever
-    # called below — so nothing gets persisted, not even the items that
-    # were already "deducted in memory" earlier in the loop.
-    deducted_items = []  # [(InventoryItem, quantity_used), ...]
+    deducted_items = []
     for item_usage in booking_data.inventory_items:
         item = inventory_controller.validate_and_deduct_stock(
             db=db,
@@ -86,8 +68,6 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         deducted_items.append((item, item_usage.quantity_used))
 
     # --- 4. DETERMINE INITIAL STATUS ---
-    # If no machine is assigned at booking time, set status to Pending.
-    # The operator will assign a machine later via the terminal.
     assigned_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
         if m_id is not None
@@ -138,9 +118,9 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         machine.current_price = booking_data.total_price
         machine.total_cycles += 1
 
-        machine.remaining_time = PredictionService.get_machine_runtime(
-            machine.machine_type, booking_data.service_type
-        )
+        # UPDATED: use the shop's own configured duration for this
+        # service instead of the generic PredictionService estimate.
+        machine.remaining_time = service_type_record.duration_minutes
 
         overhead_data = PredictionService.get_overhead(machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
@@ -159,9 +139,8 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 
     try:
         db.add(new_booking)
-        db.flush()  # kailangan para makuha ang new_booking.id bago gawin ang junction rows
+        db.flush()
 
-        # --- 7. GUMAWA NG BookingInventoryUsage ROW PARA SA BAWAT ITEM ---
         for item, quantity_used in deducted_items:
             db.add(BookingInventoryUsage(
                 booking_id=new_booking.id,
@@ -169,9 +148,6 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 quantity_used=quantity_used
             ))
 
-        # ⬇️ ISANG COMMIT LANG PARA SA LAHAT — booking, machine telemetry,
-        # inventory deductions, at usage records, lahat sabay-sabay
-        # nase-save o sabay-sabay na iro-rollback kung may error.
         db.commit()
         db.refresh(new_booking)
 
@@ -197,13 +173,11 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
 def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", shop_id: int):
     """
     Assigns a washer and/or dryer to an existing Pending booking that has no machine.
-    - Validates both machines belong to this shop and are available.
-    - Marks machines as Busy and updates telemetry.
-    - Transitions booking status from Pending → In Progress.
 
-    (Walang binago dito — hindi apektado ng multi-item inventory change,
-    dahil ang inventory deduction ay nangyayari sa create_booking lang,
-    hindi dito.)
+    UPDATED: Looks up the booking's service_type in this shop's ServiceType
+    catalog to get the configured duration_minutes. Falls back to
+    PredictionService.get_machine_runtime() only if the service no longer
+    exists in the catalog (e.g. it was deleted after the booking was made).
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -233,6 +207,21 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             detail="At least one machine (washer or dryer) must be provided."
         )
 
+    # Resolve the configured duration for this booking's service type
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == shop_id,
+            ServiceType.name == booking.service_type
+        )
+        .first()
+    )
+    duration_minutes = (
+        service_type_record.duration_minutes
+        if service_type_record
+        else None
+    )
+
     for m_id in assigned_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
@@ -258,14 +247,15 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
                 detail=f"{machine.machine_type} #{machine.machine_number} is currently busy."
             )
 
-        # Update machine telemetry
         machine.status = "Busy"
         machine.current_service_type = booking.service_type
         machine.current_price = booking.total_price
         machine.total_cycles += 1
 
-        machine.remaining_time = PredictionService.get_machine_runtime(
-            machine.machine_type, booking.service_type
+        machine.remaining_time = (
+            duration_minutes
+            if duration_minutes is not None
+            else PredictionService.get_machine_runtime(machine.machine_type, booking.service_type)
         )
 
         overhead_data = PredictionService.get_overhead(machine.machine_type)
@@ -283,13 +273,11 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         else:
             machine.profitability_rate = 0.0
 
-    # Assign machines to the booking
     if assign_data.washer_id is not None:
         booking.washer_id = assign_data.washer_id
     if assign_data.dryer_id is not None:
         booking.dryer_id = assign_data.dryer_id
 
-    # Transition booking to In Progress
     booking.status = "In Progress"
 
     try:
@@ -315,8 +303,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
 def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized tasks for the Terminal UI.
-    Includes Pending bookings (no machine) and In Progress bookings.
-    Pre-loads Machine and inventory usage data to prevent null labels.
     """
     return (
         db.query(Booking)
@@ -337,7 +323,6 @@ def get_active_bookings(db: Session, shop_id: int):
 def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
-    (Walang binago dito.)
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -352,7 +337,6 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
 
     booking.status = new_status
 
-    # Release machines when the task is finished or cancelled
     if new_status in ["Ready", "Claimed", "Cancelled"]:
         assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]

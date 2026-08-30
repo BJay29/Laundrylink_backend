@@ -75,11 +75,8 @@ class InventoryLog(Base):
 
 class BookingInventoryUsage(Base):
     """
-    NEW MODEL — Junction table na nag-uugnay ng isang Booking sa MARAMING
-    InventoryItem na ginamit dito (hal. detergent + fabric conditioner sa
-    iisang booking). Isang row dito = isang item na ginamit, kasama ang
-    quantity. Pinapalitan nito ang dating single inventory_item_id column
-    sa Booking, na sumusuporta lang dati sa ISANG item kada booking.
+    Junction table na nag-uugnay ng isang Booking sa MARAMING InventoryItem
+    na ginamit dito (hal. detergent + fabric conditioner sa iisang booking).
     """
     __tablename__ = "booking_inventory_usage"
 
@@ -102,16 +99,20 @@ class BookingInventoryUsage(Base):
 
 class ServiceType(Base):
     """
-    NEW MODEL
     Dynamic, per-shop service catalog. Replaces the old fixed pricing columns
-    on Setting (full_service_price, regular_wash_price, titan_wash_price,
-    comforter_price). A shop owner defines their own services and prices
-    here from the Optimization Settings page, and these records are what
-    populate the 'Service Type' dropdown in the Create Booking modal.
+    on Setting. A shop owner defines their own services and prices here from
+    the Optimization Settings page, and these records are what populate the
+    'Service Type' dropdown in the Create Booking modal.
 
-    New shops intentionally start with ZERO service types (mirrors the
-    Machine Hub behavior) — the owner must configure at least one before
-    bookings referencing that service can be created.
+    UPDATED: Added duration_minutes so the shop owner also configures how
+    long each service actually runs on a machine. This replaces the
+    hardcoded/estimated runtime in PredictionService.get_machine_runtime()
+    for any booking that references a configured service — the Machine
+    Monitoring card now reflects the shop's own configured duration.
+
+    New shops intentionally start with ZERO service types — the owner must
+    configure at least one before bookings referencing that service can be
+    created.
     """
     __tablename__ = "service_types"
 
@@ -119,6 +120,7 @@ class ServiceType(Base):
     name = Column(String, nullable=False)
     price = Column(Float, nullable=False, default=0.0)
     is_active = Column(Boolean, default=True)
+    duration_minutes = Column(Integer, nullable=False, default=45)
 
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="service_types")
@@ -129,15 +131,14 @@ class ServiceType(Base):
             "name": self.name,
             "price": self.price,
             "is_active": self.is_active,
+            "duration_minutes": self.duration_minutes,
             "shop_id": self.shop_id
         }
 
 class Setting(Base):
     """
     Global configuration for operational unit costs and booking rules.
-    NOTE: Service-specific pricing (Full Service, Regular Wash, etc.) has
-    been moved to the ServiceType table so shop owners can define their
-    own services instead of being locked to 4 fixed categories.
+    Service-specific pricing has moved to the ServiceType table.
     """
     __tablename__ = "settings"
 
@@ -147,8 +148,6 @@ class Setting(Base):
     water_rate = Column(Float, default=50.0)
     detergent_cost_per_load = Column(Float, default=10.0)
 
-    # Minimum billable weight (KG) enforced on the Create Booking modal.
-    # Defaults to 6kg but is configurable per shop via Optimization Settings.
     minimum_weight_kg = Column(Float, default=6.0)
     
     off_peak_hours = Column(String, default="8:00 AM - 11:00 AM")
@@ -172,13 +171,12 @@ class Setting(Base):
 class User(Base):
     """
     Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
-    Column is named 'hashed_password' to match the existing database schema.
     """
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)  # matches the actual database column name
+    hashed_password = Column(String, nullable=False)
     role = Column(String, nullable=False)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
@@ -199,8 +197,6 @@ class User(Base):
 class Customer(Base):
     """
     Identity management for mobile app customers (laundry service bookers).
-    Kept separate from User (shop owners/staff) since customers are not tied
-    to a single shop_id and have a different registration flow.
     """
     __tablename__ = "customers"
 
@@ -208,7 +204,7 @@ class Customer(Base):
     full_name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     mobile_number = Column(String, nullable=False)
-    hashed_password = Column(String, nullable=False)  # consistent naming with User model
+    hashed_password = Column(String, nullable=False)
 
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
@@ -300,9 +296,6 @@ class Booking(Base):
     
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
-    # REMOVED: inventory_item_id — dating single-item na field, pinalitan
-    # na ng inventory_usages relationship sa ibaba, na sumusuporta na sa
-    # MARAMING inventory items kada booking (via BookingInventoryUsage).
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -311,8 +304,6 @@ class Booking(Base):
     shop = relationship("Shop", back_populates="bookings")
     washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
     dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
-    # REMOVED: inventory_item relationship (single-item, lumang paraan)
-    # NEW: multiple items na, gamit ang junction table sa BookingInventoryUsage
     inventory_usages = relationship(
         "BookingInventoryUsage",
         back_populates="booking",
@@ -337,8 +328,6 @@ class Booking(Base):
             "add_delivery": self.add_delivery,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
-            # REMOVED: inventory_item_id, inventory_item_name (single-item fields)
-            # NEW: listahan ng lahat ng items na ginamit sa booking na ito
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,

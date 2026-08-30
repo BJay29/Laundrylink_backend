@@ -71,18 +71,17 @@ class CustomerVerifyEmail(BaseModel):
 class CustomerResendCode(BaseModel):
     """Schema for requesting a new verification code."""
     email: EmailStr
-
-# --- SERVICE TYPE SCHEMAS (NEW) ---
-
 class ServiceTypeBase(BaseModel):
     """
-    Base schema for a shop-defined service (replaces the old fixed
-    Full Service / Regular Wash / Titan Wash / Comforter columns).
-    Shop owners create these themselves from Optimization Settings.
+    Base schema for a shop-defined service. Shop owners create these
+    themselves from Optimization Settings — includes pricing AND how
+    long the service runs on a machine (duration_minutes), which drives
+    the Machine Monitoring card's remaining_time.
     """
     name: str
     price: float
     is_active: bool = True
+    duration_minutes: int = 45
 
     @field_validator("name")
     @classmethod
@@ -99,6 +98,13 @@ class ServiceTypeBase(BaseModel):
             raise ValueError("Price cannot be negative.")
         return v
 
+    @field_validator("duration_minutes")
+    @classmethod
+    def validate_duration(cls, v):
+        if v <= 0:
+            raise ValueError("duration_minutes must be greater than 0.")
+        return v
+
 class ServiceTypeCreate(ServiceTypeBase):
     """Schema for adding a new service to a shop's catalog."""
     shop_id: int
@@ -108,6 +114,7 @@ class ServiceTypeUpdate(BaseModel):
     name: Optional[str] = None
     price: Optional[float] = None
     is_active: Optional[bool] = None
+    duration_minutes: Optional[int] = None
 
     @field_validator("name")
     @classmethod
@@ -124,6 +131,13 @@ class ServiceTypeUpdate(BaseModel):
     def validate_price(cls, v):
         if v is not None and v < 0:
             raise ValueError("Price cannot be negative.")
+        return v
+
+    @field_validator("duration_minutes")
+    @classmethod
+    def validate_duration(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("duration_minutes must be greater than 0.")
         return v
 
 class ServiceTypeResponse(ServiceTypeBase):

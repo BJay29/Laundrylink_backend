@@ -140,7 +140,7 @@ def get_service_types(db: Session, shop_id: int):
 
 def create_service_type(db: Session, shop_id: int, service_data: schemas.ServiceTypeCreate):
     """
-    Registers a new service (name + price) for the shop.
+    Registers a new service (name + price + duration) for the shop.
     Prevents exact duplicate names (case-insensitive) for the same shop.
     """
     existing = (
@@ -161,6 +161,7 @@ def create_service_type(db: Session, shop_id: int, service_data: schemas.Service
         name=service_data.name,
         price=service_data.price,
         is_active=service_data.is_active,
+        duration_minutes=service_data.duration_minutes,
         shop_id=shop_id
     )
     db.add(new_service)
