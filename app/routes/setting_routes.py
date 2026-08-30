@@ -124,14 +124,20 @@ def list_service_types(
 
 @router.post("/services", response_model=schemas.ServiceTypeResponse, status_code=status.HTTP_201_CREATED)
 def add_service_type(
-    service_data: schemas.ServiceTypeCreate,
+    service_data: schemas.ServiceTypeBase,  # ⬅️ FIXED: dating ServiceTypeCreate,
+    # na may REQUIRED shop_id field. Dahil hindi na nagpapadala ang
+    # frontend ng shop_id sa body (JWT na ang pinagmumulan nito), palaging
+    # nag-e-error ang request nang 422 ("field required: shop_id") kapag
+    # ServiceTypeCreate pa rin ang ginagamit dito. ServiceTypeBase ay
+    # eksaktong parehong fields (name, price, is_active, duration_minutes)
+    # MINUS ang shop_id, kaya tugma na ito sa aktwal na ipinapadala ng client.
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Adds a new service (name + price) to the logged-in user's shop catalog.
-    This is how a shop owner populates the Service Type dropdown that
-    appears in the Create Booking modal.
+    Adds a new service (name + price + duration_minutes) to the logged-in
+    user's shop catalog. This is how a shop owner populates the Service
+    Type dropdown that appears in the Create Booking modal.
     """
     return settings_controller.create_service_type(db, current_user.shop_id, service_data)
 
@@ -144,7 +150,7 @@ def edit_service_type(
     db: Session = Depends(get_db)
 ):
     """
-    Updates an existing service's name, price, or active status.
+    Updates an existing service's name, price, active status, or duration.
     Setting is_active=false hides it from new bookings without deleting
     its historical record. Scoped to the logged-in user's own shop.
     """
@@ -191,12 +197,6 @@ def update_password(
     """
     Update the CURRENTLY LOGGED-IN user's own password after verifying
     their current password.
-
-    Dating "/user/{user_id}/password" ay pwedeng i-target ang KAHIT SINONG
-    user_id sa URL — ibig sabihin kayang subukang i-crack ang password ng
-    ibang tao sa pamamagitan ng pag-guess ng old_password nila, nang walang
-    pagka-verify kung ikaw talaga ang user na iyon. Ngayon, laging ang
-    sariling account lang ng naka-login (current_user.id) ang maaapektuhan.
     """
     result = settings_controller.update_user_password(db, current_user.id, password_update)
     if "error" in result:
