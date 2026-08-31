@@ -57,9 +57,9 @@ def delete_machine(db: Session, machine_id: int, current_user: models.User):
         # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description=f"Nag-tanggal ng machine: {machine_label}"
+            description=f"Removed machine: {machine_label}"
         )
 
         db.commit()
@@ -142,9 +142,9 @@ def update_machine(db: Session, machine_id: int, update_data: MachineUpdate, cur
         changed_fields = ", ".join(update_fields.keys()) if update_fields else "no fields"
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description=f"Nag-update ng machine {machine_label} ({changed_fields})"
+            description=f"Updated machine {machine_label} ({changed_fields})"
         )
 
         db.commit()
@@ -224,9 +224,9 @@ def create_machine(db: Session, machine_data: MachineCreate, current_user: model
     # --- ACTIVITY LOG ---
     log_activity(
         db, shop_id,
-        actor_name=current_user.email,
+        actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
-        description=f"Nagdagdag ng bagong machine: {new_machine.machine_type} #{new_machine.machine_number}"
+        description=f"Added a new machine: {new_machine.machine_type} #{new_machine.machine_number}"
     )
 
     db.commit()
@@ -256,18 +256,18 @@ def toggle_machine_maintenance(db: Session, machine_id: int, current_user: model
 
     if machine.status == "Maintenance":
         machine.status = "Available"
-        action_desc = f"Inilabas sa Maintenance ang {machine_label} — Available na ulit"
+        action_desc = f"Took {machine_label} out of Maintenance — back to Available"
     else:
         machine.status = "Maintenance"
         machine.remaining_time = 0
         machine.current_service_type = "None"
         machine.current_price = 0.0
-        action_desc = f"Inilagay sa Maintenance ang {machine_label}"
+        action_desc = f"Put {machine_label} into Maintenance"
 
     # --- ACTIVITY LOG ---
     log_activity(
         db, shop_id,
-        actor_name=current_user.email,
+        actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=action_desc
     )
@@ -315,9 +315,9 @@ def initialize_shop_machines(db: Session, current_user: models.User):
     # --- ACTIVITY LOG ---
     log_activity(
         db, shop_id,
-        actor_name=current_user.email,
+        actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
-        description=f"Nag-deploy ng default 12-unit machine grid (6 Washer, 6 Dryer)"
+        description="Deployed the default 12-unit machine grid (6 Washers, 6 Dryers)"
     )
 
     db.commit()
@@ -354,9 +354,9 @@ def reset_all_machines(db: Session, current_user: models.User):
         # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description=f"Nag-reset ng lahat ng machines ({len(machines)} unit/s) pabalik sa Available"
+            description=f"Reset all machines ({len(machines)} unit/s) back to Available"
         )
 
         db.commit()

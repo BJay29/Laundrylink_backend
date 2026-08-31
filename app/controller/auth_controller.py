@@ -2,7 +2,7 @@ import bcrypt
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from app import models, schemas
-from app.security import create_access_token  # ⬅️ BAGONG IMPORT
+from app.security import create_access_token
 
 
 def create_owner(db: Session, user: schemas.OwnerCreate):
@@ -10,6 +10,11 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     Backend-only registration for Shop Owners.
     Creates a new shop entity and links the owner account to it.
     Used for populating the database via Thunder Client.
+
+    UPDATED: now saves user.owner_name to the new User's full_name
+    column. Previously the Owner's real name was never captured — only
+    Staff accounts (via StaffCreate) had a full_name field — so the
+    Activity Log would show the Owner's email instead of their name.
     """
     # 1. Check if the email is already in use
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
@@ -38,6 +43,7 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
         email=user.email,
         hashed_password=hashed_pass,
         role="owner",
+        full_name=user.owner_name,
         shop_id=new_shop.id
     )
     db.add(new_user)
@@ -53,7 +59,7 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
 
 def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
     """
-    NEW — Creates a new staff/manager account UNDER AN EXISTING shop.
+    Creates a new staff/manager account UNDER AN EXISTING shop.
 
     Unlike create_owner(), this does NOT create a new Shop — it links the
     new User directly to shop_id, which is always supplied by the caller
@@ -86,6 +92,7 @@ def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
         email=staff_data.email,
         hashed_password=hashed_pass,
         role=staff_data.role,   # "staff" or "manager" — validated in schemas.py
+        full_name=staff_data.full_name,
         shop_id=shop_id
     )
     db.add(new_staff)
@@ -103,10 +110,10 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
 
     NOTE: this function is UNCHANGED by the addition of staff accounts —
     it looks up whichever User row matches the given email, and that
-    row's own `role` and `shop_id` (set once, at account creation time,
-    either in create_owner() or create_staff()) are what get embedded
-    in the JWT. There is no separate "staff login" path; the same
-    lookup-by-email logic naturally returns the correct role for
+    row's own `role`, `shop_id`, and `full_name` (set once, at account
+    creation time, either in create_owner() or create_staff()) are what
+    get returned/embedded. There is no separate "staff login" path; the
+    same lookup-by-email logic naturally returns the correct data for
     whoever is logging in.
     """
 
@@ -139,8 +146,11 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
         )
 
     # 4. Build response payload
+    # UPDATED: added full_name so the frontend can cache/display the
+    # user's real name (e.g. localStorage.setItem('full_name', ...)).
     user_payload = {
         "email": user.email,
+        "full_name": user.full_name,
         "role": user.role,
         "shop_id": user.shop_id,
         "shop_name": getattr(user.shop, 'shop_name', None) if user.shop else None,
@@ -163,7 +173,7 @@ def authenticate_user(db: Session, credentials: schemas.UserLogin):
     }
 
 
-# NOTE: Tinanggal na ang get_current_user_profile(db, user_id) dito.
-# Pinalitan ito ng get_current_user() dependency sa security.py,
-# na kumukuha na base sa JWT — hindi na sa pamamagitan ng arbitrary
-# user_id sa URL (dating security hole: kahit sinong user_id, makikita).
+# NOTE: get_current_user_profile(db, user_id) was removed from here.
+# It was replaced by the get_current_user() dependency in security.py,
+# which resolves the user from the JWT instead of an arbitrary user_id
+# in the URL (previously a security hole: any user_id was viewable).

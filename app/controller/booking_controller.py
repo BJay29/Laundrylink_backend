@@ -23,8 +23,8 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id, so the action can be attributed to whoever actually
-    performed it (current_user.email / current_user.role) instead of
-    just knowing which shop it happened in.
+    performed it (current_user.full_name or current_user.email /
+    current_user.role) instead of just knowing which shop it happened in.
     """
     shop_id = current_user.shop_id
 
@@ -157,7 +157,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
             ))
 
         # --- 7. ACTIVITY LOG ---
-        # Nasa loob ng try block ito nang sinasadya — kasama ito sa
+        # Nasa loob ito ng try block nang sinasadya — kasama ito sa
         # PAREHONG db.commit() sa ibaba. Kung mag-fail ang commit
         # (halimbawa DB error), mag-rollback din ang log entry — walang
         # "orphan log" na sasabihing may nagawang booking kahit hindi
@@ -167,10 +167,10 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
             machine_note = f" (machine assigned, {len(assigned_ids)} unit/s)"
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
             description=(
-                f"Gumawa ng booking para kay {booking_data.customer_name} "
+                f"Created a booking for {booking_data.customer_name} "
                 f"- {booking_data.service_type}, ₱{booking_data.total_price}{machine_note}"
             )
         )
@@ -320,10 +320,10 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
             description=(
-                f"Nag-assign ng machine sa booking ni {booking.customer_name} "
+                f"Assigned machine(s) to {booking.customer_name}'s booking "
                 f"({', '.join(assigned_machine_labels)})"
             )
         )
@@ -420,10 +420,10 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
         # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
             description=(
-                f"Binago ang status ng booking ni {booking.customer_name}: "
+                f"Changed booking status for {booking.customer_name}: "
                 f"{old_status} → {new_status}"
             )
         )

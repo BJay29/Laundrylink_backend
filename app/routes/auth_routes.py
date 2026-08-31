@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app import schemas, models
 from app.controller import auth_controller
-from app.security import get_current_user, require_role  # ⬅️ require_role BAGONG IMPORT
+from app.security import get_current_user, require_role
 
 router = APIRouter(
     prefix="/auth",
@@ -14,15 +14,14 @@ router = APIRouter(
 @router.post("/register/owner", response_model=schemas.UserResponse)
 def register_owner(user: schemas.OwnerCreate, db: Session = Depends(get_db)):
     """
-    Endpoint for creating shop owner accounts via Thunder Client.
-    This is used to populate the database without needing a frontend registration form.
+    Endpoint for creating shop owner accounts.
     Public — anyone can register a new shop, since a Shop + its first
     Owner account are created together.
     """
     return auth_controller.create_owner(db, user)
 
 
-# --- STAFF/MANAGER REGISTRATION (NEW, Owner-only) ---
+# --- STAFF/MANAGER REGISTRATION (Owner-only) ---
 @router.post("/register/staff", response_model=schemas.StaffResponse, status_code=status.HTTP_201_CREATED)
 def register_staff(
     staff_data: schemas.StaffCreate,
@@ -68,13 +67,14 @@ def get_my_profile(current_user: models.User = Depends(get_current_user)):
     Retrieves session details of the CURRENTLY LOGGED-IN user only,
     based on the JWT sent in the Authorization header.
 
-    Dating "/profile/{user_id}" ay pwedeng ma-access ng kahit sino
-    basta may alam na user ID (1, 2, 3...) — walang authentication check.
-    Ngayon, base na sa verified JWT ang result, kaya imposibleng
-    makita ng isang user ang profile/shop data ng iba.
+    Previously "/profile/{user_id}" was accessible by anyone who knew a
+    valid user ID (1, 2, 3...) — no authentication check. Now it's based
+    on the verified JWT, so it's impossible for one user to see another
+    user's profile/shop data.
     """
     return {
         "email": current_user.email,
+        "full_name": current_user.full_name,
         "role": current_user.role,
         "shop_id": current_user.shop_id,
         "shop_name": getattr(current_user.shop, 'shop_name', None) if current_user.shop else None,

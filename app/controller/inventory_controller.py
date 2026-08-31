@@ -87,10 +87,10 @@ def create_item(db: Session, item_data: InventoryItemCreate, current_user: model
         # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
             description=(
-                f"Nagdagdag ng bagong inventory item: {new_item.item_name} "
+                f"Added a new inventory item: {new_item.item_name} "
                 f"({new_item.current_stock}{new_item.unit})"
             )
         )
@@ -141,10 +141,10 @@ def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate, curre
             if changed_fields:
                 log_activity(
                     db, shop_id,
-                    actor_name=current_user.email,
+                    actor_name=current_user.full_name or current_user.email,
                     actor_role=current_user.role,
                     description=(
-                        f"Nag-update ng inventory item: {db_item.item_name} "
+                        f"Updated inventory item: {db_item.item_name} "
                         f"({', '.join(changed_fields)})"
                     )
                 )
@@ -191,10 +191,10 @@ def record_usage(db: Session, item_id: int, quantity_used: float, current_user: 
             # --- ACTIVITY LOG ---
             log_activity(
                 db, shop_id,
-                actor_name=current_user.email,
+                actor_name=current_user.full_name or current_user.email,
                 actor_role=current_user.role,
                 description=(
-                    f"Nag-record ng manual usage para sa {db_item.item_name}: "
+                    f"Recorded manual usage for {db_item.item_name}: "
                     f"-{quantity_used}{db_item.unit}"
                 )
             )
@@ -227,9 +227,9 @@ def delete_item(db: Session, item_id: int, current_user: models.User):
             # --- ACTIVITY LOG ---
             log_activity(
                 db, shop_id,
-                actor_name=current_user.email,
+                actor_name=current_user.full_name or current_user.email,
                 actor_role=current_user.role,
-                description=f"Nag-tanggal ng inventory item: {item_name}"
+                description=f"Removed inventory item: {item_name}"
             )
 
             db.commit()

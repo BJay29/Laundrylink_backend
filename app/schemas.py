@@ -5,11 +5,28 @@ from datetime import datetime
 # --- AUTHENTICATION & OWNER SCHEMAS ---
 
 class OwnerCreate(BaseModel):
-    """Schema for initial shop owner registration and shop creation."""
+    """
+    Schema for initial shop owner registration and shop creation.
+
+    UPDATED: Added full_name so the Owner's real name is captured at
+    registration time (previously only StaffCreate had this field, so
+    Owners registering their own shop had no name on file — the
+    Activity Log would show their email even after full_name support
+    was added elsewhere).
+    """
+    owner_name: str
     shop_name: str
     address: str
     email: EmailStr
     password: str
+
+    @field_validator("owner_name")
+    @classmethod
+    def validate_owner_name(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Owner name cannot be empty.")
+        return cleaned
 
 class UserLogin(BaseModel):
     """Schema for user authentication requests."""
@@ -17,8 +34,15 @@ class UserLogin(BaseModel):
     password: str
 
 class UserResponse(BaseModel):
-    """Profile data returned after successful login or session validation."""
+    """
+    Profile data returned after successful login or session validation.
+
+    UPDATED: Added full_name so the frontend can display/cache the
+    logged-in user's real name (e.g. for Activity Log attribution,
+    greeting text, etc.) instead of falling back to email everywhere.
+    """
     email: str
+    full_name: Optional[str] = None
     role: str
     shop_id: Optional[int] = None
     shop_name: Optional[str] = None
@@ -32,7 +56,7 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
 
-# --- STAFF MANAGEMENT SCHEMAS (NEW) ---
+# --- STAFF MANAGEMENT SCHEMAS ---
 
 class StaffCreate(BaseModel):
     """
@@ -126,9 +150,9 @@ class ServiceTypeBase(BaseModel):
     long the service runs on a machine (duration_minutes), which drives
     the Machine Monitoring card's remaining_time.
 
-    UPDATED: Added pricing_unit — bawat service ay may sariling unit ng
-    presyo ("load", "kg", o "piece"), dahil hindi pareho lahat ng service
-    ng isang shop (hal. Regular Wash = per load, Wash&Fold = per kg).
+    Added pricing_unit — bawat service ay may sariling unit ng presyo
+    ("load", "kg", o "piece"), dahil hindi pareho lahat ng service ng
+    isang shop (hal. Regular Wash = per load, Wash&Fold = per kg).
     """
     name: str
     price: float
@@ -542,7 +566,7 @@ class InsightResponse(BaseModel):
     impactDetail: str
     suggestions: List[str]
 
-# --- ACTIVITY LOG SCHEMAS (NEW) ---
+# --- ACTIVITY LOG SCHEMAS ---
 
 class ActivityLogResponse(BaseModel):
     """
@@ -560,7 +584,7 @@ class ActivityLogResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- CUSTOMER-FACING (PUBLIC) SHOP SCHEMAS (NEW) ---
+# --- CUSTOMER-FACING (PUBLIC) SHOP SCHEMAS ---
 
 class ShopServicePreview(BaseModel):
     """

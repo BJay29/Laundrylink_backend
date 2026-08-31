@@ -88,9 +88,9 @@ def update_settings(db: Session, current_user: models.User, settings_data: schem
         changed_fields = ", ".join(update_data.keys())
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description=f"Binago ang Optimization Settings ({changed_fields})"
+            description=f"Changed Optimization Settings ({changed_fields})"
         )
 
     db.commit()
@@ -118,9 +118,9 @@ def reset_to_system_defaults(db: Session, current_user: models.User):
         # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description="Nag-reset ng Optimization Settings pabalik sa factory defaults"
+            description="Reset Optimization Settings back to factory defaults"
         )
 
         db.commit()
@@ -215,10 +215,10 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
     # --- ACTIVITY LOG ---
     log_activity(
         db, shop_id,
-        actor_name=current_user.email,
+        actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=(
-            f"Nagdagdag ng bagong service: {new_service.name} "
+            f"Added a new service: {new_service.name} "
             f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.duration_minutes} min)"
         )
     )
@@ -273,9 +273,9 @@ def update_service_type(db: Session, current_user: models.User, service_id: int,
         changed_fields = ", ".join(update_data.keys())
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description=f"Nag-update ng service: {service_label} ({changed_fields})"
+            description=f"Updated service: {service_label} ({changed_fields})"
         )
 
     db.commit()
@@ -307,9 +307,9 @@ def delete_service_type(db: Session, current_user: models.User, service_id: int)
     # --- ACTIVITY LOG ---
     log_activity(
         db, shop_id,
-        actor_name=current_user.email,
+        actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
-        description=f"Nag-tanggal ng service: {service_name}"
+        description=f"Removed service: {service_name}"
     )
 
     db.commit()
@@ -340,9 +340,9 @@ def update_shop_profile(db: Session, current_user: models.User, profile_data: sc
         changed_fields = ", ".join(update_data.keys())
         log_activity(
             db, shop_id,
-            actor_name=current_user.email,
+            actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description=f"Nag-update ng shop profile ({changed_fields})"
+            description=f"Updated shop profile ({changed_fields})"
         )
 
     db.commit()

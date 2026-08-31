@@ -14,12 +14,12 @@ class Shop(Base):
     shop_name = Column(String, unique=True, nullable=False)
     address = Column(String, nullable=True)
 
-    # NEW — GPS coordinates for the "nearby shops" feature on the mobile app.
+    # GPS coordinates for the "nearby shops" feature on the mobile app.
     # Nullable dahil NULL muna ang existing shops hanggang ma-set ng owner.
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
 
-    # NEW — controls kung lalabas ang shop na ito sa public/customer-facing
+    # Controls kung lalabas ang shop na ito sa public/customer-facing
     # listing (mobile app). Default True para hindi mawala ang existing
     # registered shops sa listahan.
     is_published = Column(Boolean, default=True, nullable=False)
@@ -32,7 +32,7 @@ class Shop(Base):
     inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
     service_types = relationship("ServiceType", back_populates="shop", cascade="all, delete-orphan")
-    # NEW — activity trail for this shop; each entry attributes an action
+    # Activity trail for this shop; each entry attributes an action
     # to a specific User (via actor_name/actor_role snapshot, see below).
     activity_logs = relationship("ActivityLog", back_populates="shop", cascade="all, delete-orphan")
 
@@ -121,17 +121,15 @@ class ServiceType(Base):
     the Optimization Settings page, and these records are what populate the
     'Service Type' dropdown in the Create Booking modal.
 
-    UPDATED: Added duration_minutes so the shop owner also configures how
-    long each service actually runs on a machine. This replaces the
-    hardcoded/estimated runtime in PredictionService.get_machine_runtime()
-    for any booking that references a configured service — the Machine
-    Monitoring card now reflects the shop's own configured duration.
+    Added duration_minutes so the shop owner also configures how long each
+    service actually runs on a machine. This drives machine.remaining_time
+    for any booking that references a configured service.
 
-    UPDATED: Added pricing_unit so bawat service ay may sariling paraan ng
-    pagpepresyo — hindi kasi pareho lahat, may per load (Regular Wash), may
-    per kg (Wash, Dry, and Fold), may per piece (Comforter). Ito ang
-    nagpapakita sa Optimization Settings at sa customer-facing mobile app
-    kung "₱65 / load" o "₱15 / kg" ang display.
+    Added pricing_unit so bawat service ay may sariling paraan ng
+    pagpepresyo — may per load (Regular Wash), may per kg (Wash, Dry, and
+    Fold), may per piece (Comforter). Ito ang nagpapakita sa Optimization
+    Settings at sa customer-facing mobile app kung "₱65 / load" o
+    "₱15 / kg" ang display.
 
     New shops intentionally start with ZERO service types — the owner must
     configure at least one before bookings referencing that service can be
@@ -145,7 +143,7 @@ class ServiceType(Base):
     is_active = Column(Boolean, default=True)
     duration_minutes = Column(Integer, nullable=False, default=45)
 
-    # NEW — "load", "kg", o "piece". Default "load" dahil 'yun ang dating
+    # "load", "kg", o "piece". Default "load" dahil 'yun ang dating
     # implicit assumption bago dumagdag ang concept na ito.
     pricing_unit = Column(String(20), nullable=False, default="load")
 
@@ -199,6 +197,15 @@ class Setting(Base):
 class User(Base):
     """
     Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
+
+    UPDATED: Added full_name. Dating wala nito kahit meron nang full_name
+    field ang StaffCreate schema — hindi pa ito naisa-save kahit saan,
+    kaya laging email lang ang lumalabas sa Activity Log bilang actor
+    (hal. "juan@gmail.com" imbes na "Juan Dela Cruz"). Ngayon, kapag
+    gumagawa ng owner o staff account, kasama na ang tunay na pangalan.
+    Nullable dahil sa mga EXISTING accounts na wala pang laman dito
+    (na-create bago idagdag ang column na ito) — kailangang mag-fallback
+    sa email sa mga lugar na gumagamit nito.
     """
     __tablename__ = "users"
 
@@ -206,6 +213,7 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     role = Column(String, nullable=False)
+    full_name = Column(String, nullable=True)
     
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
     is_active = Column(Boolean, default=True)
@@ -217,6 +225,7 @@ class User(Base):
         return {
             "id": self.id,
             "email": self.email,
+            "full_name": self.full_name,
             "role": self.role,
             "shop_id": self.shop_id,
             "is_active": self.is_active
@@ -366,9 +375,9 @@ class Booking(Base):
 
 class ActivityLog(Base):
     """
-    NEW MODEL — Talaan ng mahahalagang aksyon na ginawa ng mga User
-    (Owner/Staff/Manager) sa loob ng isang shop, para sa accountability
-    at history tracking.
+    Talaan ng mahahalagang aksyon na ginawa ng mga User (Owner/Staff/
+    Manager) sa loob ng isang shop, para sa accountability at history
+    tracking.
 
     actor_name at actor_role ay sinadyang naka-DUPLICATE dito (hindi
     lang naka-relate sa User table) — kahit matanggal balang araw ang
@@ -380,18 +389,24 @@ class ActivityLog(Base):
     ang shop_id + actor_name snapshot na ang sapat para sa layunin ng
     isang simpleng activity trail, at iniiwasan nito ang kailangang
     isipin pa ang ondelete behavior kung matatanggal ang User.
+
+    FIXED: timestamp column ay ginawang DateTime(timezone=True) —
+    dating walang timezone info ang naka-save (naive datetime), kaya
+    kahit UTC talaga ang laman, walang "Z"/offset suffix sa isoformat()
+    output, kaya inaakala ng browser na LOCAL time na ito. Sanhi ito ng
+    maling oras (8-hour offset sa PH) sa Activity Log page.
     """
     __tablename__ = "activity_logs"
 
     id = Column(Integer, primary_key=True, index=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
 
-    actor_name = Column(String, nullable=False)   # hal. "juan@gmail.com" o "Juan Dela Cruz"
+    actor_name = Column(String, nullable=False)   # e.g. "Juan Dela Cruz"
     actor_role = Column(String, nullable=False)   # "owner", "staff", "manager"
 
-    description = Column(String, nullable=False)  # hal. "Gumawa ng booking para kay Maria - ₱250"
+    description = Column(String, nullable=False)  # e.g. "Created a booking for Maria - ₱250"
 
-    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     shop = relationship("Shop", back_populates="activity_logs")
 
