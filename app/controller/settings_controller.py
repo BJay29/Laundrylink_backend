@@ -172,13 +172,18 @@ def get_service_types(db: Session, shop_id: int):
 
 def create_service_type(db: Session, current_user: models.User, service_data: schemas.ServiceTypeBase):
     """
-    Registers a new service (name + price + duration) for the shop.
-    Prevents exact duplicate names (case-insensitive) for the same shop.
+    Registers a new service (name + price + duration + pricing_unit) for
+    the shop. Prevents exact duplicate names (case-insensitive) for the
+    same shop.
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id. Also updated the type hint for service_data to
     ServiceTypeBase, matching setting_routes.py's add_service_type
     endpoint (which no longer accepts a client-supplied shop_id).
+
+    UPDATED (pricing_unit): now also saves service_data.pricing_unit
+    ("load", "kg", or "piece") — not every service in a shop is priced
+    the same way, hal. Regular Wash = per load, Wash & Fold = per kg.
     """
     shop_id = current_user.shop_id
 
@@ -201,6 +206,7 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
         price=service_data.price,
         is_active=service_data.is_active,
         duration_minutes=service_data.duration_minutes,
+        pricing_unit=service_data.pricing_unit,
         shop_id=shop_id
     )
     db.add(new_service)
@@ -213,7 +219,7 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
         actor_role=current_user.role,
         description=(
             f"Nagdagdag ng bagong service: {new_service.name} "
-            f"(₱{new_service.price}, {new_service.duration_minutes} min)"
+            f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.duration_minutes} min)"
         )
     )
 
@@ -223,7 +229,8 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
 
 def update_service_type(db: Session, current_user: models.User, service_id: int, service_data: schemas.ServiceTypeUpdate):
     """
-    Edits an existing service's name, price, duration, or active status.
+    Edits an existing service's name, price, duration, active status, or
+    pricing_unit.
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id.

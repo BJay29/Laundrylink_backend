@@ -125,11 +125,16 @@ class ServiceTypeBase(BaseModel):
     themselves from Optimization Settings — includes pricing AND how
     long the service runs on a machine (duration_minutes), which drives
     the Machine Monitoring card's remaining_time.
+
+    UPDATED: Added pricing_unit — bawat service ay may sariling unit ng
+    presyo ("load", "kg", o "piece"), dahil hindi pareho lahat ng service
+    ng isang shop (hal. Regular Wash = per load, Wash&Fold = per kg).
     """
     name: str
     price: float
     is_active: bool = True
     duration_minutes: int = 45
+    pricing_unit: str = "load"
 
     @field_validator("name")
     @classmethod
@@ -153,6 +158,14 @@ class ServiceTypeBase(BaseModel):
             raise ValueError("duration_minutes must be greater than 0.")
         return v
 
+    @field_validator("pricing_unit")
+    @classmethod
+    def validate_pricing_unit(cls, v):
+        allowed_units = {"load", "kg", "piece"}
+        if v not in allowed_units:
+            raise ValueError(f"pricing_unit must be one of: {', '.join(sorted(allowed_units))}")
+        return v
+
 class ServiceTypeCreate(ServiceTypeBase):
     """
     NOTE: kept for backward compatibility / potential internal use, but
@@ -168,6 +181,7 @@ class ServiceTypeUpdate(BaseModel):
     price: Optional[float] = None
     is_active: Optional[bool] = None
     duration_minutes: Optional[int] = None
+    pricing_unit: Optional[str] = None
 
     @field_validator("name")
     @classmethod
@@ -191,6 +205,15 @@ class ServiceTypeUpdate(BaseModel):
     def validate_duration(cls, v):
         if v is not None and v <= 0:
             raise ValueError("duration_minutes must be greater than 0.")
+        return v
+
+    @field_validator("pricing_unit")
+    @classmethod
+    def validate_pricing_unit(cls, v):
+        if v is not None:
+            allowed_units = {"load", "kg", "piece"}
+            if v not in allowed_units:
+                raise ValueError(f"pricing_unit must be one of: {', '.join(sorted(allowed_units))}")
         return v
 
 class ServiceTypeResponse(ServiceTypeBase):
@@ -549,6 +572,7 @@ class ShopServicePreview(BaseModel):
     name: str
     price: float
     duration_minutes: int
+    pricing_unit: str
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -127,6 +127,12 @@ class ServiceType(Base):
     for any booking that references a configured service — the Machine
     Monitoring card now reflects the shop's own configured duration.
 
+    UPDATED: Added pricing_unit so bawat service ay may sariling paraan ng
+    pagpepresyo — hindi kasi pareho lahat, may per load (Regular Wash), may
+    per kg (Wash, Dry, and Fold), may per piece (Comforter). Ito ang
+    nagpapakita sa Optimization Settings at sa customer-facing mobile app
+    kung "₱65 / load" o "₱15 / kg" ang display.
+
     New shops intentionally start with ZERO service types — the owner must
     configure at least one before bookings referencing that service can be
     created.
@@ -139,6 +145,10 @@ class ServiceType(Base):
     is_active = Column(Boolean, default=True)
     duration_minutes = Column(Integer, nullable=False, default=45)
 
+    # NEW — "load", "kg", o "piece". Default "load" dahil 'yun ang dating
+    # implicit assumption bago dumagdag ang concept na ito.
+    pricing_unit = Column(String(20), nullable=False, default="load")
+
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="service_types")
 
@@ -149,6 +159,7 @@ class ServiceType(Base):
             "price": self.price,
             "is_active": self.is_active,
             "duration_minutes": self.duration_minutes,
+            "pricing_unit": self.pricing_unit,
             "shop_id": self.shop_id
         }
 
