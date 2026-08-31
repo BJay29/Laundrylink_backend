@@ -537,7 +537,50 @@ class ActivityLogResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    # --- SETTINGS & PROFILE SCHEMAS ---
+# --- CUSTOMER-FACING (PUBLIC) SHOP SCHEMAS (NEW) ---
+
+class ShopServicePreview(BaseModel):
+    """
+    Safe, public view ng isang service — para sa customer-facing mobile
+    app. Walang internal cost breakdown (electricity/water/detergent
+    costs), 'yun ang dahilan kung bakit hiwalay ito sa ServiceTypeResponse.
+    """
+    id: int
+    name: str
+    price: float
+    duration_minutes: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ShopPublicResponse(BaseModel):
+    """
+    Listing view ng isang shop — ginagamit sa mobile app's Home carousel
+    at Shop Selection Page. Walang financial/internal data, safe i-expose
+    nang walang auth.
+    """
+    id: int
+    shop_name: str
+    address: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    distance_km: Optional[float] = None  # populated lang ng GET /shops/nearby
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ShopDetailResponse(BaseModel):
+    """Shop Detail page: shop info + list ng available services."""
+    id: int
+    shop_name: str
+    address: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    services: List[ShopServicePreview] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+# --- SETTINGS & PROFILE SCHEMAS ---
 
 class ShopProfileUpdate(BaseModel):
     """Schema for updating the shop information."""

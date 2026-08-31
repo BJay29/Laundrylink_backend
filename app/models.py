@@ -13,6 +13,17 @@ class Shop(Base):
     id = Column(Integer, primary_key=True, index=True)
     shop_name = Column(String, unique=True, nullable=False)
     address = Column(String, nullable=True)
+
+    # NEW — GPS coordinates for the "nearby shops" feature on the mobile app.
+    # Nullable dahil NULL muna ang existing shops hanggang ma-set ng owner.
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+
+    # NEW — controls kung lalabas ang shop na ito sa public/customer-facing
+    # listing (mobile app). Default True para hindi mawala ang existing
+    # registered shops sa listahan.
+    is_published = Column(Boolean, default=True, nullable=False)
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
@@ -30,6 +41,9 @@ class Shop(Base):
             "id": self.id,
             "shop_name": self.shop_name,
             "address": self.address,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "is_published": self.is_published,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 

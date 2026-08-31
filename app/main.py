@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
 # Import routes
-from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes, activity_routes
+from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes, activity_routes, shop_routes
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -138,7 +138,7 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
+ 
 # --- GLOBAL EXCEPTION HANDLER ---
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -166,6 +166,7 @@ app.include_router(setting_routes.router)
 app.include_router(analytics_routes.router)
 app.include_router(inventory_routes.router)
 app.include_router(activity_routes.router)
+app.include_router(shop_routes.router)
 
 # --- ROOT HEALTH CHECK ---
 
@@ -175,7 +176,7 @@ def read_root():
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
         "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "CustomerAuth", "Bookings", "Machines", "Settings", "Analytics", "Inventory", "Activity"]
+        "modules_active": ["Auth", "CustomerAuth", "Bookings", "Machines", "Settings", "Analytics", "Inventory", "Activity", "Shops"]
     }
 
 # --- PRODUCTION ENTRY POINT ---
