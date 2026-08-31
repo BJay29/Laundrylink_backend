@@ -2,12 +2,14 @@ from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryU
 from app.schemas import BookingCreate, BookingAssignMachine
 from app.services.prediction_service import PredictionService
 from app.controller import inventory_controller
+from app.controller.activity_controller import log_activity
+from app import models
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timezone
 
 
-def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
+def create_booking(db: Session, booking_data: BookingCreate, current_user: models.User):
     """
     Creates a new booking.
     - If washer_id and dryer_id are both None → status = "Pending"
@@ -18,7 +20,13 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
     PredictionService.get_machine_runtime()'s hardcoded estimate — the
     Machine Monitoring card reflects what the shop owner actually set
     in Optimization Settings.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, so the action can be attributed to whoever actually
+    performed it (current_user.email / current_user.role) instead of
+    just knowing which shop it happened in.
     """
+    shop_id = current_user.shop_id
 
     # --- 1. FETCH OPERATIONAL SETTINGS (utility rates, minimum weight) ---
     settings = db.query(Setting).filter(Setting.shop_id == shop_id).first()
@@ -148,6 +156,25 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
                 quantity_used=quantity_used
             ))
 
+        # --- 7. ACTIVITY LOG ---
+        # Nasa loob ng try block ito nang sinasadya — kasama ito sa
+        # PAREHONG db.commit() sa ibaba. Kung mag-fail ang commit
+        # (halimbawa DB error), mag-rollback din ang log entry — walang
+        # "orphan log" na sasabihing may nagawang booking kahit hindi
+        # pala talaga na-save.
+        machine_note = ""
+        if assigned_ids:
+            machine_note = f" (machine assigned, {len(assigned_ids)} unit/s)"
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Gumawa ng booking para kay {booking_data.customer_name} "
+                f"- {booking_data.service_type}, ₱{booking_data.total_price}{machine_note}"
+            )
+        )
+
         db.commit()
         db.refresh(new_booking)
 
@@ -170,7 +197,7 @@ def create_booking(db: Session, booking_data: BookingCreate, shop_id: int):
         )
 
 
-def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", shop_id: int):
+def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", current_user: models.User):
     """
     Assigns a washer and/or dryer to an existing Pending booking that has no machine.
 
@@ -178,7 +205,12 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     catalog to get the configured duration_minutes. Falls back to
     PredictionService.get_machine_runtime() only if the service no longer
     exists in the catalog (e.g. it was deleted after the booking was made).
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, for the same attribution reason as create_booking().
     """
+    shop_id = current_user.shop_id
+
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
         Booking.shop_id == shop_id
@@ -221,6 +253,8 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         if service_type_record
         else None
     )
+
+    assigned_machine_labels = []
 
     for m_id in assigned_ids:
         machine = db.query(Machine).filter(
@@ -273,6 +307,8 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         else:
             machine.profitability_rate = 0.0
 
+        assigned_machine_labels.append(f"{machine.machine_type} #{machine.machine_number}")
+
     if assign_data.washer_id is not None:
         booking.washer_id = assign_data.washer_id
     if assign_data.dryer_id is not None:
@@ -281,6 +317,17 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     booking.status = "In Progress"
 
     try:
+        # --- ACTIVITY LOG ---
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Nag-assign ng machine sa booking ni {booking.customer_name} "
+                f"({', '.join(assigned_machine_labels)})"
+            )
+        )
+
         db.commit()
         return (
             db.query(Booking)
@@ -303,6 +350,11 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
 def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized tasks for the Terminal UI.
+
+    NOTE: hindi ito ginagalaw ng Activity Log — read-only na operation
+    ito (walang binabago), kaya walang kailangang i-log dito. Pinanatili
+    ang shop_id-only signature (hindi current_user) dahil hindi ito
+    kailangan ng actor attribution.
     """
     return (
         db.query(Booking)
@@ -320,10 +372,17 @@ def get_active_bookings(db: Session, shop_id: int):
     )
 
 
-def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id: int):
+def update_booking_status(db: Session, booking_id: int, new_status: str, current_user: models.User):
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, for the same attribution reason as create_booking(). This
+    is the endpoint used for status transitions including cancellation,
+    so it's one of the more important actions to attribute correctly.
     """
+    shop_id = current_user.shop_id
+
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
         Booking.shop_id == shop_id
@@ -335,6 +394,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
             detail="Transaction record not found."
         )
 
+    old_status = booking.status
     booking.status = new_status
 
     if new_status in ["Ready", "Claimed", "Cancelled"]:
@@ -357,6 +417,17 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, shop_id
                     machine.current_price = 0.0
 
     try:
+        # --- ACTIVITY LOG ---
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Binago ang status ng booking ni {booking.customer_name}: "
+                f"{old_status} → {new_status}"
+            )
+        )
+
         db.commit()
         return (
             db.query(Booking)

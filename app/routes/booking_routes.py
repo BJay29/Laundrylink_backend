@@ -5,7 +5,7 @@ from app.database import get_db
 from app.schemas import BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine
 from app.controller import booking_controller
 from app import models
-from app.security import get_current_user  # ⬅️ BAGONG IMPORT
+from app.security import get_current_user
 
 # Booking router — handles all laundry transaction lifecycle endpoints
 router = APIRouter(
@@ -36,7 +36,7 @@ def create_booking(
     the shop's configured minimum_weight_kg. Both walk-in (web) and
     mobile app bookings go through this same validation.
     """
-    return booking_controller.create_booking(db, booking_data, current_user.shop_id)
+    return booking_controller.create_booking(db, booking_data, current_user)
 
 
 @router.get("/active", response_model=List[BookingResponse])
@@ -51,6 +51,9 @@ def get_active_bookings(
     shop_id no longer comes from a query parameter — it is derived from
     the logged-in user's JWT, so a user can never query another shop's
     active bookings by editing the URL.
+
+    Read-only — get_active_bookings() still takes a bare shop_id (no
+    signature change), so current_user.shop_id is passed directly here.
     """
     return booking_controller.get_active_bookings(db, current_user.shop_id)
 
@@ -70,9 +73,13 @@ def update_status(
     shop_id is derived from the JWT — the controller's existing
     Booking.shop_id == shop_id filter ensures a user can only update
     bookings belonging to their own shop (404 otherwise).
+
+    UPDATED: booking_controller.update_booking_status() now takes
+    current_user (not shop_id) so the resulting Activity Log entry can
+    attribute this status change to whoever performed it.
     """
     return booking_controller.update_booking_status(
-        db, booking_id, status_data.status, current_user.shop_id
+        db, booking_id, status_data.status, current_user
     )
 
 
@@ -91,7 +98,11 @@ def assign_machine(
     Called from the Service Terminal when the operator clicks 'Assign Machine'.
 
     shop_id is derived from the JWT, not a query parameter.
+
+    UPDATED: booking_controller.assign_machine_to_booking() now takes
+    current_user (not shop_id) so the resulting Activity Log entry can
+    attribute this machine assignment to whoever performed it.
     """
     return booking_controller.assign_machine_to_booking(
-        db, booking_id, assign_data, current_user.shop_id
+        db, booking_id, assign_data, current_user
     )

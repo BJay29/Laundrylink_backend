@@ -32,6 +32,51 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
 
+# --- STAFF MANAGEMENT SCHEMAS (NEW) ---
+
+class StaffCreate(BaseModel):
+    """
+    Schema used by an OWNER to create a new staff/manager account under
+    their own shop. Unlike OwnerCreate, this does NOT create a new Shop —
+    shop_id is derived server-side from the currently logged-in Owner's
+    JWT (see auth_routes.py's /register/staff endpoint), never supplied
+    by the client. This is what powers a shop having multiple individual
+    login accounts (one per staff/manager) instead of one shared account,
+    which in turn is what makes the Activity Log meaningful — each action
+    can be attributed to a real person instead of a generic shared login.
+    """
+    full_name: str
+    email: EmailStr
+    password: str
+    role: str = "staff"  # "staff" or "manager"
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Full name cannot be empty.")
+        return cleaned
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v):
+        allowed_roles = {"staff", "manager"}
+        if v not in allowed_roles:
+            raise ValueError(f"role must be one of: {', '.join(sorted(allowed_roles))}")
+        return v
+
+class StaffResponse(BaseModel):
+    """Profile data returned after successfully creating a staff/manager account."""
+    id: int
+    full_name: Optional[str] = None
+    email: str
+    role: str
+    shop_id: Optional[int] = None
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
 # --- CUSTOMER (MOBILE APP) SCHEMAS ---
 
 class CustomerCreate(BaseModel):
@@ -71,6 +116,9 @@ class CustomerVerifyEmail(BaseModel):
 class CustomerResendCode(BaseModel):
     """Schema for requesting a new verification code."""
     email: EmailStr
+
+# --- SERVICE TYPE SCHEMAS ---
+
 class ServiceTypeBase(BaseModel):
     """
     Base schema for a shop-defined service. Shop owners create these
@@ -106,7 +154,12 @@ class ServiceTypeBase(BaseModel):
         return v
 
 class ServiceTypeCreate(ServiceTypeBase):
-    """Schema for adding a new service to a shop's catalog."""
+    """
+    NOTE: kept for backward compatibility / potential internal use, but
+    setting_routes.py's POST /settings/services endpoint now uses
+    ServiceTypeBase directly (no shop_id field) since shop_id is derived
+    from the JWT via Depends(get_current_user), not supplied by the client.
+    """
     shop_id: int
 
 class ServiceTypeUpdate(BaseModel):
@@ -311,7 +364,7 @@ class MachineNested(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- BOOKING INVENTORY USAGE SCHEMAS (NEW) ---
+# --- BOOKING INVENTORY USAGE SCHEMAS ---
 
 class BookingInventoryItemInput(BaseModel):
     """
@@ -359,11 +412,9 @@ class BookingCreate(BaseModel):
 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
-    # UPDATED: pinalitan ang single inventory_item_id/inventory_quantity_used
-    # ng listahan — pinapayagan na ngayon ang MARAMING consumables
-    # (hal. detergent + fabric conditioner) sa iisang booking. Optional
-    # pa rin — pwedeng walang laman kung walang consumable na ginamit
-    # (hal. walk-in na may sariling sabon).
+    # Listahan ng maraming consumables (hal. detergent + fabric conditioner)
+    # na ginamit sa isang booking. Optional — pwedeng walang laman kung
+    # walang consumable na ginamit (hal. walk-in na may sariling sabon).
     inventory_items: List[BookingInventoryItemInput] = []
 
     add_detergent: bool = False
@@ -377,7 +428,6 @@ class BookingCreate(BaseModel):
 
 class BookingAssignMachine(BaseModel):
     """
-    NEW SCHEMA
     Used when assigning a machine to an existing Pending booking
     from the Service Terminal. At least one of washer_id or dryer_id
     must be provided (validated in the controller).
@@ -410,8 +460,7 @@ class BookingResponse(BaseModel):
     shop_id: int 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
-    # UPDATED: pinalitan ang inventory_item_id/inventory_item_name ng
-    # listahan ng lahat ng items na ginamit sa booking na ito.
+    # Listahan ng lahat ng items na ginamit sa booking na ito.
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     
     washer: Optional[MachineNested] = None
@@ -469,6 +518,24 @@ class InsightResponse(BaseModel):
     problemMessage: str
     impactDetail: str
     suggestions: List[str]
+
+# --- ACTIVITY LOG SCHEMAS (NEW) ---
+
+class ActivityLogResponse(BaseModel):
+    """
+    Response schema for a single Activity Log entry. actor_name and
+    actor_role are stored redundantly on the ActivityLog row itself
+    (not just looked up via a relationship) so history remains readable
+    even if the acting User account is later deleted.
+    """
+    id: int
+    shop_id: int
+    actor_name: str
+    actor_role: str
+    description: str
+    timestamp: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
     # --- SETTINGS & PROFILE SCHEMAS ---
 

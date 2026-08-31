@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 from .. import models, schemas
+from .activity_controller import log_activity
 import logging
 from passlib.context import CryptContext # Added for password hashing
 
@@ -30,6 +31,9 @@ def get_settings(db: Session, shop_id: int):
     """
     Retrieves the optimization settings for a specific shop.
     If no settings exist in the database, it initializes them using SYSTEM_DEFAULTS.
+    NOTE: read-only from the caller's perspective — no Activity Log entry
+    for this "silent init on first access" behavior, since it's not a
+    user-initiated change.
     """
     settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
@@ -51,14 +55,19 @@ def get_factory_defaults():
     Returns the hardcoded system default values for operational rates.
     Provides the frontend with the 'Standard' reference values. Service
     pricing is not included here since it is fully owner-defined.
+    NOTE: read-only, no Activity Log entry.
     """
     return SYSTEM_DEFAULTS
 
-def update_settings(db: Session, shop_id: int, settings_data: schemas.SettingUpdate):
+def update_settings(db: Session, current_user: models.User, settings_data: schemas.SettingUpdate):
     """
     Updates the business parameters and operational rates in the database.
     This change triggers an immediate update for the Booking Modal and Analytics.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, so this action can be attributed to whoever performed it.
     """
+    shop_id = current_user.shop_id
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
     # Exclude unset values to allow partial updates (e.g., only updating one rate)
@@ -73,24 +82,47 @@ def update_settings(db: Session, shop_id: int, settings_data: schemas.SettingUpd
         for key, value in update_data.items():
             if hasattr(db_settings, key):
                 setattr(db_settings, key, value)
-    
+
+    # --- ACTIVITY LOG ---
+    if update_data:
+        changed_fields = ", ".join(update_data.keys())
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=f"Binago ang Optimization Settings ({changed_fields})"
+        )
+
     db.commit()
     db.refresh(db_settings)
     logger.info(f"Settings successfully updated for shop_id {shop_id}.")
     return db_settings
 
-def reset_to_system_defaults(db: Session, shop_id: int):
+def reset_to_system_defaults(db: Session, current_user: models.User):
     """
     Wipes custom operational rates and reverts the shop's DB record to
     SYSTEM_DEFAULTS. Does NOT touch ServiceType records — service pricing
     is reset separately (or not at all) since it's fully owner-defined.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
     if db_settings:
         for key, value in SYSTEM_DEFAULTS.items():
             if hasattr(db_settings, key):
                 setattr(db_settings, key, value)
+
+        # --- ACTIVITY LOG ---
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description="Nag-reset ng Optimization Settings pabalik sa factory defaults"
+        )
+
         db.commit()
         db.refresh(db_settings)
         return db_settings
@@ -100,11 +132,10 @@ def reset_to_system_defaults(db: Session, shop_id: int):
 def get_pricing_for_booking(db: Session, shop_id: int):
     """
     Crucial helper for the Booking Modal.
-    UPDATED: Instead of returning 4 hardcoded service keys, this now builds
-    the pricing map dynamically from whatever ServiceType records the shop
-    owner has configured. If the shop hasn't added any services yet, this
-    returns an empty pricing map (frontend should show an empty/"configure
-    your services" state rather than a fixed dropdown).
+    Builds the pricing map dynamically from whatever ServiceType records
+    the shop owner has configured. If the shop hasn't added any services
+    yet, this returns an empty pricing map.
+    NOTE: read-only, no Activity Log entry.
     """
     settings = get_settings(db, shop_id)
 
@@ -124,12 +155,13 @@ def get_pricing_for_booking(db: Session, shop_id: int):
 
     return pricing
 
-# --- SERVICE TYPE FUNCTIONS (NEW) ---
+# --- SERVICE TYPE FUNCTIONS ---
 
 def get_service_types(db: Session, shop_id: int):
     """
     Returns all services (active and inactive) configured for a shop,
     for display and management on the Optimization Settings page.
+    NOTE: read-only, no Activity Log entry.
     """
     return (
         db.query(models.ServiceType)
@@ -138,11 +170,18 @@ def get_service_types(db: Session, shop_id: int):
         .all()
     )
 
-def create_service_type(db: Session, shop_id: int, service_data: schemas.ServiceTypeCreate):
+def create_service_type(db: Session, current_user: models.User, service_data: schemas.ServiceTypeBase):
     """
     Registers a new service (name + price + duration) for the shop.
     Prevents exact duplicate names (case-insensitive) for the same shop.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id. Also updated the type hint for service_data to
+    ServiceTypeBase, matching setting_routes.py's add_service_type
+    endpoint (which no longer accepts a client-supplied shop_id).
     """
+    shop_id = current_user.shop_id
+
     existing = (
         db.query(models.ServiceType)
         .filter(
@@ -165,14 +204,32 @@ def create_service_type(db: Session, shop_id: int, service_data: schemas.Service
         shop_id=shop_id
     )
     db.add(new_service)
+    db.flush()  # kailangan para makuha ang new_service.name bago mag-commit
+
+    # --- ACTIVITY LOG ---
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.email,
+        actor_role=current_user.role,
+        description=(
+            f"Nagdagdag ng bagong service: {new_service.name} "
+            f"(₱{new_service.price}, {new_service.duration_minutes} min)"
+        )
+    )
+
     db.commit()
     db.refresh(new_service)
     return new_service
 
-def update_service_type(db: Session, shop_id: int, service_id: int, service_data: schemas.ServiceTypeUpdate):
+def update_service_type(db: Session, current_user: models.User, service_id: int, service_data: schemas.ServiceTypeUpdate):
     """
-    Edits an existing service's name, price, or active status.
+    Edits an existing service's name, price, duration, or active status.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     service = (
         db.query(models.ServiceType)
         .filter(models.ServiceType.id == service_id, models.ServiceType.shop_id == shop_id)
@@ -199,19 +256,36 @@ def update_service_type(db: Session, shop_id: int, service_id: int, service_data
                 detail=f"A service named '{update_data['name']}' already exists for this shop."
             )
 
+    service_label = service.name  # kunin bago mabago, para tama sa log kahit napalitan ang pangalan
+
     for key, value in update_data.items():
         setattr(service, key, value)
+
+    # --- ACTIVITY LOG ---
+    if update_data:
+        changed_fields = ", ".join(update_data.keys())
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=f"Nag-update ng service: {service_label} ({changed_fields})"
+        )
 
     db.commit()
     db.refresh(service)
     return service
 
-def delete_service_type(db: Session, shop_id: int, service_id: int):
+def delete_service_type(db: Session, current_user: models.User, service_id: int):
     """
     Removes a service from the shop's catalog.
     Existing bookings keep their historical service_type string, so past
     records are unaffected — only future bookings lose this as an option.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     service = (
         db.query(models.ServiceType)
         .filter(models.ServiceType.id == service_id, models.ServiceType.shop_id == shop_id)
@@ -220,16 +294,31 @@ def delete_service_type(db: Session, shop_id: int, service_id: int):
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service type not found.")
 
+    service_name = service.name
     db.delete(service)
+
+    # --- ACTIVITY LOG ---
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.email,
+        actor_role=current_user.role,
+        description=f"Nag-tanggal ng service: {service_name}"
+    )
+
     db.commit()
-    return {"message": f"Service '{service.name}' removed successfully."}
+    return {"message": f"Service '{service_name}' removed successfully."}
 
-# --- PROFILE & SECURITY FUNCTIONS (NEW) ---
+# --- PROFILE & SECURITY FUNCTIONS ---
 
-def update_shop_profile(db: Session, shop_id: int, profile_data: schemas.ShopProfileUpdate):
+def update_shop_profile(db: Session, current_user: models.User, profile_data: schemas.ShopProfileUpdate):
     """
     Updates the shop's contact information and business profile.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     db_shop = db.query(models.Shop).filter(models.Shop.id == shop_id).first()
     if not db_shop:
         return None
@@ -238,7 +327,17 @@ def update_shop_profile(db: Session, shop_id: int, profile_data: schemas.ShopPro
     for key, value in update_data.items():
         if hasattr(db_shop, key):
             setattr(db_shop, key, value)
-            
+
+    # --- ACTIVITY LOG ---
+    if update_data:
+        changed_fields = ", ".join(update_data.keys())
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=f"Nag-update ng shop profile ({changed_fields})"
+        )
+
     db.commit()
     db.refresh(db_shop)
     return db_shop
@@ -246,6 +345,12 @@ def update_shop_profile(db: Session, shop_id: int, profile_data: schemas.ShopPro
 def update_user_password(db: Session, user_id: int, password_data: schemas.PasswordUpdate):
     """
     Validates the old password and updates to a new hashed password.
+
+    NOTE: sinasadyang HINDI ito nilagyan ng Activity Log entry —
+    password changes ay sensitive/private na aksyon, hindi dapat
+    makikita kahit ng Manager sa shared Activity Log page. Signature
+    unchanged (user_id, hindi current_user) dahil self-only operation
+    ito, walang kailangang shop-level attribution na idagdag.
     """
     db_user = db.query(models.User).filter(models.User.id == user_id).first()
     if not db_user:

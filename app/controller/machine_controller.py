@@ -2,6 +2,8 @@ from sqlalchemy.orm import Session
 from app.models import Machine, Booking
 from app.schemas import MachineCreate, MachineUpdate
 from app.services.prediction_service import PredictionService
+from app.controller.activity_controller import log_activity
+from app import models
 from fastapi import HTTPException, status
 
 
@@ -24,16 +26,18 @@ def _enrich(machine: Machine) -> Machine:
     return machine
 
 
-def delete_machine(db: Session, machine_id: int, shop_id: int):
+def delete_machine(db: Session, machine_id: int, current_user: models.User):
     """
     Deletes a machine unit.
     Because of ondelete="SET NULL" in models.py, this will successfully
     remove the machine without deleting related booking history.
 
-    NOTE: Removed the `shop_id: int = 1` default. shop_id must now always
-    be explicitly passed in from the authenticated user's JWT — a silent
-    default made it too easy to accidentally query/mutate shop 1's data.
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id so this destructive action can be attributed to whoever
+    performed it.
     """
+    shop_id = current_user.shop_id
+
     machine = db.query(Machine).filter(
         Machine.id == machine_id,
         Machine.shop_id == shop_id
@@ -45,8 +49,19 @@ def delete_machine(db: Session, machine_id: int, shop_id: int):
             detail="Machine not found or already removed."
         )
 
+    machine_label = f"{machine.machine_type} #{machine.machine_number}"
+
     try:
         db.delete(machine)
+
+        # --- ACTIVITY LOG ---
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=f"Nag-tanggal ng machine: {machine_label}"
+        )
+
         db.commit()
         return {"message": f"Machine {machine_id} successfully decommissioned."}
     except Exception as e:
@@ -61,6 +76,9 @@ def get_all_machines(db: Session, shop_id: int):
     """
     Retrieves all hardware units for a shop, sorted by type and number.
     Applies enrichment to provide formatted metrics to the frontend.
+
+    NOTE: read-only, no Activity Log entry — signature unchanged (still
+    shop_id, not current_user), since no actor attribution is needed here.
     """
     machines = (
         db.query(Machine)
@@ -74,6 +92,8 @@ def get_all_machines(db: Session, shop_id: int):
 def get_machine_by_id(db: Session, machine_id: int, shop_id: int):
     """
     Fetches a single machine unit with full telemetry enrichment.
+
+    NOTE: read-only, no Activity Log entry.
     """
     machine = db.query(Machine).filter(
         Machine.id == machine_id,
@@ -88,17 +108,18 @@ def get_machine_by_id(db: Session, machine_id: int, shop_id: int):
     return _enrich(machine)
 
 
-def update_machine(db: Session, machine_id: int, update_data: MachineUpdate, shop_id: int):
+def update_machine(db: Session, machine_id: int, update_data: MachineUpdate, current_user: models.User):
     """
-    NEW FUNCTION — was referenced by machine_routes.py's PATCH /{machine_id}
-    endpoint but was missing from the controller, which would have caused
-    an AttributeError at runtime.
-
     Updates editable machine fields (status, telemetry overrides, pricing,
     etc). Only fields explicitly provided in the request are changed
     (partial update). Scoped to the requesting user's shop — a machine
     belonging to another shop returns 404, not silent success.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     machine = db.query(Machine).filter(
         Machine.id == machine_id,
         Machine.shop_id == shop_id
@@ -114,7 +135,18 @@ def update_machine(db: Session, machine_id: int, update_data: MachineUpdate, sho
     for field, value in update_fields.items():
         setattr(machine, field, value)
 
+    machine_label = f"{machine.machine_type} #{machine.machine_number}"
+
     try:
+        # --- ACTIVITY LOG ---
+        changed_fields = ", ".join(update_fields.keys()) if update_fields else "no fields"
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=f"Nag-update ng machine {machine_label} ({changed_fields})"
+        )
+
         db.commit()
         db.refresh(machine)
         return _enrich(machine)
@@ -131,10 +163,12 @@ def update_machine_usage_stats(db: Session, machine_id: int, duration_minutes: i
     Updates machine telemetry after a cycle is completed.
     Calculates utility costs and increments the lifetime profit tracking.
 
-    Added shop_id filtering — previously this queried by machine_id alone
-    with no shop check at all, meaning a machine ID belonging to another
-    shop could have its telemetry silently updated if this were ever
-    called with an untrusted machine_id.
+    NOTE: this function is currently NOT called by any route (confirmed
+    unused/dead code in an earlier pass) — left with the shop_id-only
+    signature since there's no HTTP-request context (no current_user)
+    calling it. If this is wired up later (e.g. a background job for
+    auto-completing cycles), decide then whether it needs its own
+    Activity Log entry or whether "system" should be logged as the actor.
     """
     machine = db.query(Machine).filter(
         Machine.id == machine_id,
@@ -159,10 +193,15 @@ def update_machine_usage_stats(db: Session, machine_id: int, duration_minutes: i
     return _enrich(machine)
 
 
-def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
+def create_machine(db: Session, machine_data: MachineCreate, current_user: models.User):
     """
     Registers a new hardware unit and initializes all telemetry fields to zero.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     new_machine = Machine(
         machine_type=machine_data.machine_type,
         machine_number=machine_data.machine_number,
@@ -180,16 +219,31 @@ def create_machine(db: Session, machine_data: MachineCreate, shop_id: int):
     )
 
     db.add(new_machine)
+    db.flush()  # kailangan para makuha ang machine_type/machine_number bago mag-commit
+
+    # --- ACTIVITY LOG ---
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.email,
+        actor_role=current_user.role,
+        description=f"Nagdagdag ng bagong machine: {new_machine.machine_type} #{new_machine.machine_number}"
+    )
+
     db.commit()
     db.refresh(new_machine)
     return _enrich(new_machine)
 
 
-def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
+def toggle_machine_maintenance(db: Session, machine_id: int, current_user: models.User):
     """
     Toggles the hardware state between Available and Maintenance.
     Entering maintenance clears real-time countdowns for safety.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     machine = db.query(Machine).filter(
         Machine.id == machine_id,
         Machine.shop_id == shop_id
@@ -198,24 +252,41 @@ def toggle_machine_maintenance(db: Session, machine_id: int, shop_id: int):
     if not machine:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Machine not found.")
 
+    machine_label = f"{machine.machine_type} #{machine.machine_number}"
+
     if machine.status == "Maintenance":
         machine.status = "Available"
+        action_desc = f"Inilabas sa Maintenance ang {machine_label} — Available na ulit"
     else:
         machine.status = "Maintenance"
         machine.remaining_time = 0
         machine.current_service_type = "None"
         machine.current_price = 0.0
+        action_desc = f"Inilagay sa Maintenance ang {machine_label}"
+
+    # --- ACTIVITY LOG ---
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.email,
+        actor_role=current_user.role,
+        description=action_desc
+    )
 
     db.commit()
     db.refresh(machine)
     return _enrich(machine)
 
 
-def initialize_shop_machines(db: Session, shop_id: int):
+def initialize_shop_machines(db: Session, current_user: models.User):
     """
     Seed function to deploy a standard 12-unit laundry grid.
     Ensures clean telemetry initialization for all units.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     existing = db.query(Machine).filter(Machine.shop_id == shop_id).first()
     if existing:
         return {"message": "Hardware grid is already initialized."}
@@ -240,20 +311,31 @@ def initialize_shop_machines(db: Session, shop_id: int):
             ))
 
     db.add_all(machines)
+
+    # --- ACTIVITY LOG ---
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.email,
+        actor_role=current_user.role,
+        description=f"Nag-deploy ng default 12-unit machine grid (6 Washer, 6 Dryer)"
+    )
+
     db.commit()
     return {"message": "12-unit suite deployed with real-time cost telemetry enabled."}
 
 
-def reset_all_machines(db: Session, shop_id: int):
+def reset_all_machines(db: Session, current_user: models.User):
     """
-    NEW FUNCTION — was referenced by machine_routes.py's POST /reset-all
-    endpoint but was missing from the controller, which would have caused
-    an AttributeError at runtime.
-
     Emergency override: sets every machine belonging to this shop back to
     'Available' and clears active-cycle telemetry (does NOT reset lifetime
     totals like total_cycles or net_profit_accumulated).
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id. This is a shop-wide destructive-ish override, so it's
+    important to know who triggered it.
     """
+    shop_id = current_user.shop_id
+
     machines = db.query(Machine).filter(Machine.shop_id == shop_id).all()
 
     if not machines:
@@ -269,6 +351,14 @@ def reset_all_machines(db: Session, shop_id: int):
         machine.current_price = 0.0
 
     try:
+        # --- ACTIVITY LOG ---
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=f"Nag-reset ng lahat ng machines ({len(machines)} unit/s) pabalik sa Available"
+        )
+
         db.commit()
         return {"message": f"{len(machines)} machine(s) reset to Available."}
     except Exception as e:

@@ -51,10 +51,63 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
     return new_user
 
 
+def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
+    """
+    NEW — Creates a new staff/manager account UNDER AN EXISTING shop.
+
+    Unlike create_owner(), this does NOT create a new Shop — it links the
+    new User directly to shop_id, which is always supplied by the caller
+    (the auth_routes.py endpoint), never trusted from client input. The
+    caller is responsible for ensuring shop_id comes from the currently
+    logged-in Owner's own JWT (via require_role("owner")), so a staff
+    account can only ever be created under the Owner's own shop.
+
+    This is what enables individual login accounts per staff/manager,
+    which in turn is what makes the Activity Log meaningful — each
+    action gets attributed to the real person who performed it instead
+    of a generic shared account.
+    """
+    # 1. Check if the email is already in use
+    existing = db.query(models.User).filter(models.User.email == staff_data.email).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+
+    # 2. Hash the password
+    hashed_pass = bcrypt.hashpw(
+        staff_data.password.encode('utf-8'),
+        bcrypt.gensalt()
+    ).decode('utf-8')
+
+    # 3. Create the staff/manager account linked to the Owner's own shop
+    new_staff = models.User(
+        email=staff_data.email,
+        hashed_password=hashed_pass,
+        role=staff_data.role,   # "staff" or "manager" — validated in schemas.py
+        shop_id=shop_id
+    )
+    db.add(new_staff)
+    db.commit()
+    db.refresh(new_staff)
+
+    return new_staff
+
+
 def authenticate_user(db: Session, credentials: schemas.UserLogin):
     """
-    Authenticates administrative users (Owners/Staff) via email and password.
-    Returns a unified payload with a REAL signed JWT for both React and Flutter.
+    Authenticates administrative users (Owners/Staff/Managers) via email
+    and password. Returns a unified payload with a REAL signed JWT for
+    both React and Flutter.
+
+    NOTE: this function is UNCHANGED by the addition of staff accounts —
+    it looks up whichever User row matches the given email, and that
+    row's own `role` and `shop_id` (set once, at account creation time,
+    either in create_owner() or create_staff()) are what get embedded
+    in the JWT. There is no separate "staff login" path; the same
+    lookup-by-email logic naturally returns the correct role for
+    whoever is logging in.
     """
 
     # 1. Fetch user by email

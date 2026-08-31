@@ -2,12 +2,10 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 from app.models import InventoryItem, InventoryLog, Shop
 from app.schemas import InventoryItemCreate, InventoryItemUpdate
+from app.controller.activity_controller import log_activity
+from app import models
 
 # --- LOW STOCK CLASSIFICATION (SINGLE SOURCE OF TRUTH) ---
-# NOTE: Dating doble ang logic na ito — meron sa get_inventory_dashboard_stats()
-# DITO, at meron din malamang sa inventory_service.check_low_stock_alerts().
-# Ngayon, ISANG function na lang ang nagde-decide ng status, at parehong
-# lugar ay dapat gumamit ng function na ito para laging tugma ang resulta.
 CRITICAL_THRESHOLD_RATIO = 0.5  # 50% pababa ng reorder_point = CRITICAL
 
 def classify_stock_status(current_stock: float, reorder_point: float) -> str:
@@ -18,7 +16,7 @@ def classify_stock_status(current_stock: float, reorder_point: float) -> str:
     - OK: mas mataas sa reorder point
     """
     if reorder_point <= 0:
-        return "OK"  # walang defined threshold, iwasan ang division/logic errors
+        return "OK"
     if current_stock <= (reorder_point * CRITICAL_THRESHOLD_RATIO):
         return "CRITICAL"
     if current_stock <= reorder_point:
@@ -27,18 +25,18 @@ def classify_stock_status(current_stock: float, reorder_point: float) -> str:
 
 
 def get_inventory(db: Session, shop_id: int):
-    """Retrieves all inventory items for a specific shop."""
+    """
+    Retrieves all inventory items for a specific shop.
+    NOTE: read-only, no Activity Log entry.
+    """
     return db.query(InventoryItem).filter(InventoryItem.shop_id == shop_id).all()
 
 
 def get_item(db: Session, item_id: int, shop_id: int):
     """
     Retrieves a single inventory item by its ID, SCOPED TO THE SHOP.
-
-    FIXED: dating walang shop_id filter dito kahit saan — kaya kahit
-    anong item_id (kahit sa ibang shop), makikita/mae-edit/made-delete.
-    Ngayon, kung hindi kabilang sa shop na ito ang item, wala itong
-    ibabalik (None), parang hindi umiiral.
+    NOTE: read-only, no Activity Log entry. Used internally by mutating
+    functions below to first look up the item before logging changes.
     """
     return db.query(InventoryItem).filter(
         InventoryItem.id == item_id,
@@ -56,16 +54,18 @@ def get_inventory_grouped_by_category(db: Session, shop_id: int):
     return grouped
 
 
-def create_item(db: Session, item_data: InventoryItemCreate, shop_id: int):
+def create_item(db: Session, item_data: InventoryItemCreate, current_user: models.User):
     """
     Creates a new inventory item in the database with usage_rate and
     category support.
 
-    FIXED: shop_id ay parameter na ngayon (galing sa JWT via routes),
-    HINDI na kinukuha mula sa item_data.shop_id na ipinasa ng client.
-    Kahit magpasa pa ang client ng ibang shop_id sa request body,
-    ang shop_id ng NAKA-LOGIN na user ang laging gagamitin.
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, so this action can be attributed to whoever performed it.
+    shop_id is still derived from current_user.shop_id, never from the
+    client-supplied item_data.shop_id.
     """
+    shop_id = current_user.shop_id
+
     try:
         shop = db.query(Shop).filter(Shop.id == shop_id).first()
         if not shop:
@@ -82,6 +82,19 @@ def create_item(db: Session, item_data: InventoryItemCreate, shop_id: int):
             shop_id=shop_id
         )
         db.add(new_item)
+        db.flush()  # kailangan para makuha ang new_item.item_name bago mag-commit
+
+        # --- ACTIVITY LOG ---
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Nagdagdag ng bagong inventory item: {new_item.item_name} "
+                f"({new_item.current_stock}{new_item.unit})"
+            )
+        )
+
         db.commit()
         db.refresh(new_item)
         return new_item
@@ -91,28 +104,50 @@ def create_item(db: Session, item_data: InventoryItemCreate, shop_id: int):
         return None
 
 
-def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate, shop_id: int):
+def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate, current_user: models.User):
     """
     Updates all editable fields of an existing inventory item including item_name.
 
-    FIXED: shop_id filtering added via get_item(). Dating walang
-    proteksyon dito — kahit item ng ibang shop, pwedeng i-edit.
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     try:
         db_item = get_item(db, item_id, shop_id)
         if db_item:
+            changed_fields = []
+
             if item_data.item_name is not None:
                 db_item.item_name = item_data.item_name
+                changed_fields.append("item_name")
             if item_data.current_stock is not None:
                 db_item.current_stock = item_data.current_stock
+                changed_fields.append("current_stock")
             if item_data.reorder_point is not None:
                 db_item.reorder_point = item_data.reorder_point
+                changed_fields.append("reorder_point")
             if item_data.usage_rate is not None:
                 db_item.usage_rate = item_data.usage_rate
+                changed_fields.append("usage_rate")
             if item_data.category is not None:
                 db_item.category = item_data.category
+                changed_fields.append("category")
             if item_data.unit is not None:
                 db_item.unit = item_data.unit
+                changed_fields.append("unit")
+
+            # --- ACTIVITY LOG ---
+            if changed_fields:
+                log_activity(
+                    db, shop_id,
+                    actor_name=current_user.email,
+                    actor_role=current_user.role,
+                    description=(
+                        f"Nag-update ng inventory item: {db_item.item_name} "
+                        f"({', '.join(changed_fields)})"
+                    )
+                )
 
             db.commit()
             db.refresh(db_item)
@@ -123,21 +158,25 @@ def update_item(db: Session, item_id: int, item_data: InventoryItemUpdate, shop_
         return None
 
 
-def record_usage(db: Session, item_id: int, quantity_used: float, shop_id: int):
+def record_usage(db: Session, item_id: int, quantity_used: float, current_user: models.User):
     """
     Deducts stock from an item and creates an InventoryLog record.
     Used for MANUAL consumption tracking (e.g. staff records usage
     directly from the Inventory page, not tied to a booking).
 
-    FIXED: shop_id filtering added via get_item(). Dating pwedeng
-    ibawas ang stock ng ITEM NG IBANG SHOP kung alam lang ang item_id.
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
 
     NOTE: hiwalay ito sa validate_and_deduct_stock() sa ibaba — ito ay
     para sa STANDALONE na paggamit (may sariling commit), habang ang
     validate_and_deduct_stock() ay para sa MULTI-ITEM na booking flow
     (walang commit, dahil isang malaking transaction lang ang gagawin
-    sa booking_controller para sa lahat ng items nang sabay-sabay).
+    sa booking_controller para sa lahat ng items nang sabay-sabay, at
+    doon na rin naka-log ang buong booking action — hindi dapat doble
+    ang log kada item).
     """
+    shop_id = current_user.shop_id
+
     try:
         db_item = get_item(db, item_id, shop_id)
         if db_item and db_item.current_stock >= quantity_used:
@@ -148,6 +187,18 @@ def record_usage(db: Session, item_id: int, quantity_used: float, shop_id: int):
                 quantity_used=quantity_used
             )
             db.add(new_log)
+
+            # --- ACTIVITY LOG ---
+            log_activity(
+                db, shop_id,
+                actor_name=current_user.email,
+                actor_role=current_user.role,
+                description=(
+                    f"Nag-record ng manual usage para sa {db_item.item_name}: "
+                    f"-{quantity_used}{db_item.unit}"
+                )
+            )
+
             db.commit()
             db.refresh(db_item)
             return db_item
@@ -158,17 +209,29 @@ def record_usage(db: Session, item_id: int, quantity_used: float, shop_id: int):
         return None
 
 
-def delete_item(db: Session, item_id: int, shop_id: int):
+def delete_item(db: Session, item_id: int, current_user: models.User):
     """
     Removes an item from the inventory.
 
-    FIXED: shop_id filtering added via get_item(). Dating pwedeng
-    matanggal ang item ng IBANG SHOP kung alam lang ang item_id.
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id.
     """
+    shop_id = current_user.shop_id
+
     try:
         db_item = get_item(db, item_id, shop_id)
         if db_item:
+            item_name = db_item.item_name
             db.delete(db_item)
+
+            # --- ACTIVITY LOG ---
+            log_activity(
+                db, shop_id,
+                actor_name=current_user.email,
+                actor_role=current_user.role,
+                description=f"Nag-tanggal ng inventory item: {item_name}"
+            )
+
             db.commit()
             return db_item
         return None
@@ -182,9 +245,7 @@ def get_item_analytics(db: Session, item_id: int, shop_id: int, days: int = 7):
     """
     Retrieves analytics and usage graph data for a specific inventory item.
     Returns item details with consumption history for charting.
-
-    FIXED: shop_id filtering added — dating pwedeng makita ang usage
-    history ng item ng IBANG SHOP kung alam lang ang item_id.
+    NOTE: read-only, no Activity Log entry.
     """
     try:
         from app.services.inventory_service import get_inventory_analytics
@@ -211,10 +272,7 @@ def get_item_analytics(db: Session, item_id: int, shop_id: int, days: int = 7):
 def get_inventory_dashboard_stats(db: Session, shop_id: int):
     """
     Retrieves complete inventory dashboard statistics including low stock alerts.
-
-    FIXED: ginagamit na ang iisang classify_stock_status() helper para sa
-    lahat ng classification — hindi na duplicated/independent logic dito
-    kumpara sa saanman na tumatawag ng check_low_stock_alerts().
+    NOTE: read-only, no Activity Log entry.
     """
     try:
         all_items = get_inventory(db, shop_id=shop_id)
@@ -250,7 +308,6 @@ def get_inventory_dashboard_stats(db: Session, shop_id: int):
 
         items_ok = total_items - items_critical - items_low
 
-        # Pinaka-mahalaga ang CRITICAL items — ilagay muna sa taas ng listahan
         alerts.sort(key=lambda a: 0 if a["status"] == "CRITICAL" else 1)
 
         return {
@@ -268,23 +325,18 @@ def get_inventory_dashboard_stats(db: Session, shop_id: int):
 
 def validate_and_deduct_stock(db: Session, item_id: int, quantity: float, shop_id: int) -> InventoryItem:
     """
-    NEW — Reusable helper na tinatawag ng booking_controller sa loob ng
-    loop, isang beses kada item sa multi-item na booking (hal. detergent
-    + fabric conditioner sa iisang booking).
+    Reusable helper na tinatawag ng booking_controller sa loob ng loop,
+    isang beses kada item sa multi-item na booking (hal. detergent +
+    fabric conditioner sa iisang booking).
 
-    Isang lugar lang ito ginagawa (single source of truth) para sa
-    validation + deduction — ang booking_controller ang tumatawag dito
-    nang paulit-ulit para sa bawat item sa listahan.
+    NOTE: walang Activity Log entry dito nang sinasadya — ang buong
+    booking action (kasama na ang lahat ng inventory items na ginamit)
+    ay isang beses na naka-log sa booking_controller.create_booking(),
+    para hindi dumoble ang log entries kada item sa loob ng isang booking.
 
-    Ibinabato ang HTTPException kung hindi mahanap ang item o kulang
-    ang stock — kailangang ma-stop agad ang buong transaction kung may
-    isang item na fail (all-or-nothing behavior).
-
-    NOTE: walang db.commit() dito sa sadya — ang caller (create_booking
-    sa booking_controller) ang bahalang mag-commit ng BUONG transaction
-    (booking + machine telemetry + lahat ng inventory deductions) nang
-    sabay-sabay, para hindi mangyari na may bahagyang na-deduct na stock
-    kahit fail ang buong booking.
+    NOTE: walang db.commit() dito rin — ang caller (create_booking sa
+    booking_controller) ang bahalang mag-commit ng BUONG transaction
+    nang sabay-sabay.
     """
     item = get_item(db, item_id, shop_id)
     if not item:

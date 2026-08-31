@@ -21,6 +21,9 @@ class Shop(Base):
     inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
     service_types = relationship("ServiceType", back_populates="shop", cascade="all, delete-orphan")
+    # NEW — activity trail for this shop; each entry attributes an action
+    # to a specific User (via actor_name/actor_role snapshot, see below).
+    activity_logs = relationship("ActivityLog", back_populates="shop", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -334,4 +337,45 @@ class Booking(Base):
             "shop_id": self.shop_id,
             "booking_timestamp": self.booking_timestamp.isoformat() if self.booking_timestamp else None,
             "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+class ActivityLog(Base):
+    """
+    NEW MODEL — Talaan ng mahahalagang aksyon na ginawa ng mga User
+    (Owner/Staff/Manager) sa loob ng isang shop, para sa accountability
+    at history tracking.
+
+    actor_name at actor_role ay sinadyang naka-DUPLICATE dito (hindi
+    lang naka-relate sa User table) — kahit matanggal balang araw ang
+    User account na gumawa nito (nag-resign, na-deactivate), permanente
+    pa ring makikita sa log kung SINO at ANONG ROLE ang gumawa ng aksyon,
+    imbes na mawala o maging "Unknown User" na lang.
+
+    Walang direktang foreign key papuntang User dito nang sinasadya —
+    ang shop_id + actor_name snapshot na ang sapat para sa layunin ng
+    isang simpleng activity trail, at iniiwasan nito ang kailangang
+    isipin pa ang ondelete behavior kung matatanggal ang User.
+    """
+    __tablename__ = "activity_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+
+    actor_name = Column(String, nullable=False)   # hal. "juan@gmail.com" o "Juan Dela Cruz"
+    actor_role = Column(String, nullable=False)   # "owner", "staff", "manager"
+
+    description = Column(String, nullable=False)  # hal. "Gumawa ng booking para kay Maria - ₱250"
+
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    shop = relationship("Shop", back_populates="activity_logs")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "shop_id": self.shop_id,
+            "actor_name": self.actor_name,
+            "actor_role": self.actor_role,
+            "description": self.description,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None
         }

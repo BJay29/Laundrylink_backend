@@ -12,7 +12,7 @@ from app.schemas import (
     InventoryDashboardStats
 )
 from app import models
-from app.security import get_current_user  # ⬅️ BAGONG IMPORT
+from app.security import get_current_user
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
 
@@ -22,7 +22,10 @@ def read_inventory(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Fetches all inventory items for the logged-in user's own shop."""
+    """
+    Fetches all inventory items for the logged-in user's own shop.
+    Read-only — no controller signature change needed here.
+    """
     try:
         return inventory_controller.get_inventory(db, shop_id=current_user.shop_id)
     except Exception as e:
@@ -35,7 +38,10 @@ def read_inventory_by_category(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Fetches inventory items grouped by category for category/item dropdowns."""
+    """
+    Fetches inventory items grouped by category for category/item dropdowns.
+    Read-only — no controller signature change needed here.
+    """
     try:
         return inventory_controller.get_inventory_grouped_by_category(db, shop_id=current_user.shop_id)
     except Exception as e:
@@ -51,9 +57,7 @@ def get_low_stock_alerts(
     """
     Retrieves inventory status dashboard with low stock alerts and inventory
     statistics for the logged-in user's own shop.
-
-    NOTE: dating "/inventory/shop/{shop_id}/alerts" na open sa URL editing —
-    ngayon "/inventory/alerts" na lang, walang path param, base sa JWT.
+    Read-only — no controller signature change needed here.
     """
     try:
         stats = inventory_controller.get_inventory_dashboard_stats(db, shop_id=current_user.shop_id)
@@ -73,12 +77,16 @@ def create_inventory_item(
     Adds a new item to the logged-in user's own shop inventory.
     item_data.shop_id (if present in the body) is ignored — shop_id
     always comes from the JWT.
+
+    UPDATED: inventory_controller.create_item() now takes current_user
+    (not shop_id) so the resulting Activity Log entry can attribute this
+    action to whoever performed it.
     """
     try:
         if not item_data.item_name or not item_data.item_name.strip():
             raise HTTPException(status_code=400, detail="Item name is required")
 
-        result = inventory_controller.create_item(db, item_data=item_data, shop_id=current_user.shop_id)
+        result = inventory_controller.create_item(db, item_data=item_data, current_user=current_user)
 
         if not result:
             raise HTTPException(
@@ -107,9 +115,12 @@ def record_item_usage(
     """
     Manually records consumption of an item belonging to the logged-in
     user's own shop.
+
+    UPDATED: inventory_controller.record_usage() now takes current_user
+    (not shop_id) for Activity Log attribution.
     """
     updated_item = inventory_controller.record_usage(
-        db, item_id=item_id, quantity_used=quantity, shop_id=current_user.shop_id
+        db, item_id=item_id, quantity_used=quantity, current_user=current_user
     )
     if not updated_item:
         raise HTTPException(
@@ -126,9 +137,14 @@ def update_inventory_item(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Updates an existing inventory item belonging to the logged-in user's own shop."""
+    """
+    Updates an existing inventory item belonging to the logged-in user's own shop.
+
+    UPDATED: inventory_controller.update_item() now takes current_user
+    (not shop_id) for Activity Log attribution.
+    """
     updated_item = inventory_controller.update_item(
-        db, item_id=item_id, item_data=item_data, shop_id=current_user.shop_id
+        db, item_id=item_id, item_data=item_data, current_user=current_user
     )
     if not updated_item:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -141,8 +157,13 @@ def delete_inventory_item(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Deletes an item from the logged-in user's own shop inventory."""
-    deleted_item = inventory_controller.delete_item(db, item_id=item_id, shop_id=current_user.shop_id)
+    """
+    Deletes an item from the logged-in user's own shop inventory.
+
+    UPDATED: inventory_controller.delete_item() now takes current_user
+    (not shop_id) for Activity Log attribution.
+    """
+    deleted_item = inventory_controller.delete_item(db, item_id=item_id, current_user=current_user)
     if not deleted_item:
         raise HTTPException(status_code=404, detail="Item not found")
     return None
@@ -158,6 +179,7 @@ def get_item_analytics(
     """
     Retrieves usage analytics and graph data for a specific inventory item
     belonging to the logged-in user's own shop.
+    Read-only — no controller signature change needed here.
     """
     try:
         analytics = inventory_controller.get_item_analytics(

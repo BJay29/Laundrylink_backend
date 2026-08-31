@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
 # Import routes
-from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes
+from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes, activity_routes
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -126,7 +126,7 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
-    "http://localhost:5000",   # Flutter web dev (flutter run -d chrome --web-port=5000)
+    "http://localhost:5000",   
     "http://127.0.0.1:5000",
 ]
 
@@ -165,6 +165,7 @@ app.include_router(machine_routes.router)
 app.include_router(setting_routes.router)
 app.include_router(analytics_routes.router)
 app.include_router(inventory_routes.router)
+app.include_router(activity_routes.router)
 
 # --- ROOT HEALTH CHECK ---
 
@@ -174,7 +175,7 @@ def read_root():
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
         "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "CustomerAuth", "Bookings", "Machines", "Settings", "Analytics", "Inventory"]
+        "modules_active": ["Auth", "CustomerAuth", "Bookings", "Machines", "Settings", "Analytics", "Inventory", "Activity"]
     }
 
 # --- PRODUCTION ENTRY POINT ---
