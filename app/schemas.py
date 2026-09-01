@@ -8,11 +8,11 @@ class OwnerCreate(BaseModel):
     """
     Schema for initial shop owner registration and shop creation.
 
-    UPDATED: Added full_name so the Owner's real name is captured at
-    registration time (previously only StaffCreate had this field, so
-    Owners registering their own shop had no name on file — the
-    Activity Log would show their email even after full_name support
-    was added elsewhere).
+    Added full_name so the Owner's real name is captured at registration
+    time (previously only StaffCreate had this field, so Owners
+    registering their own shop had no name on file — the Activity Log
+    would show their email even after full_name support was added
+    elsewhere).
     """
     owner_name: str
     shop_name: str
@@ -37,9 +37,9 @@ class UserResponse(BaseModel):
     """
     Profile data returned after successful login or session validation.
 
-    UPDATED: Added full_name so the frontend can display/cache the
-    logged-in user's real name (e.g. for Activity Log attribution,
-    greeting text, etc.) instead of falling back to email everywhere.
+    Added full_name so the frontend can display/cache the logged-in
+    user's real name (e.g. for Activity Log attribution, greeting text,
+    etc.) instead of falling back to email everywhere.
     """
     email: str
     full_name: Optional[str] = None
@@ -507,6 +507,12 @@ class BookingResponse(BaseModel):
     shop_id: int 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
+
+    # NEW — nagsasabi kung saan galing ang booking (mobile customer vs.
+    # staff/Service Terminal) at kung sinong customer, kung meron.
+    customer_id: Optional[int] = None
+    source: Optional[str] = "terminal"
+
     # Listahan ng lahat ng items na ginamit sa booking na ito.
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     
@@ -531,6 +537,36 @@ class BookingResponse(BaseModel):
         return v
 
     model_config = ConfigDict(from_attributes=True)
+
+# --- CUSTOMER (MOBILE APP) BOOKING SCHEMAS ---
+
+class CustomerBookingCreate(BaseModel):
+    """
+    Schema para sa booking na ginawa mismo ng customer sa mobile app —
+    mas simple kaysa BookingCreate (walang machine assignment, walang
+    inventory items, walang customer_name dahil galing na sa JWT).
+
+    quantity ay generic na number lang — ang ibig sabihin nito
+    (load/kg/piece) ay depende sa pricing_unit ng napiling service,
+    hindi na kailangang hulaan ng schema mismo.
+    """
+    shop_id: int
+    service_type: str
+    quantity: float
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, v):
+        if v <= 0:
+            raise ValueError("quantity must be greater than 0.")
+        return v
+
+
+class BookingDecisionResponse(BaseModel):
+    """Simple response para sa accept/decline endpoints."""
+    message: str
+    booking_id: int
+    status: str
 
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 

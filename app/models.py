@@ -198,14 +198,14 @@ class User(Base):
     """
     Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
 
-    UPDATED: Added full_name. Dating wala nito kahit meron nang full_name
-    field ang StaffCreate schema — hindi pa ito naisa-save kahit saan,
-    kaya laging email lang ang lumalabas sa Activity Log bilang actor
-    (hal. "juan@gmail.com" imbes na "Juan Dela Cruz"). Ngayon, kapag
-    gumagawa ng owner o staff account, kasama na ang tunay na pangalan.
-    Nullable dahil sa mga EXISTING accounts na wala pang laman dito
-    (na-create bago idagdag ang column na ito) — kailangang mag-fallback
-    sa email sa mga lugar na gumagamit nito.
+    Added full_name. Dating wala nito kahit meron nang full_name field
+    ang StaffCreate schema — hindi pa ito naisa-save kahit saan, kaya
+    laging email lang ang lumalabas sa Activity Log bilang actor (hal.
+    "juan@gmail.com" imbes na "Juan Dela Cruz"). Ngayon, kapag gumagawa
+    ng owner o staff account, kasama na ang tunay na pangalan. Nullable
+    dahil sa mga EXISTING accounts na wala pang laman dito (na-create
+    bago idagdag ang column na ito) — kailangang mag-fallback sa email
+    sa mga lugar na gumagamit nito.
     """
     __tablename__ = "users"
 
@@ -314,6 +314,14 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customer service requests to hardware units.
+
+    UPDATED: Added customer_id + source to support bookings self-created
+    by a mobile-app customer (as opposed to staff-created bookings from
+    the Service Terminal). A customer-sourced booking starts life with
+    status "Awaiting Approval" instead of "Pending"/"In Progress" — it
+    must be explicitly Accepted (→ "Pending", enters the normal flow) or
+    Declined (→ "Declined", stays out of the Service Terminal but is kept
+    for history) by the shop before it behaves like any other booking.
     """
     __tablename__ = "bookings"
 
@@ -334,6 +342,16 @@ class Booking(Base):
     washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+
+    # NEW — nag-uugnay sa Customer (mobile app user) kung sino ang
+    # gumawa ng booking na ito. Nullable dahil ang mga bookings na
+    # ginawa via Service Terminal (staff/manual) ay walang customer.
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
+
+    # NEW — "terminal" (staff-created, default) o "mobile" (customer
+    # self-booked via app). Ginagamit para malaman kung saan galing
+    # ang booking nang hindi na kailangang mag-infer mula sa customer_id.
+    source = Column(String, default="terminal", nullable=False)
     
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -341,6 +359,7 @@ class Booking(Base):
     shop = relationship("Shop", back_populates="bookings")
     washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
     dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
+    customer = relationship("Customer", foreign_keys=[customer_id])
     inventory_usages = relationship(
         "BookingInventoryUsage",
         back_populates="booking",
@@ -365,6 +384,8 @@ class Booking(Base):
             "add_delivery": self.add_delivery,
             "washer_id": self.washer_id,
             "dryer_id": self.dryer_id,
+            "customer_id": self.customer_id,
+            "source": self.source,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,

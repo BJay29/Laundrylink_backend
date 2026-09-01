@@ -1,6 +1,7 @@
 from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage
-from app.schemas import BookingCreate, BookingAssignMachine
+from app.schemas import BookingCreate, BookingAssignMachine, CustomerBookingCreate
 from app.services.prediction_service import PredictionService
+from app.services.ws_manager import manager
 from app.controller import inventory_controller
 from app.controller.activity_controller import log_activity
 from app import models
@@ -98,6 +99,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
+        source="terminal",
         booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)
     )
@@ -208,6 +210,11 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id, for the same attribution reason as create_booking().
+
+    NOTE: works the same for "Pending" bookings regardless of source
+    (terminal or customer-accepted-from-mobile) — once a customer
+    booking is Accepted, it becomes an ordinary "Pending" booking and
+    can be assigned a machine exactly like any other.
     """
     shop_id = current_user.shop_id
 
@@ -351,6 +358,12 @@ def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized tasks for the Terminal UI.
 
+    UPDATED: also excludes "Awaiting Approval" and "Declined" — these
+    are shown only in the separate approval panel (get_awaiting_approval_
+    bookings below), not mixed into the normal Service Terminal list.
+    An "Awaiting Approval" booking only appears here once it has been
+    Accepted (status becomes "Pending", same as any manual booking).
+
     NOTE: hindi ito ginagalaw ng Activity Log — read-only na operation
     ito (walang binabago), kaya walang kailangang i-log dito. Pinanatili
     ang shop_id-only signature (hindi current_user) dahil hindi ito
@@ -365,7 +378,7 @@ def get_active_bookings(db: Session, shop_id: int):
         )
         .filter(
             Booking.shop_id == shop_id,
-            Booking.status.notin_(["Claimed", "Cancelled"])
+            Booking.status.notin_(["Claimed", "Cancelled", "Awaiting Approval", "Declined"])
         )
         .order_by(Booking.booking_timestamp.desc())
         .all()
@@ -444,4 +457,227 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Status Lifecycle Error: {str(e)}"
+        )
+
+
+# =========================================================
+# CUSTOMER (MOBILE APP) BOOKING FUNCTIONS — NEW
+# =========================================================
+
+def _map_quantity_to_booking_fields(pricing_unit: str, quantity: float) -> dict:
+    """
+    Ang Booking table ay may weight/loads columns, hindi generic na
+    "quantity" — dahil pareho itong ginagamit ng existing Booking Modal
+    (web) sa halip na baguhin ang schema ng buong table, ito na lang ang
+    i-map papunta sa tamang column base sa pricing_unit ng service:
+      - "kg"    → weight = quantity, loads = 1
+      - "load"  → loads = quantity, weight = 0.0 (hindi applicable)
+      - "piece" → loads = quantity, weight = 0.0 (hindi applicable)
+    """
+    if pricing_unit == "kg":
+        return {"weight": quantity, "loads": 1}
+    return {"weight": 0.0, "loads": int(quantity)}
+
+
+async def create_customer_booking(db: Session, customer: models.Customer, booking_data: CustomerBookingCreate):
+    """
+    Creates a booking INITIATED BY THE CUSTOMER via the mobile app.
+    Unlike create_booking() (Service Terminal / staff), hindi agad ito
+    "Pending" — nagsisimula ito sa status "Awaiting Approval" at
+    kailangang tanggapin (Accept) o tanggihan (Decline) ng shop bago ito
+    pumasok sa normal na Service Terminal flow.
+
+    Broadcasts a real-time WebSocket notification to the shop's connected
+    Service Terminal instance(s) after a successful commit.
+    """
+    shop = db.query(models.Shop).filter(models.Shop.id == booking_data.shop_id).first()
+    if not shop or not shop.is_published:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Shop not found."
+        )
+
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == booking_data.shop_id,
+            ServiceType.name == booking_data.service_type,
+            ServiceType.is_active == True
+        )
+        .first()
+    )
+    if not service_type_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Service type '{booking_data.service_type}' is not available at this shop."
+        )
+
+    mapped_fields = _map_quantity_to_booking_fields(
+        service_type_record.pricing_unit, booking_data.quantity
+    )
+
+    # Minimum weight check applies only to per-kg services — per-load
+    # and per-piece services don't use the weight field meaningfully.
+    if service_type_record.pricing_unit == "kg":
+        settings = db.query(Setting).filter(Setting.shop_id == booking_data.shop_id).first()
+        minimum_weight = (settings.minimum_weight_kg if settings else None) or 6.0
+        if mapped_fields["weight"] < minimum_weight:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Minimum booking weight is {minimum_weight}kg. Please adjust the quantity."
+            )
+
+    total_price = round(service_type_record.price * booking_data.quantity, 2)
+
+    new_booking = Booking(
+        customer_name=customer.full_name,
+        service_type=booking_data.service_type,
+        category="Mobile App",
+        weight=mapped_fields["weight"],
+        loads=mapped_fields["loads"],
+        total_price=total_price,
+        booking_mode="customer",
+        status="Awaiting Approval",
+        shop_id=booking_data.shop_id,
+        customer_id=customer.id,
+        source="mobile",
+        booking_timestamp=datetime.now(timezone.utc),
+        created_at=datetime.now(timezone.utc)
+    )
+
+    try:
+        db.add(new_booking)
+        db.commit()
+        db.refresh(new_booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages)
+            )
+            .filter(Booking.id == new_booking.id)
+            .first()
+        )
+
+        # --- WEBSOCKET BROADCAST ---
+        # Tahimik lang ang epekto kung walang naka-connect na Service
+        # Terminal ngayon (walang error) — GET /bookings/awaiting-approval
+        # pa rin ang siguradong makikita ito sa susunod na refresh/load.
+        await manager.broadcast(booking_data.shop_id, {
+            "type": "new_booking_request",
+            "booking_id": reloaded.id,
+            "customer_name": reloaded.customer_name,
+            "service_type": reloaded.service_type,
+            "total_price": reloaded.total_price,
+            "quantity": booking_data.quantity,
+            "pricing_unit": service_type_record.pricing_unit,
+        })
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database Transactional Error: {str(e)}"
+        )
+
+
+def get_awaiting_approval_bookings(db: Session, shop_id: int):
+    """
+    Retrieves customer-submitted bookings still waiting for the shop's
+    Accept/Decline decision. Backs the notification panel on the web app.
+    NOTE: read-only, no Activity Log entry.
+    """
+    return (
+        db.query(Booking)
+        .filter(
+            Booking.shop_id == shop_id,
+            Booking.status == "Awaiting Approval"
+        )
+        .order_by(Booking.booking_timestamp.desc())
+        .all()
+    )
+
+
+def accept_customer_booking(db: Session, booking_id: int, current_user: models.User):
+    """
+    Accepts a customer-submitted booking — moves it from "Awaiting
+    Approval" to "Pending", at which point it behaves exactly like any
+    manually-created booking (appears in the Service Terminal, can be
+    assigned a machine via assign_machine_to_booking()).
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id,
+        Booking.status == "Awaiting Approval"
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking request not found or already handled."
+        )
+
+    booking.status = "Pending"
+
+    try:
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=f"Accepted mobile booking request from {booking.customer_name} - {booking.service_type}"
+        )
+        db.commit()
+        db.refresh(booking)
+        return booking
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error accepting booking: {str(e)}"
+        )
+
+
+def decline_customer_booking(db: Session, booking_id: int, current_user: models.User):
+    """
+    Declines a customer-submitted booking — moves it to "Declined".
+    Kept in the database (not deleted) so it stays visible in the
+    Activity Log/history, but it will never appear in the Service
+    Terminal's active bookings list (see get_active_bookings() filter).
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id,
+        Booking.status == "Awaiting Approval"
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking request not found or already handled."
+        )
+
+    booking.status = "Declined"
+
+    try:
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=f"Declined mobile booking request from {booking.customer_name} - {booking.service_type}"
+        )
+        db.commit()
+        db.refresh(booking)
+        return booking
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error declining booking: {str(e)}"
         )

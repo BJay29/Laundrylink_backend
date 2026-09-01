@@ -2,10 +2,13 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
-from app.schemas import BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine
+from app.schemas import (
+    BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine,
+    CustomerBookingCreate, BookingDecisionResponse
+)
 from app.controller import booking_controller
 from app import models
-from app.security import get_current_user
+from app.security import get_current_user, get_current_customer
 
 # Booking router — handles all laundry transaction lifecycle endpoints
 router = APIRouter(
@@ -33,8 +36,9 @@ def create_booking(
 
     The controller validates that booking_data.service_type matches an
     active ServiceType configured by this shop, and that the weight meets
-    the shop's configured minimum_weight_kg. Both walk-in (web) and
-    mobile app bookings go through this same validation.
+    the shop's configured minimum_weight_kg. This endpoint is for
+    Service Terminal (staff) bookings only — see POST /bookings/customer
+    for customer-initiated bookings from the mobile app.
     """
     return booking_controller.create_booking(db, booking_data, current_user)
 
@@ -47,6 +51,8 @@ def get_active_bookings(
     """
     Returns all non-finalized bookings for the Service Terminal.
     Includes both Pending (no machine assigned) and In Progress bookings.
+    Does NOT include "Awaiting Approval" bookings — see GET
+    /bookings/awaiting-approval for those.
 
     shop_id no longer comes from a query parameter — it is derived from
     the logged-in user's JWT, so a user can never query another shop's
@@ -106,3 +112,65 @@ def assign_machine(
     return booking_controller.assign_machine_to_booking(
         db, booking_id, assign_data, current_user
     )
+
+
+# =========================================================
+# CUSTOMER (MOBILE APP) BOOKING ENDPOINTS — NEW
+# =========================================================
+
+@router.post("/customer", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
+async def create_customer_booking(
+    booking_data: CustomerBookingCreate,
+    current_customer: models.Customer = Depends(get_current_customer),  # ⬅️ galing sa customer JWT
+    db: Session = Depends(get_db)
+):
+    """
+    Creates a booking initiated by a customer via the mobile app.
+    Starts as status "Awaiting Approval" — the shop must Accept or
+    Decline it (see the two endpoints below) before it behaves like a
+    normal Service Terminal booking. Broadcasts a real-time WebSocket
+    notification to the shop's connected Service Terminal on success.
+    """
+    return await booking_controller.create_customer_booking(db, current_customer, booking_data)
+
+
+@router.get("/awaiting-approval", response_model=List[BookingResponse])
+def get_awaiting_approval_bookings(
+    current_user: models.User = Depends(get_current_user),  # ⬅️ galing sa JWT
+    db: Session = Depends(get_db)
+):
+    """
+    Returns customer-submitted bookings still awaiting Accept/Decline.
+    Backs the notification panel on the Service Terminal — used both
+    for the initial page load AND as a fallback if the WebSocket
+    connection was ever missed/dropped (poll-on-demand, e.g. on refresh).
+    """
+    return booking_controller.get_awaiting_approval_bookings(db, current_user.shop_id)
+
+
+@router.patch("/{booking_id}/accept", response_model=BookingResponse)
+def accept_customer_booking(
+    booking_id: int,
+    current_user: models.User = Depends(get_current_user),  # ⬅️ galing sa JWT
+    db: Session = Depends(get_db)
+):
+    """
+    Accepts a customer-submitted booking request — moves it from
+    "Awaiting Approval" to "Pending", after which it appears in the
+    normal Service Terminal list and can be assigned a machine.
+    """
+    return booking_controller.accept_customer_booking(db, booking_id, current_user)
+
+
+@router.patch("/{booking_id}/decline", response_model=BookingResponse)
+def decline_customer_booking(
+    booking_id: int,
+    current_user: models.User = Depends(get_current_user),  # ⬅️ galing sa JWT
+    db: Session = Depends(get_db)
+):
+    """
+    Declines a customer-submitted booking request — moves it to
+    "Declined". Stays in the database for history but never appears in
+    the Service Terminal's active bookings list.
+    """
+    return booking_controller.decline_customer_booking(db, booking_id, current_user)
