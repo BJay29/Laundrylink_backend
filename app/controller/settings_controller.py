@@ -645,3 +645,10 @@ def update_user_password(db: Session, user_id: int, password_data: schemas.Passw
     db_user.hashed_password = pwd_context.hash(password_data.new_password)
     db.commit()
     return {"message": "Password updated successfully"}
+def get_shop_profile(db: Session, shop_id: int):
+    """
+    Retrieves the shop's own profile info (name, address, delivery
+    settings) for display before editing. NOTE: read-only, no
+    Activity Log entry.
+    """
+    return db.query(models.Shop).filter(models.Shop.id == shop_id).first()

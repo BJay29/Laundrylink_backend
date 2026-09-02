@@ -206,7 +206,16 @@ def update_shop_profile(
         raise HTTPException(status_code=404, detail="Shop not found")
     return updated_shop
 
-
+@router.get("/profile", response_model=schemas.ShopProfileResponse)
+def get_shop_profile(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Fetch the logged-in user's own shop profile, including delivery settings."""
+    shop = settings_controller.get_shop_profile(db, current_user.shop_id)
+    if not shop:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    return shop
 @router.put("/password")
 def update_password(
     password_update: schemas.PasswordUpdate,
@@ -225,3 +234,5 @@ def update_password(
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+    
