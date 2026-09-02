@@ -466,7 +466,15 @@ class Booking(Base):
     # na halaga dahil dito.
     promo_code = Column(String, nullable=True)
     discount_amount = Column(Float, default=0.0)
-    
+
+    # NEW — dahilan ng pag-decline ng shop sa isang mobile booking request
+    # (hal. "Fully booked", "Closed for the day", o custom text). Null
+    # maliban kung "Declined" ang status. Makikita ito ng customer sa
+    # mobile app (History/Notifications) para malaman kung bakit hindi
+    # natuloy ang kanilang booking, sa halip na basta na lang "Declined"
+    # na walang paliwanag.
+    decline_reason = Column(String, nullable=True)
+
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -514,6 +522,7 @@ class Booking(Base):
             "delivery_fee_charged": self.delivery_fee_charged,
             "promo_code": self.promo_code,
             "discount_amount": self.discount_amount,
+            "decline_reason": self.decline_reason,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,

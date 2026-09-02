@@ -4,7 +4,7 @@ from typing import List
 from app.database import get_db
 from app.schemas import (
     BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine,
-    CustomerBookingCreate, BookingDecisionResponse
+    CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest
 )
 from app.controller import booking_controller
 from app import models
@@ -115,7 +115,7 @@ def assign_machine(
 
 
 # =========================================================
-# CUSTOMER (MOBILE APP) BOOKING ENDPOINTS — NEW
+# CUSTOMER (MOBILE APP) BOOKING ENDPOINTS
 # =========================================================
 
 @router.post("/customer", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
@@ -165,6 +165,7 @@ def accept_customer_booking(
 @router.patch("/{booking_id}/decline", response_model=BookingResponse)
 def decline_customer_booking(
     booking_id: int,
+    decline_data: BookingDeclineRequest,
     current_user: models.User = Depends(get_current_user),  # ⬅️ galing sa JWT
     db: Session = Depends(get_db)
 ):
@@ -172,5 +173,13 @@ def decline_customer_booking(
     Declines a customer-submitted booking request — moves it to
     "Declined". Stays in the database for history but never appears in
     the Service Terminal's active bookings list.
+
+    UPDATED: now requires a JSON body with a `reason` (see
+    BookingDeclineRequest) — the Service Terminal offers quick presets
+    ("Fully booked", "Closed for the day", "Service unavailable") plus a
+    free-text option. The reason is saved onto the booking so the
+    customer can see it on their end.
     """
-    return booking_controller.decline_customer_booking(db, booking_id, current_user)
+    return booking_controller.decline_customer_booking(
+        db, booking_id, decline_data.reason, current_user
+    )

@@ -189,6 +189,35 @@ def remove_service_type(
 
 # --- PROFILE & PASSWORD ROUTES ---
 
+@router.get("/profile", response_model=schemas.ShopProfileResponse)
+def get_shop_profile(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Fetch the logged-in user's own shop profile, including delivery
+    settings.
+
+    FIXED: the Shop model has no `email` column — the login email
+    belongs to the User (Owner/Staff) record, not the Shop. Previously
+    this endpoint returned the raw `shop` ORM object directly, which
+    made FastAPI/Pydantic try to read `.email` off of it and fail with
+    a 500 ("Field required: email") since Shop simply doesn't have that
+    attribute. We now build the ShopProfileResponse explicitly and pull
+    email from current_user instead.
+    """
+    shop = settings_controller.get_shop_profile(db, current_user.shop_id)
+    if not shop:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    return schemas.ShopProfileResponse(
+        shop_name=shop.shop_name,
+        address=shop.address or "",
+        email=current_user.email,
+        has_delivery=shop.has_delivery,
+        delivery_fee=shop.delivery_fee,
+    )
+
+
 @router.put("/profile", response_model=schemas.ShopProfileResponse)
 def update_shop_profile(
     profile_update: schemas.ShopProfileUpdate,
@@ -196,7 +225,13 @@ def update_shop_profile(
     db: Session = Depends(get_db)
 ):
     """
-    Update the logged-in user's own shop name, address, and contact email.
+    Update the logged-in user's own shop name, address, and delivery
+    settings.
+
+    NOTE: email is intentionally NOT part of this update — it's the
+    User's own login email, not a Shop field, and is not editable from
+    here (see ShopProfileUpdate in schemas.py). The response still
+    includes current_user.email so the frontend has it to display.
 
     UPDATED: settings_controller.update_shop_profile() now takes
     current_user (not shop_id) for Activity Log attribution.
@@ -204,18 +239,15 @@ def update_shop_profile(
     updated_shop = settings_controller.update_shop_profile(db, current_user, profile_update)
     if not updated_shop:
         raise HTTPException(status_code=404, detail="Shop not found")
-    return updated_shop
+    return schemas.ShopProfileResponse(
+        shop_name=updated_shop.shop_name,
+        address=updated_shop.address or "",
+        email=current_user.email,
+        has_delivery=updated_shop.has_delivery,
+        delivery_fee=updated_shop.delivery_fee,
+    )
 
-@router.get("/profile", response_model=schemas.ShopProfileResponse)
-def get_shop_profile(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Fetch the logged-in user's own shop profile, including delivery settings."""
-    shop = settings_controller.get_shop_profile(db, current_user.shop_id)
-    if not shop:
-        raise HTTPException(status_code=404, detail="Shop not found")
-    return shop
+
 @router.put("/password")
 def update_password(
     password_update: schemas.PasswordUpdate,
@@ -234,5 +266,3 @@ def update_password(
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
-
-    

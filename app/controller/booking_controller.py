@@ -798,12 +798,20 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
         )
 
 
-def decline_customer_booking(db: Session, booking_id: int, current_user: models.User):
+def decline_customer_booking(db: Session, booking_id: int, reason: str, current_user: models.User):
     """
     Declines a customer-submitted booking — moves it to "Declined".
     Kept in the database (not deleted) so it stays visible in the
     Activity Log/history, but it will never appear in the Service
     Terminal's active bookings list (see get_active_bookings() filter).
+
+    NEW: now REQUIRES a `reason` (see BookingDeclineRequest validator —
+    the empty-string case never reaches here). Saved onto
+    Booking.decline_reason so the customer can see WHY their request was
+    declined (e.g. "Fully booked") the next time they check the booking
+    in the mobile app, instead of just seeing a bare "Declined" status.
+    Also folded into the Activity Log description for the shop's own
+    history/accountability.
     """
     shop_id = current_user.shop_id
 
@@ -820,13 +828,17 @@ def decline_customer_booking(db: Session, booking_id: int, current_user: models.
         )
 
     booking.status = "Declined"
+    booking.decline_reason = reason
 
     try:
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
-            description=f"Declined mobile booking request from {booking.customer_name} - {booking.service_type}"
+            description=(
+                f"Declined mobile booking request from {booking.customer_name} "
+                f"- {booking.service_type} (Reason: {reason})"
+            )
         )
         db.commit()
         db.refresh(booking)

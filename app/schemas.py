@@ -652,6 +652,29 @@ class BookingStatusUpdate(BaseModel):
     """Transitions a booking through lifecycle states."""
     status: str
 
+
+class BookingDeclineRequest(BaseModel):
+    """
+    Schema for declining a customer-submitted booking request. `reason`
+    is free text so the Service Terminal can offer quick preset options
+    ("Fully booked", "Closed for the day", "Service unavailable") that
+    just populate this field, while still allowing a custom explanation
+    for anything the presets don't cover. Required (not optional) — a
+    decline should always come with a reason the customer can see,
+    rather than silently disappearing from their end.
+    """
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("A decline reason is required.")
+        if len(cleaned) > 300:
+            raise ValueError("Decline reason must be 300 characters or fewer.")
+        return cleaned
+
 class BookingResponse(BaseModel):
     """Detailed transaction response for the Service Terminal UI."""
     id: int
@@ -685,6 +708,9 @@ class BookingResponse(BaseModel):
     delivery_fee_charged: Optional[float] = 0.0
     promo_code: Optional[str] = None
     discount_amount: Optional[float] = 0.0
+
+    # NEW — dahilan kung bakit na-decline (null maliban kung "Declined").
+    decline_reason: Optional[str] = None
 
     # Listahan ng lahat ng items/add-ons na ginamit sa booking na ito.
     inventory_items_used: List[BookingInventoryUsageResponse] = []
