@@ -24,6 +24,24 @@ class Shop(Base):
     # registered shops sa listahan.
     is_published = Column(Boolean, default=True, nullable=False)
 
+    # NEW — kung meron bang delivery service ang shop, at magkano ang
+    # bayad kung meron. Kontrolado ng shop owner sa Optimization Settings.
+    has_delivery = Column(Boolean, default=False, nullable=False)
+    delivery_fee = Column(Float, default=0.0, nullable=False)
+
+    # NEW — real-time na "online" status ng shop, ibinabase sa kung may
+    # aktibong WebSocket connection ba ang Service Terminal nito
+    # (see app/services/ws_manager.py). True kapag may kahit isang
+    # naka-bukas na Service Terminal tab/device; False kapag naubos na
+    # ang lahat ng connections. Ginagamit ng mobile app para i-disable
+    # ang "Book Now" button at magpakita ng "Currently Closed" label
+    # kapag walang tumatanggap ng booking sa kasalukuyan.
+    #
+    # server_default="false" (bukod sa Python-side default=False) para
+    # sigurong may valid na value ang EXISTING rows pagkatapos ng
+    # migration (ALTER TABLE ... ADD COLUMN), hindi lang bagong rows.
+    is_online = Column(Boolean, default=False, nullable=False, server_default="false")
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
@@ -32,6 +50,9 @@ class Shop(Base):
     inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
     service_types = relationship("ServiceType", back_populates="shop", cascade="all, delete-orphan")
+    # NEW — per-shop add-ons and promo codes.
+    add_ons = relationship("AddOn", back_populates="shop", cascade="all, delete-orphan")
+    promo_codes = relationship("PromoCode", back_populates="shop", cascade="all, delete-orphan")
     # Activity trail for this shop; each entry attributes an action
     # to a specific User (via actor_name/actor_role snapshot, see below).
     activity_logs = relationship("ActivityLog", back_populates="shop", cascade="all, delete-orphan")
@@ -44,6 +65,9 @@ class Shop(Base):
             "latitude": self.latitude,
             "longitude": self.longitude,
             "is_published": self.is_published,
+            "has_delivery": self.has_delivery,
+            "delivery_fee": self.delivery_fee,
+            "is_online": self.is_online,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
@@ -158,6 +182,67 @@ class ServiceType(Base):
             "is_active": self.is_active,
             "duration_minutes": self.duration_minutes,
             "pricing_unit": self.pricing_unit,
+            "shop_id": self.shop_id
+        }
+
+class AddOn(Base):
+    """
+    NEW — Per-shop na listahan ng optional add-ons (fabric softener
+    upgrade, rush service, atbp.) na pwedeng idagdag ng customer sa
+    isang booking. Kagaya ng ServiceType, shop-defined ito — nagsisimula
+    sa ZERO add-ons ang bawat bagong shop.
+    """
+    __tablename__ = "add_ons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    price = Column(Float, nullable=False, default=0.0)
+    is_active = Column(Boolean, default=True)
+
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="add_ons")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "price": self.price,
+            "is_active": self.is_active,
+            "shop_id": self.shop_id
+        }
+
+
+class PromoCode(Base):
+    """
+    NEW — Per-shop na promo/discount codes. discount_type ay "percent"
+    (hal. 10 = 10% off) o "fixed" (hal. 50 = ₱50 off). max_uses ay
+    optional na limit sa dami ng beses magagamit ito (null = walang
+    limit); times_used ay nagta-track kung ilang beses nagamit na.
+    """
+    __tablename__ = "promo_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String, nullable=False, index=True)
+    discount_type = Column(String, nullable=False, default="percent")  # "percent" o "fixed"
+    discount_value = Column(Float, nullable=False, default=0.0)
+    is_active = Column(Boolean, default=True)
+    max_uses = Column(Integer, nullable=True)
+    times_used = Column(Integer, default=0)
+    expires_at = Column(DateTime, nullable=True)
+
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    shop = relationship("Shop", back_populates="promo_codes")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "code": self.code,
+            "discount_type": self.discount_type,
+            "discount_value": self.discount_value,
+            "is_active": self.is_active,
+            "max_uses": self.max_uses,
+            "times_used": self.times_used,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "shop_id": self.shop_id
         }
 
@@ -322,6 +407,11 @@ class Booking(Base):
     must be explicitly Accepted (→ "Pending", enters the normal flow) or
     Declined (→ "Declined", stays out of the Service Terminal but is kept
     for history) by the shop before it behaves like any other booking.
+
+    UPDATED: Added special_instructions, fulfillment_mode, pickup_datetime,
+    delivery_datetime, delivery_fee_charged, promo_code, discount_amount —
+    all customer-facing booking details captured by the mobile app's
+    booking flow (drop-off vs. delivery, scheduling, discounts).
     """
     __tablename__ = "bookings"
 
@@ -343,15 +433,39 @@ class Booking(Base):
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
 
-    # NEW — nag-uugnay sa Customer (mobile app user) kung sino ang
-    # gumawa ng booking na ito. Nullable dahil ang mga bookings na
-    # ginawa via Service Terminal (staff/manual) ay walang customer.
+    # nag-uugnay sa Customer (mobile app user) kung sino ang gumawa ng
+    # booking na ito. Nullable dahil ang mga bookings na ginawa via
+    # Service Terminal (staff/manual) ay walang customer.
     customer_id = Column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
 
-    # NEW — "terminal" (staff-created, default) o "mobile" (customer
+    # "terminal" (staff-created, default) o "mobile" (customer
     # self-booked via app). Ginagamit para malaman kung saan galing
     # ang booking nang hindi na kailangang mag-infer mula sa customer_id.
     source = Column(String, default="terminal", nullable=False)
+
+    # NEW — libreng text note mula sa customer (hal. "huwag i-bleach").
+    special_instructions = Column(String, nullable=True)
+
+    # NEW — "dropoff" (customer mismo magdadala/kukuha sa shop) o
+    # "delivery" (may rider ang shop na kukuha/maghahatid).
+    fulfillment_mode = Column(String, default="dropoff", nullable=False)
+
+    # NEW — kailan kukunin ng rider ang maruming labada (delivery mode
+    # lang ito, null kung dropoff).
+    pickup_datetime = Column(DateTime(timezone=True), nullable=True)
+
+    # NEW — inaasahang oras ng paghahatid pabalik ng malinis na labada
+    # (delivery mode lang ito, null kung dropoff).
+    delivery_datetime = Column(DateTime(timezone=True), nullable=True)
+
+    # NEW — snapshot ng delivery fee noong oras ng booking (hindi 'yung
+    # current Shop.delivery_fee — baka magbago pa 'yun mamaya).
+    delivery_fee_charged = Column(Float, default=0.0)
+
+    # NEW — snapshot ng promo code ginamit (kung meron) at ang nabawas
+    # na halaga dahil dito.
+    promo_code = Column(String, nullable=True)
+    discount_amount = Column(Float, default=0.0)
     
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -362,6 +476,13 @@ class Booking(Base):
     customer = relationship("Customer", foreign_keys=[customer_id])
     inventory_usages = relationship(
         "BookingInventoryUsage",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+        lazy="joined"
+    )
+    # NEW — add-ons na ginamit sa booking na ito.
+    add_ons_used = relationship(
+        "BookingAddOnUsage",
         back_populates="booking",
         cascade="all, delete-orphan",
         lazy="joined"
@@ -386,12 +507,46 @@ class Booking(Base):
             "dryer_id": self.dryer_id,
             "customer_id": self.customer_id,
             "source": self.source,
+            "special_instructions": self.special_instructions,
+            "fulfillment_mode": self.fulfillment_mode,
+            "pickup_datetime": self.pickup_datetime.isoformat() if self.pickup_datetime else None,
+            "delivery_datetime": self.delivery_datetime.isoformat() if self.delivery_datetime else None,
+            "delivery_fee_charged": self.delivery_fee_charged,
+            "promo_code": self.promo_code,
+            "discount_amount": self.discount_amount,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
+            "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
             "shop_id": self.shop_id,
             "booking_timestamp": self.booking_timestamp.isoformat() if self.booking_timestamp else None,
             "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+class BookingAddOnUsage(Base):
+    """
+    NEW — Junction table: anong add-ons ginamit sa isang booking.
+    price_at_booking ay snapshot ng presyo noong oras ng booking, hindi
+    'yung current AddOn.price — para hindi magbago ang dating booking
+    kahit baguhin pa ng shop ang presyo mamaya (parehong pattern gaya
+    ng BookingInventoryUsage sa itaas).
+    """
+    __tablename__ = "booking_addon_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False)
+    add_on_id = Column(Integer, ForeignKey("add_ons.id"), nullable=False)
+    price_at_booking = Column(Float, nullable=False)
+
+    booking = relationship("Booking", back_populates="add_ons_used")
+    add_on = relationship("AddOn")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "add_on_id": self.add_on_id,
+            "add_on_name": self.add_on.name if self.add_on else None,
+            "price_at_booking": self.price_at_booking,
         }
 
 class ActivityLog(Base):

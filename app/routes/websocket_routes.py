@@ -16,6 +16,12 @@ async def notifications_websocket(websocket: WebSocket, token: str = Query(...))
     header ang browser's native WebSocket API — ito ang standard
     workaround. Same JWT lang gamit dito (galing sa parehong login),
     kaya walang bagong auth mechanism na kailangang i-maintain.
+
+    NOTE: Ang connect()/disconnect() calls dito (papunta sa
+    ws_manager.manager) ang siya ring nag-a-update sa Shop.is_online —
+    walang dagdag na logic na kailangan dito sa route mismo. Kapag
+    nag-open ng Service Terminal tab ang isang shop, "online" agad ito;
+    kapag na-close/na-disconnect ang lahat ng tabs, "offline" agad.
     """
     try:
         payload = decode_access_token(token)

@@ -1,4 +1,4 @@
-from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage
+from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage
 from app.schemas import BookingCreate, BookingAssignMachine, CustomerBookingCreate
 from app.services.prediction_service import PredictionService
 from app.services.ws_manager import manager
@@ -26,6 +26,13 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     shop_id, so the action can be attributed to whoever actually
     performed it (current_user.full_name or current_user.email /
     current_user.role) instead of just knowing which shop it happened in.
+
+    NOTE: no is_online gate here — this is a staff-created booking from
+    the Service Terminal itself, i.e. the terminal is, by definition,
+    open and connected while this runs. The is_online safety net only
+    applies to create_customer_booking() below (mobile app self-booking),
+    where the customer's device has no way to know the terminal's live
+    connection state on its own.
     """
     shop_id = current_user.shop_id
 
@@ -185,7 +192,8 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
             .options(
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
-                joinedload(Booking.inventory_usages)
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used)
             )
             .filter(Booking.id == new_booking.id)
             .first()
@@ -341,7 +349,8 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             .options(
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
-                joinedload(Booking.inventory_usages)
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used)
             )
             .filter(Booking.id == booking_id)
             .first()
@@ -374,7 +383,8 @@ def get_active_bookings(db: Session, shop_id: int):
         .options(
             joinedload(Booking.washer),
             joinedload(Booking.dryer),
-            joinedload(Booking.inventory_usages)
+            joinedload(Booking.inventory_usages),
+            joinedload(Booking.add_ons_used)
         )
         .filter(
             Booking.shop_id == shop_id,
@@ -447,7 +457,8 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
             .options(
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
-                joinedload(Booking.inventory_usages)
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used)
             )
             .filter(Booking.id == booking_id)
             .first()
@@ -461,7 +472,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
 
 
 # =========================================================
-# CUSTOMER (MOBILE APP) BOOKING FUNCTIONS — NEW
+# CUSTOMER (MOBILE APP) BOOKING FUNCTIONS
 # =========================================================
 
 def _map_quantity_to_booking_fields(pricing_unit: str, quantity: float) -> dict:
@@ -479,6 +490,54 @@ def _map_quantity_to_booking_fields(pricing_unit: str, quantity: float) -> dict:
     return {"weight": 0.0, "loads": int(quantity)}
 
 
+def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> tuple:
+    """
+    Nagva-validate ng promo code (active, not expired, may natitirang
+    uses) at nagko-compute ng discount base sa subtotal. Kung invalid
+    ang code (mali, expired, ubos na ang uses), raise HTTPException
+    kaagad — hindi ito basta na lang ini-ignore, dahil ipinasok mismo
+    ng customer ang code na 'to, dapat malaman nila kung bakit hindi
+    gumana.
+
+    Returns (promo_record, discount_amount) — 'yung promo_record ang
+    ipapasa pabalik para ma-increment ang times_used pagkatapos
+    ma-confirm na successful ang buong booking transaction.
+    """
+    promo = (
+        db.query(PromoCode)
+        .filter(
+            PromoCode.shop_id == shop_id,
+            PromoCode.code == code.strip().upper(),
+            PromoCode.is_active == True
+        )
+        .first()
+    )
+    if not promo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Promo code '{code}' is invalid or no longer active."
+        )
+    if promo.expires_at and promo.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Promo code '{code}' has expired."
+        )
+    if promo.max_uses is not None and promo.times_used >= promo.max_uses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Promo code '{code}' has reached its usage limit."
+        )
+
+    if promo.discount_type == "percent":
+        discount = subtotal * (promo.discount_value / 100)
+    else:
+        discount = promo.discount_value
+
+    # Hindi pwedeng lumagpas sa subtotal ang discount (walang negative total).
+    discount = min(discount, subtotal)
+    return promo, round(discount, 2)
+
+
 async def create_customer_booking(db: Session, customer: models.Customer, booking_data: CustomerBookingCreate):
     """
     Creates a booking INITIATED BY THE CUSTOMER via the mobile app.
@@ -486,6 +545,29 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
     "Pending" — nagsisimula ito sa status "Awaiting Approval" at
     kailangang tanggapin (Accept) o tanggihan (Decline) ng shop bago ito
     pumasok sa normal na Service Terminal flow.
+
+    UPDATED: pinoproseso na rin ang fulfillment_mode (dropoff/delivery),
+    add-ons, at promo code:
+      1. base_price = service.price × quantity
+      2. + add-ons total (mula sa add_on_ids, kada isa naka-validate na
+         kabilang sa parehong shop at is_active)
+      3. + delivery_fee (kung fulfillment_mode == "delivery", kinukuha
+         mula sa Shop.delivery_fee; error kung ang shop pala ay
+         Shop.has_delivery == False)
+      4. − discount (kung may promo_code, naka-validate sa
+         _apply_promo_code())
+    Ang resultang total_price ang siyang naka-save sa Booking.
+
+    NEW (safety net): bago pa man tingnan ang service catalog, sinusuri
+    muna kung shop.is_online — ibig sabihin, may naka-buk as na Service
+    Terminal ba ang shop na ito ngayon (see Shop.is_online sa models.py,
+    na-update ng ws_manager.py sa connect()/disconnect()). Kung offline
+    ang shop, walang talagang tatanggap/makakapag-accept ng booking na
+    ito kahit ma-create pa ito, kaya sinasarhan na natin ito dito bago pa
+    man mag-deduct ng anuman. Ito ang "totoong" hadlang — ang UI-level
+    check (disabled na "Book Now" button sa mobile app) ay convenience
+    lang, hindi ito dapat pag-asahan bilang tanging proteksyon, dahil
+    puwede pa ring i-bypass ang UI (direktang API call, atbp.).
 
     Broadcasts a real-time WebSocket notification to the shop's connected
     Service Terminal instance(s) after a successful commit.
@@ -495,6 +577,14 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Shop not found."
+        )
+
+    # --- SAFETY NET: block bookings while the shop has no live Service
+    # Terminal connection, regardless of what the client-side UI shows. ---
+    if not shop.is_online:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This shop is currently closed and cannot accept new bookings. Please try again once the shop is open."
         )
 
     service_type_record = (
@@ -527,7 +617,49 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
                 detail=f"Minimum booking weight is {minimum_weight}kg. Please adjust the quantity."
             )
 
-    total_price = round(service_type_record.price * booking_data.quantity, 2)
+    # --- DELIVERY MODE VALIDATION ---
+    delivery_fee_charged = 0.0
+    if booking_data.fulfillment_mode == "delivery":
+        if not shop.has_delivery:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This shop does not offer delivery. Please choose drop-off instead."
+            )
+        delivery_fee_charged = shop.delivery_fee
+
+    # --- ADD-ONS VALIDATION + PRICING ---
+    validated_add_ons = []  # list of (AddOn, price_at_booking)
+    add_ons_total = 0.0
+    for add_on_id in booking_data.add_on_ids:
+        add_on = (
+            db.query(AddOn)
+            .filter(
+                AddOn.id == add_on_id,
+                AddOn.shop_id == booking_data.shop_id,
+                AddOn.is_active == True
+            )
+            .first()
+        )
+        if not add_on:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Add-on ID {add_on_id} is not available at this shop."
+            )
+        validated_add_ons.append((add_on, add_on.price))
+        add_ons_total += add_on.price
+
+    # --- PRICE COMPUTATION ---
+    base_price = round(service_type_record.price * booking_data.quantity, 2)
+    subtotal = round(base_price + add_ons_total + delivery_fee_charged, 2)
+
+    promo_record = None
+    discount_amount = 0.0
+    if booking_data.promo_code:
+        promo_record, discount_amount = _apply_promo_code(
+            db, booking_data.shop_id, booking_data.promo_code, subtotal
+        )
+
+    total_price = round(subtotal - discount_amount, 2)
 
     new_booking = Booking(
         customer_name=customer.full_name,
@@ -541,12 +673,30 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         shop_id=booking_data.shop_id,
         customer_id=customer.id,
         source="mobile",
+        special_instructions=booking_data.special_instructions,
+        fulfillment_mode=booking_data.fulfillment_mode,
+        pickup_datetime=booking_data.pickup_datetime,
+        delivery_fee_charged=delivery_fee_charged,
+        promo_code=promo_record.code if promo_record else None,
+        discount_amount=discount_amount,
         booking_timestamp=datetime.now(timezone.utc),
         created_at=datetime.now(timezone.utc)
     )
 
     try:
         db.add(new_booking)
+        db.flush()  # kailangan para makuha ang new_booking.id bago mag-commit
+
+        for add_on, price_at_booking in validated_add_ons:
+            db.add(BookingAddOnUsage(
+                booking_id=new_booking.id,
+                add_on_id=add_on.id,
+                price_at_booking=price_at_booking
+            ))
+
+        if promo_record:
+            promo_record.times_used += 1
+
         db.commit()
         db.refresh(new_booking)
 
@@ -555,7 +705,8 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             .options(
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
-                joinedload(Booking.inventory_usages)
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used)
             )
             .filter(Booking.id == new_booking.id)
             .first()
@@ -573,6 +724,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             "total_price": reloaded.total_price,
             "quantity": booking_data.quantity,
             "pricing_unit": service_type_record.pricing_unit,
+            "fulfillment_mode": reloaded.fulfillment_mode,
         })
 
         return reloaded
@@ -592,6 +744,10 @@ def get_awaiting_approval_bookings(db: Session, shop_id: int):
     """
     return (
         db.query(Booking)
+        .options(
+            joinedload(Booking.inventory_usages),
+            joinedload(Booking.add_ons_used)
+        )
         .filter(
             Booking.shop_id == shop_id,
             Booking.status == "Awaiting Approval"

@@ -37,9 +37,9 @@ class UserResponse(BaseModel):
     """
     Profile data returned after successful login or session validation.
 
-    Added full_name so the frontend can display/cache the logged-in
-    user's real name (e.g. for Activity Log attribution, greeting text,
-    etc.) instead of falling back to email everywhere.
+    UPDATED: Added full_name so the frontend can display/cache the
+    logged-in user's real name (e.g. for Activity Log attribution,
+    greeting text, etc.) instead of falling back to email everywhere.
     """
     email: str
     full_name: Optional[str] = None
@@ -246,6 +246,158 @@ class ServiceTypeResponse(ServiceTypeBase):
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
 
+# --- ADD-ON SCHEMAS (NEW) ---
+
+class AddOnBase(BaseModel):
+    """
+    Base schema for a shop-defined add-on (fabric softener upgrade, rush
+    service, atbp.) — kagaya ng ServiceType pattern, shop owner ang
+    gumagawa nito sa Optimization Settings.
+    """
+    name: str
+    price: float
+    is_active: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Add-on name cannot be empty.")
+        return cleaned
+
+    @field_validator("price")
+    @classmethod
+    def validate_price(cls, v):
+        if v < 0:
+            raise ValueError("Price cannot be negative.")
+        return v
+
+class AddOnCreate(AddOnBase):
+    """NOTE: shop_id kept for internal/compat use only — see ServiceTypeCreate note above."""
+    shop_id: int
+
+class AddOnUpdate(BaseModel):
+    """Schema for editing an existing add-on. All fields optional (partial update)."""
+    name: Optional[str] = None
+    price: Optional[float] = None
+    is_active: Optional[bool] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v):
+        if v is not None:
+            cleaned = v.strip()
+            if not cleaned:
+                raise ValueError("Add-on name cannot be empty.")
+            return cleaned
+        return v
+
+    @field_validator("price")
+    @classmethod
+    def validate_price(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("Price cannot be negative.")
+        return v
+
+class AddOnResponse(AddOnBase):
+    """Full response schema for the Optimization Settings page (owner-facing)."""
+    id: int
+    shop_id: int
+    model_config = ConfigDict(from_attributes=True)
+
+class AddOnPreview(BaseModel):
+    """Safe, public view ng isang add-on — para sa customer-facing mobile app."""
+    id: int
+    name: str
+    price: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+# --- PROMO CODE SCHEMAS (NEW) ---
+
+class PromoCodeBase(BaseModel):
+    """
+    Base schema for a shop-defined promo/discount code. discount_type ay
+    "percent" (10 = 10% off) o "fixed" (50 = ₱50 off). max_uses ay
+    optional na limit (null = walang limit).
+    """
+    code: str
+    discount_type: str = "percent"
+    discount_value: float
+    is_active: bool = True
+    max_uses: Optional[int] = None
+    expires_at: Optional[datetime] = None
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v):
+        cleaned = v.strip().upper()
+        if not cleaned:
+            raise ValueError("Promo code cannot be empty.")
+        return cleaned
+
+    @field_validator("discount_type")
+    @classmethod
+    def validate_discount_type(cls, v):
+        allowed = {"percent", "fixed"}
+        if v not in allowed:
+            raise ValueError(f"discount_type must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("discount_value")
+    @classmethod
+    def validate_discount_value(cls, v):
+        if v <= 0:
+            raise ValueError("discount_value must be greater than 0.")
+        return v
+
+class PromoCodeCreate(PromoCodeBase):
+    """NOTE: shop_id kept for internal/compat use only — see ServiceTypeCreate note above."""
+    shop_id: int
+
+class PromoCodeUpdate(BaseModel):
+    """Schema for editing an existing promo code. All fields optional (partial update)."""
+    code: Optional[str] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
+    is_active: Optional[bool] = None
+    max_uses: Optional[int] = None
+    expires_at: Optional[datetime] = None
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v):
+        if v is not None:
+            cleaned = v.strip().upper()
+            if not cleaned:
+                raise ValueError("Promo code cannot be empty.")
+            return cleaned
+        return v
+
+    @field_validator("discount_type")
+    @classmethod
+    def validate_discount_type(cls, v):
+        if v is not None:
+            allowed = {"percent", "fixed"}
+            if v not in allowed:
+                raise ValueError(f"discount_type must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("discount_value")
+    @classmethod
+    def validate_discount_value(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("discount_value must be greater than 0.")
+        return v
+
+class PromoCodeResponse(PromoCodeBase):
+    """Full response schema for the Optimization Settings page (owner-facing)."""
+    id: int
+    shop_id: int
+    times_used: int
+    model_config = ConfigDict(from_attributes=True)
+
 # --- SETTINGS SCHEMAS ---
 
 class SettingBase(BaseModel):
@@ -440,6 +592,17 @@ class BookingInventoryUsageResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+# --- BOOKING ADD-ON USAGE SCHEMAS (NEW) ---
+
+class BookingAddOnUsageResponse(BaseModel):
+    """Isang add-on na ginamit sa booking, para sa BookingResponse."""
+    id: int
+    add_on_id: int
+    add_on_name: Optional[str] = None
+    price_at_booking: float
+
+    model_config = ConfigDict(from_attributes=True)
+
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
@@ -508,13 +671,24 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # NEW — nagsasabi kung saan galing ang booking (mobile customer vs.
+    # Nagsasabi kung saan galing ang booking (mobile customer vs.
     # staff/Service Terminal) at kung sinong customer, kung meron.
     customer_id: Optional[int] = None
     source: Optional[str] = "terminal"
 
-    # Listahan ng lahat ng items na ginamit sa booking na ito.
+    # NEW — special instructions, delivery/dropoff scheduling, at
+    # pricing breakdown (delivery fee, promo discount).
+    special_instructions: Optional[str] = None
+    fulfillment_mode: Optional[str] = "dropoff"
+    pickup_datetime: Optional[datetime] = None
+    delivery_datetime: Optional[datetime] = None
+    delivery_fee_charged: Optional[float] = 0.0
+    promo_code: Optional[str] = None
+    discount_amount: Optional[float] = 0.0
+
+    # Listahan ng lahat ng items/add-ons na ginamit sa booking na ito.
     inventory_items_used: List[BookingInventoryUsageResponse] = []
+    add_ons_used: List[BookingAddOnUsageResponse] = []
     
     washer: Optional[MachineNested] = None
     dryer: Optional[MachineNested] = None
@@ -544,21 +718,46 @@ class CustomerBookingCreate(BaseModel):
     """
     Schema para sa booking na ginawa mismo ng customer sa mobile app —
     mas simple kaysa BookingCreate (walang machine assignment, walang
-    inventory items, walang customer_name dahil galing na sa JWT).
+    customer_name dahil galing na sa JWT).
 
     quantity ay generic na number lang — ang ibig sabihin nito
-    (load/kg/piece) ay depende sa pricing_unit ng napiling service,
-    hindi na kailangang hulaan ng schema mismo.
+    (load/kg/piece) ay depende sa pricing_unit ng napiling service.
+
+    fulfillment_mode: "dropoff" (customer mismo magdadala/kukuha sa
+    shop) o "delivery" (may rider ang shop). "delivery" ay bawal lang
+    piliin kung ang shop ay walang Shop.has_delivery = True (che-check
+    ito sa controller, hindi dito, dahil kailangan pang i-query ang
+    shop). pickup_datetime ay REQUIRED lang kapag "delivery" ang mode.
     """
     shop_id: int
     service_type: str
     quantity: float
+    special_instructions: Optional[str] = None
+    fulfillment_mode: str = "dropoff"
+    pickup_datetime: Optional[datetime] = None
+    add_on_ids: List[int] = []
+    promo_code: Optional[str] = None
 
     @field_validator("quantity")
     @classmethod
     def validate_quantity(cls, v):
         if v <= 0:
             raise ValueError("quantity must be greater than 0.")
+        return v
+
+    @field_validator("fulfillment_mode")
+    @classmethod
+    def validate_fulfillment_mode(cls, v):
+        allowed = {"dropoff", "delivery"}
+        if v not in allowed:
+            raise ValueError(f"fulfillment_mode must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("pickup_datetime")
+    @classmethod
+    def validate_pickup_required_for_delivery(cls, v, info):
+        if info.data.get("fulfillment_mode") == "delivery" and v is None:
+            raise ValueError("pickup_datetime is required when fulfillment_mode is 'delivery'.")
         return v
 
 
@@ -650,27 +849,63 @@ class ShopPublicResponse(BaseModel):
     longitude: Optional[float] = None
     distance_km: Optional[float] = None  # populated lang ng GET /shops/nearby
 
+    # NEW — para makita agad sa listing/carousel kung may delivery
+    # ang shop na ito, kahit hindi pa binubuksan ang Shop Detail.
+    has_delivery: bool = False
+    delivery_fee: float = 0.0
+
+    # NEW — real-time na "online" status, ibinabase sa aktibong
+    # WebSocket connection ng Service Terminal (see Shop.is_online sa
+    # models.py). Ginagamit ng Home carousel / Shop Selection Page para
+    # magpakita ng "Currently Closed" badge at i-disable ang "Book Now"
+    # kung walang tumatanggap ng booking sa kasalukuyan. Default False
+    # para safe (offline) muna hanggang ma-confirm ang aktwal na status
+    # mula sa DB.
+    is_online: bool = False
+
     model_config = ConfigDict(from_attributes=True)
 
 
 class ShopDetailResponse(BaseModel):
-    """Shop Detail page: shop info + list ng available services."""
+    """Shop Detail page: shop info + list ng available services + add-ons."""
     id: int
     shop_name: str
     address: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    has_delivery: bool = False
+    delivery_fee: float = 0.0
+    # NEW — see ShopPublicResponse.is_online note above. Ito ang
+    # ginagamit ng Shop Detail page para i-disable ang "Book Now" button
+    # at magpakita ng "Currently Closed" / "Offline" label.
+    is_online: bool = False
     services: List[ShopServicePreview] = []
+    add_ons: List[AddOnPreview] = []
 
     model_config = ConfigDict(from_attributes=True)
 
 # --- SETTINGS & PROFILE SCHEMAS ---
 
 class ShopProfileUpdate(BaseModel):
-    """Schema for updating the shop information."""
+    """
+    Schema for updating the shop information.
+
+    UPDATED: Added has_delivery + delivery_fee — parehong Shop model
+    fields, kaya same update_shop_profile() controller function ang
+    humahawak nito (walang bagong controller function na kailangan).
+    """
     shop_name: Optional[str] = None
     address: Optional[str] = None
     email: Optional[EmailStr] = None
+    has_delivery: Optional[bool] = None
+    delivery_fee: Optional[float] = None
+
+    @field_validator("delivery_fee")
+    @classmethod
+    def validate_delivery_fee(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("delivery_fee cannot be negative.")
+        return v
 
 class PasswordUpdate(BaseModel):
     """Schema for validating password change requests."""
@@ -682,5 +917,7 @@ class ShopProfileResponse(BaseModel):
     shop_name: str
     address: str
     email: str
+    has_delivery: bool = False
+    delivery_fee: float = 0.0
 
     model_config = ConfigDict(from_attributes=True)
