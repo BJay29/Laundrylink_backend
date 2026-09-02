@@ -1,8 +1,8 @@
 from sqlalchemy.orm import Session
 from math import radians, cos, sin, asin, sqrt
 
-from app.models import Shop, ServiceType
-from app.schemas import ShopPublicResponse, ShopDetailResponse, ShopServicePreview
+from app.models import Shop, ServiceType, AddOn
+from app.schemas import ShopPublicResponse, ShopDetailResponse, ShopServicePreview, AddOnPreview
 
 
 def _haversine_km(lat1, lon1, lat2, lon2):
@@ -20,13 +20,24 @@ def get_all_shops(db: Session):
     Buong listahan ng published shops — ginagamit sa Shop Selection Page
     at Home carousel. Walang location filtering, kaya gumagana ito kahit
     NULL pa ang latitude/longitude ng mga shops.
+
+    NOTE: has_delivery/delivery_fee ay automatic nang kasama dito —
+    model_validate() ay kinukuha lahat ng matching attribute names mula
+    sa Shop object, kaya walang extra code na kailangan para dito.
     """
     shops = db.query(Shop).filter(Shop.is_published == True).all()
     return [ShopPublicResponse.model_validate(s) for s in shops]
 
 
 def get_shop_detail(db: Session, shop_id: int):
-    """Shop Detail page: shop info + services."""
+    """
+    Shop Detail page: shop info + services + add-ons.
+
+    UPDATED: dagdag na ang add_ons list (kagaya ng services), at
+    explicit na inilagay ang has_delivery/delivery_fee dahil ito ay
+    manual na constructor call (ShopDetailResponse(...)), hindi
+    model_validate() na diretso mula sa Shop object.
+    """
     shop = (
         db.query(Shop)
         .filter(Shop.id == shop_id, Shop.is_published == True)
@@ -41,13 +52,22 @@ def get_shop_detail(db: Session, shop_id: int):
         .all()
     )
 
+    add_ons = (
+        db.query(AddOn)
+        .filter(AddOn.shop_id == shop_id, AddOn.is_active == True)
+        .all()
+    )
+
     return ShopDetailResponse(
         id=shop.id,
         shop_name=shop.shop_name,
         address=shop.address,
         latitude=shop.latitude,
         longitude=shop.longitude,
+        has_delivery=shop.has_delivery,
+        delivery_fee=shop.delivery_fee,
         services=[ShopServicePreview.model_validate(s) for s in services],
+        add_ons=[AddOnPreview.model_validate(a) for a in add_ons],
     )
 
 

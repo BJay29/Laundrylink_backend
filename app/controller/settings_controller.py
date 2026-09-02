@@ -315,11 +315,285 @@ def delete_service_type(db: Session, current_user: models.User, service_id: int)
     db.commit()
     return {"message": f"Service '{service_name}' removed successfully."}
 
+# --- ADD-ON FUNCTIONS (NEW) ---
+
+def get_add_ons(db: Session, shop_id: int):
+    """
+    Returns all add-ons (active and inactive) configured for a shop.
+    NOTE: read-only, no Activity Log entry.
+    """
+    return (
+        db.query(models.AddOn)
+        .filter(models.AddOn.shop_id == shop_id)
+        .order_by(models.AddOn.id.asc())
+        .all()
+    )
+
+def create_add_on(db: Session, current_user: models.User, add_on_data: schemas.AddOnBase):
+    """
+    Registers a new add-on (name + price) for the shop. Prevents exact
+    duplicate names (case-insensitive) for the same shop — same pattern
+    as create_service_type().
+    """
+    shop_id = current_user.shop_id
+
+    existing = (
+        db.query(models.AddOn)
+        .filter(
+            models.AddOn.shop_id == shop_id,
+            models.AddOn.name.ilike(add_on_data.name)
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"An add-on named '{add_on_data.name}' already exists for this shop."
+        )
+
+    new_add_on = models.AddOn(
+        name=add_on_data.name,
+        price=add_on_data.price,
+        is_active=add_on_data.is_active,
+        shop_id=shop_id
+    )
+    db.add(new_add_on)
+    db.flush()
+
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.full_name or current_user.email,
+        actor_role=current_user.role,
+        description=f"Added a new add-on: {new_add_on.name} (₱{new_add_on.price})"
+    )
+
+    db.commit()
+    db.refresh(new_add_on)
+    return new_add_on
+
+def update_add_on(db: Session, current_user: models.User, add_on_id: int, add_on_data: schemas.AddOnUpdate):
+    """Edits an existing add-on's name, price, or active status."""
+    shop_id = current_user.shop_id
+
+    add_on = (
+        db.query(models.AddOn)
+        .filter(models.AddOn.id == add_on_id, models.AddOn.shop_id == shop_id)
+        .first()
+    )
+    if not add_on:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Add-on not found.")
+
+    update_data = add_on_data.model_dump(exclude_unset=True)
+
+    if "name" in update_data:
+        duplicate = (
+            db.query(models.AddOn)
+            .filter(
+                models.AddOn.shop_id == shop_id,
+                models.AddOn.name.ilike(update_data["name"]),
+                models.AddOn.id != add_on_id
+            )
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"An add-on named '{update_data['name']}' already exists for this shop."
+            )
+
+    add_on_label = add_on.name
+
+    for key, value in update_data.items():
+        setattr(add_on, key, value)
+
+    if update_data:
+        changed_fields = ", ".join(update_data.keys())
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=f"Updated add-on: {add_on_label} ({changed_fields})"
+        )
+
+    db.commit()
+    db.refresh(add_on)
+    return add_on
+
+def delete_add_on(db: Session, current_user: models.User, add_on_id: int):
+    """
+    Removes an add-on from the shop's catalog. Past bookings keep their
+    BookingAddOnUsage records (price_at_booking snapshot), so historical
+    data is unaffected — only future bookings lose this as an option.
+    """
+    shop_id = current_user.shop_id
+
+    add_on = (
+        db.query(models.AddOn)
+        .filter(models.AddOn.id == add_on_id, models.AddOn.shop_id == shop_id)
+        .first()
+    )
+    if not add_on:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Add-on not found.")
+
+    add_on_name = add_on.name
+    db.delete(add_on)
+
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.full_name or current_user.email,
+        actor_role=current_user.role,
+        description=f"Removed add-on: {add_on_name}"
+    )
+
+    db.commit()
+    return {"message": f"Add-on '{add_on_name}' removed successfully."}
+
+# --- PROMO CODE FUNCTIONS (NEW) ---
+
+def get_promo_codes(db: Session, shop_id: int):
+    """
+    Returns all promo codes (active and inactive) configured for a shop.
+    NOTE: read-only, no Activity Log entry.
+    """
+    return (
+        db.query(models.PromoCode)
+        .filter(models.PromoCode.shop_id == shop_id)
+        .order_by(models.PromoCode.id.desc())
+        .all()
+    )
+
+def create_promo_code(db: Session, current_user: models.User, promo_data: schemas.PromoCodeBase):
+    """
+    Registers a new promo code for the shop. Prevents exact duplicate
+    codes (case-insensitive, PromoCodeBase's validator already
+    uppercases it) for the same shop.
+    """
+    shop_id = current_user.shop_id
+
+    existing = (
+        db.query(models.PromoCode)
+        .filter(
+            models.PromoCode.shop_id == shop_id,
+            models.PromoCode.code == promo_data.code
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"A promo code '{promo_data.code}' already exists for this shop."
+        )
+
+    new_promo = models.PromoCode(
+        code=promo_data.code,
+        discount_type=promo_data.discount_type,
+        discount_value=promo_data.discount_value,
+        is_active=promo_data.is_active,
+        max_uses=promo_data.max_uses,
+        expires_at=promo_data.expires_at,
+        shop_id=shop_id
+    )
+    db.add(new_promo)
+    db.flush()
+
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.full_name or current_user.email,
+        actor_role=current_user.role,
+        description=(
+            f"Added a new promo code: {new_promo.code} "
+            f"({new_promo.discount_value}{'%' if new_promo.discount_type == 'percent' else '₱'} off)"
+        )
+    )
+
+    db.commit()
+    db.refresh(new_promo)
+    return new_promo
+
+def update_promo_code(db: Session, current_user: models.User, promo_id: int, promo_data: schemas.PromoCodeUpdate):
+    """Edits an existing promo code's details."""
+    shop_id = current_user.shop_id
+
+    promo = (
+        db.query(models.PromoCode)
+        .filter(models.PromoCode.id == promo_id, models.PromoCode.shop_id == shop_id)
+        .first()
+    )
+    if not promo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo code not found.")
+
+    update_data = promo_data.model_dump(exclude_unset=True)
+
+    if "code" in update_data:
+        duplicate = (
+            db.query(models.PromoCode)
+            .filter(
+                models.PromoCode.shop_id == shop_id,
+                models.PromoCode.code == update_data["code"],
+                models.PromoCode.id != promo_id
+            )
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"A promo code '{update_data['code']}' already exists for this shop."
+            )
+
+    promo_label = promo.code
+
+    for key, value in update_data.items():
+        setattr(promo, key, value)
+
+    if update_data:
+        changed_fields = ", ".join(update_data.keys())
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=f"Updated promo code: {promo_label} ({changed_fields})"
+        )
+
+    db.commit()
+    db.refresh(promo)
+    return promo
+
+def delete_promo_code(db: Session, current_user: models.User, promo_id: int):
+    """Removes a promo code from the shop's catalog."""
+    shop_id = current_user.shop_id
+
+    promo = (
+        db.query(models.PromoCode)
+        .filter(models.PromoCode.id == promo_id, models.PromoCode.shop_id == shop_id)
+        .first()
+    )
+    if not promo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo code not found.")
+
+    promo_code = promo.code
+    db.delete(promo)
+
+    log_activity(
+        db, shop_id,
+        actor_name=current_user.full_name or current_user.email,
+        actor_role=current_user.role,
+        description=f"Removed promo code: {promo_code}"
+    )
+
+    db.commit()
+    return {"message": f"Promo code '{promo_code}' removed successfully."}
+
 # --- PROFILE & SECURITY FUNCTIONS ---
 
 def update_shop_profile(db: Session, current_user: models.User, profile_data: schemas.ShopProfileUpdate):
     """
     Updates the shop's contact information and business profile.
+
+    NOTE: has_delivery/delivery_fee (added to ShopProfileUpdate earlier)
+    are handled automatically here — this function already loops over
+    every field in the incoming schema and uses hasattr()/setattr() to
+    apply it to the Shop record, so no code change was needed to support
+    them; they just work the moment the schema declared them.
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id.

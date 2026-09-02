@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
 # Import routes
-from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes, activity_routes, shop_routes, websocket_routes
+from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes, activity_routes, shop_routes, websocket_routes, addon_routes, promo_routes
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -168,6 +168,8 @@ app.include_router(inventory_routes.router)
 app.include_router(activity_routes.router)
 app.include_router(shop_routes.router)
 app.include_router(websocket_routes.router)
+app.include_router(addon_routes.router)
+app.include_router(promo_routes.router)
 
 # --- ROOT HEALTH CHECK ---
 
@@ -177,7 +179,7 @@ def read_root():
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
         "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "CustomerAuth", "Bookings", "Machines", "Settings", "Analytics", "Inventory", "Activity", "Shops", "Notifications"]
+        "modules_active": ["Auth", "CustomerAuth", "Bookings", "Machines", "Settings", "Analytics", "Inventory", "Activity", "Shops", "Notifications", "AddOns", "PromoCodes"]
     }
 
 # --- PRODUCTION ENTRY POINT ---
