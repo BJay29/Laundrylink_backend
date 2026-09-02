@@ -21,9 +21,10 @@ def get_all_shops(db: Session):
     at Home carousel. Walang location filtering, kaya gumagana ito kahit
     NULL pa ang latitude/longitude ng mga shops.
 
-    NOTE: has_delivery/delivery_fee ay automatic nang kasama dito —
-    model_validate() ay kinukuha lahat ng matching attribute names mula
-    sa Shop object, kaya walang extra code na kailangan para dito.
+    NOTE: has_delivery/delivery_fee/is_online ay automatic nang kasama
+    dito — model_validate() ay kinukuha lahat ng matching attribute
+    names mula sa Shop object, kaya walang extra code na kailangan para
+    dito.
     """
     shops = db.query(Shop).filter(Shop.is_published == True).all()
     return [ShopPublicResponse.model_validate(s) for s in shops]
@@ -34,9 +35,17 @@ def get_shop_detail(db: Session, shop_id: int):
     Shop Detail page: shop info + services + add-ons.
 
     UPDATED: dagdag na ang add_ons list (kagaya ng services), at
-    explicit na inilagay ang has_delivery/delivery_fee dahil ito ay
-    manual na constructor call (ShopDetailResponse(...)), hindi
+    explicit na inilagay ang has_delivery/delivery_fee/is_online dahil
+    ito ay manual na constructor call (ShopDetailResponse(...)), hindi
     model_validate() na diretso mula sa Shop object.
+
+    FIXED: nakaligtaan dating ilagay ang is_online sa manual constructor
+    call sa ibaba, kaya laging False (Closed) ang bumabalik sa Shop
+    Detail page kahit True na ang totoong Shop.is_online sa DB. Dahil
+    dito, "Open" ang shop sa Home carousel / Shop Selection (gumagamit
+    ng model_validate(), na awtomatikong kumukuha ng lahat ng fields),
+    pero "Closed" pagpasok sa Shop Detail — same shop, magkaibang
+    endpoint construction lang ang dahilan, hindi real status change.
     """
     shop = (
         db.query(Shop)
@@ -66,6 +75,7 @@ def get_shop_detail(db: Session, shop_id: int):
         longitude=shop.longitude,
         has_delivery=shop.has_delivery,
         delivery_fee=shop.delivery_fee,
+        is_online=shop.is_online,  # FIX: dati'y nawawala, kaya default False palagi
         services=[ShopServicePreview.model_validate(s) for s in services],
         add_ons=[AddOnPreview.model_validate(a) for a in add_ons],
     )
