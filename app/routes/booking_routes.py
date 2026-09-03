@@ -24,7 +24,21 @@ def create_booking(
     db: Session = Depends(get_db)
 ):
     """
-    Creates a new laundry booking (Service Terminal / staff only).
+    Creates a new laundry booking.
+    Machine assignment is optional:
+    - No machine provided  → status = 'Pending'
+    - Machine(s) provided  → status = 'In Progress', machines marked Busy
+
+    shop_id is now taken from the authenticated user's JWT — NOT from
+    booking_data.shop_id in the request body. Even if a client sends a
+    different shop_id in the body, it is ignored; the booking is always
+    scoped to the logged-in user's own shop.
+
+    The controller validates that booking_data.service_type matches an
+    active ServiceType configured by this shop, and that the weight meets
+    the shop's configured minimum_weight_kg. This endpoint is for
+    Service Terminal (staff) bookings only — see POST /bookings/customer
+    for customer-initiated bookings from the mobile app.
     """
     return booking_controller.create_booking(db, booking_data, current_user)
 
@@ -36,6 +50,16 @@ def get_active_bookings(
 ):
     """
     Returns all non-finalized bookings for the Service Terminal.
+    Includes both Pending (no machine assigned) and In Progress bookings.
+    Does NOT include "Awaiting Approval" bookings — see GET
+    /bookings/awaiting-approval for those.
+
+    shop_id no longer comes from a query parameter — it is derived from
+    the logged-in user's JWT, so a user can never query another shop's
+    active bookings by editing the URL.
+
+    Read-only — get_active_bookings() still takes a bare shop_id (no
+    signature change), so current_user.shop_id is passed directly here.
     """
     return booking_controller.get_active_bookings(db, current_user.shop_id)
 
@@ -50,6 +74,15 @@ def update_status(
     """
     Moves a booking through its lifecycle:
     Pending → In Progress → Ready → Claimed
+    Releases machines back to Available on Ready / Claimed / Cancelled.
+
+    shop_id is derived from the JWT — the controller's existing
+    Booking.shop_id == shop_id filter ensures a user can only update
+    bookings belonging to their own shop (404 otherwise).
+
+    UPDATED: booking_controller.update_booking_status() now takes
+    current_user (not shop_id) so the resulting Activity Log entry can
+    attribute this status change to whoever performed it.
     """
     return booking_controller.update_booking_status(
         db, booking_id, status_data.status, current_user
@@ -65,6 +98,16 @@ def assign_machine(
 ):
     """
     Assigns a washer and/or dryer to an existing Pending booking.
+    - Validates machines are available and belong to this shop
+    - Marks assigned machines as Busy and updates telemetry
+    - Transitions booking status: Pending → In Progress
+    Called from the Service Terminal when the operator clicks 'Assign Machine'.
+
+    shop_id is derived from the JWT, not a query parameter.
+
+    UPDATED: booking_controller.assign_machine_to_booking() now takes
+    current_user (not shop_id) so the resulting Activity Log entry can
+    attribute this machine assignment to whoever performed it.
     """
     return booking_controller.assign_machine_to_booking(
         db, booking_id, assign_data, current_user
@@ -83,6 +126,10 @@ async def create_customer_booking(
 ):
     """
     Creates a booking initiated by a customer via the mobile app.
+    Starts as status "Awaiting Approval" — the shop must Accept or
+    Decline it (see the two endpoints below) before it behaves like a
+    normal Service Terminal booking. Broadcasts a real-time WebSocket
+    notification to the shop's connected Service Terminal on success.
     """
     return await booking_controller.create_customer_booking(db, current_customer, booking_data)
 
@@ -93,16 +140,12 @@ def get_my_bookings(
     db: Session = Depends(get_db)
 ):
     """
-    NEW — Returns ALL bookings made by the currently logged-in customer
-    (any shop, any status — Awaiting Approval, Pending, In Progress,
-    Ready, Claimed, Cancelled, Declined), most recent first.
-
-    Backs the mobile app's Booking Page (booking history + live
-    tracking) and Notifications Page. Both screens poll this endpoint
-    periodically (in-app only, while the app is open — no push
-    notifications yet) to detect status changes made by the shop from
-    the web dashboard (accept/decline, In Progress → Ready → Claimed,
-    atbp.).
+    NEW — Returns every booking made by the logged-in customer, across
+    all shops, any status. Backs the mobile app's History page (booking
+    tracking + past orders). Placed BEFORE /awaiting-approval on purpose
+    only for readability grouping — FastAPI matches by exact path/prefix
+    here so ordering between these two doesn't actually matter (neither
+    has a variable path segment that could shadow the other).
     """
     return booking_controller.get_customer_bookings(db, current_customer.id)
 
@@ -114,6 +157,9 @@ def get_awaiting_approval_bookings(
 ):
     """
     Returns customer-submitted bookings still awaiting Accept/Decline.
+    Backs the notification panel on the Service Terminal — used both
+    for the initial page load AND as a fallback if the WebSocket
+    connection was ever missed/dropped (poll-on-demand, e.g. on refresh).
     """
     return booking_controller.get_awaiting_approval_bookings(db, current_user.shop_id)
 
@@ -125,7 +171,9 @@ def accept_customer_booking(
     db: Session = Depends(get_db)
 ):
     """
-    Accepts a customer-submitted booking request.
+    Accepts a customer-submitted booking request — moves it from
+    "Awaiting Approval" to "Pending", after which it appears in the
+    normal Service Terminal list and can be assigned a machine.
     """
     return booking_controller.accept_customer_booking(db, booking_id, current_user)
 
@@ -138,7 +186,15 @@ def decline_customer_booking(
     db: Session = Depends(get_db)
 ):
     """
-    Declines a customer-submitted booking request.
+    Declines a customer-submitted booking request — moves it to
+    "Declined". Stays in the database for history but never appears in
+    the Service Terminal's active bookings list.
+
+    UPDATED: now requires a JSON body with a `reason` (see
+    BookingDeclineRequest) — the Service Terminal offers quick presets
+    ("Fully booked", "Closed for the day", "Service unavailable") plus a
+    free-text option. The reason is saved onto the booking so the
+    customer can see it on their end.
     """
     return booking_controller.decline_customer_booking(
         db, booking_id, decline_data.reason, current_user

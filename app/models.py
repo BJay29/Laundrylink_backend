@@ -478,7 +478,13 @@ class Booking(Base):
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    shop = relationship("Shop", back_populates="bookings")
+    # NEW — eager-loaded (lazy="joined") kagaya ng washer/dryer sa ibaba.
+    # Ito ang dahilan kung bakit nagawa nating gawin ang shop_name bilang
+    # simpleng @property sa halip na hiwalay pang query: sigurado tayong
+    # naka-load na ang shop object bago pa man i-access ang property na
+    # ito, kahit sa isang listahan ng maraming bookings (GET
+    # /bookings/mine, na sumasaklaw sa MARAMING shops).
+    shop = relationship("Shop", back_populates="bookings", lazy="joined")
     washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
     dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
     customer = relationship("Customer", foreign_keys=[customer_id])
@@ -496,10 +502,31 @@ class Booking(Base):
         lazy="joined"
     )
 
+    @property
+    def shop_name(self):
+        """
+        NEW — read-only convenience property, HINDI isang DB column.
+        Sinasagot nito ang gap na dating wala: ang Booking mismo ay
+        walang naka-save na pangalan ng shop (shop_id lang), pero ang
+        mobile app's booking history (GET /bookings/mine) ay
+        sumasaklaw sa MARAMING shops sa iisang listahan — kailangan
+        niyang malaman kung "aling shop" ang bawat booking nang hindi
+        na kailangang mag-issue ng hiwalay na query kada item.
+
+        Dahil BookingResponse ay gumagamit ng ConfigDict(from_attributes=
+        True), awtomatikong makikita ni Pydantic ang property na ito
+        (parang ordinary attribute lang mula sa pananaw nito) basta
+        idagdag lang ang `shop_name` bilang field sa schema — walang
+        kailangang gawing field_validator na tulad ng washer_number/
+        dryer_number sa BookingResponse.
+        """
+        return self.shop.shop_name if self.shop else None
+
     def to_dict(self):
         return {
             "id": self.id,
             "customer_name": self.customer_name,
+            "shop_name": self.shop_name,
             "service_type": self.service_type,
             "category": self.category,
             "weight": self.weight,

@@ -166,6 +166,11 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
             ))
 
         # --- 7. ACTIVITY LOG ---
+        # Nasa loob ito ng try block nang sinasadya — kasama ito sa
+        # PAREHONG db.commit() sa ibaba. Kung mag-fail ang commit
+        # (halimbawa DB error), mag-rollback din ang log entry — walang
+        # "orphan log" na sasabihing may nagawang booking kahit hindi
+        # pala talaga na-save.
         machine_note = ""
         if assigned_ids:
             machine_note = f" (machine assigned, {len(assigned_ids)} unit/s)"
@@ -205,6 +210,19 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
 def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", current_user: models.User):
     """
     Assigns a washer and/or dryer to an existing Pending booking that has no machine.
+
+    UPDATED: Looks up the booking's service_type in this shop's ServiceType
+    catalog to get the configured duration_minutes. Falls back to
+    PredictionService.get_machine_runtime() only if the service no longer
+    exists in the catalog (e.g. it was deleted after the booking was made).
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, for the same attribution reason as create_booking().
+
+    NOTE: works the same for "Pending" bookings regardless of source
+    (terminal or customer-accepted-from-mobile) — once a customer
+    booking is Accepted, it becomes an ordinary "Pending" booking and
+    can be assigned a machine exactly like any other.
     """
     shop_id = current_user.shop_id
 
@@ -236,6 +254,7 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             detail="At least one machine (washer or dryer) must be provided."
         )
 
+    # Resolve the configured duration for this booking's service type
     service_type_record = (
         db.query(ServiceType)
         .filter(
@@ -313,6 +332,7 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     booking.status = "In Progress"
 
     try:
+        # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
@@ -346,6 +366,17 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
 def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized tasks for the Terminal UI.
+
+    UPDATED: also excludes "Awaiting Approval" and "Declined" — these
+    are shown only in the separate approval panel (get_awaiting_approval_
+    bookings below), not mixed into the normal Service Terminal list.
+    An "Awaiting Approval" booking only appears here once it has been
+    Accepted (status becomes "Pending", same as any manual booking).
+
+    NOTE: hindi ito ginagalaw ng Activity Log — read-only na operation
+    ito (walang binabago), kaya walang kailangang i-log dito. Pinanatili
+    ang shop_id-only signature (hindi current_user) dahil hindi ito
+    kailangan ng actor attribution.
     """
     return (
         db.query(Booking)
@@ -367,6 +398,11 @@ def get_active_bookings(db: Session, shop_id: int):
 def update_booking_status(db: Session, booking_id: int, new_status: str, current_user: models.User):
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, for the same attribution reason as create_booking(). This
+    is the endpoint used for status transitions including cancellation,
+    so it's one of the more important actions to attribute correctly.
     """
     shop_id = current_user.shop_id
 
@@ -404,6 +440,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
                     machine.current_price = 0.0
 
     try:
+        # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
@@ -439,12 +476,33 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
 # =========================================================
 
 def _map_quantity_to_booking_fields(pricing_unit: str, quantity: float) -> dict:
+    """
+    Ang Booking table ay may weight/loads columns, hindi generic na
+    "quantity" — dahil pareho itong ginagamit ng existing Booking Modal
+    (web) sa halip na baguhin ang schema ng buong table, ito na lang ang
+    i-map papunta sa tamang column base sa pricing_unit ng service:
+      - "kg"    → weight = quantity, loads = 1
+      - "load"  → loads = quantity, weight = 0.0 (hindi applicable)
+      - "piece" → loads = quantity, weight = 0.0 (hindi applicable)
+    """
     if pricing_unit == "kg":
         return {"weight": quantity, "loads": 1}
     return {"weight": 0.0, "loads": int(quantity)}
 
 
 def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> tuple:
+    """
+    Nagva-validate ng promo code (active, not expired, may natitirang
+    uses) at nagko-compute ng discount base sa subtotal. Kung invalid
+    ang code (mali, expired, ubos na ang uses), raise HTTPException
+    kaagad — hindi ito basta na lang ini-ignore, dahil ipinasok mismo
+    ng customer ang code na 'to, dapat malaman nila kung bakit hindi
+    gumana.
+
+    Returns (promo_record, discount_amount) — 'yung promo_record ang
+    ipapasa pabalik para ma-increment ang times_used pagkatapos
+    ma-confirm na successful ang buong booking transaction.
+    """
     promo = (
         db.query(PromoCode)
         .filter(
@@ -475,6 +533,7 @@ def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> 
     else:
         discount = promo.discount_value
 
+    # Hindi pwedeng lumagpas sa subtotal ang discount (walang negative total).
     discount = min(discount, subtotal)
     return promo, round(discount, 2)
 
@@ -482,6 +541,36 @@ def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> 
 async def create_customer_booking(db: Session, customer: models.Customer, booking_data: CustomerBookingCreate):
     """
     Creates a booking INITIATED BY THE CUSTOMER via the mobile app.
+    Unlike create_booking() (Service Terminal / staff), hindi agad ito
+    "Pending" — nagsisimula ito sa status "Awaiting Approval" at
+    kailangang tanggapin (Accept) o tanggihan (Decline) ng shop bago ito
+    pumasok sa normal na Service Terminal flow.
+
+    UPDATED: pinoproseso na rin ang fulfillment_mode (dropoff/delivery),
+    add-ons, at promo code:
+      1. base_price = service.price × quantity
+      2. + add-ons total (mula sa add_on_ids, kada isa naka-validate na
+         kabilang sa parehong shop at is_active)
+      3. + delivery_fee (kung fulfillment_mode == "delivery", kinukuha
+         mula sa Shop.delivery_fee; error kung ang shop pala ay
+         Shop.has_delivery == False)
+      4. − discount (kung may promo_code, naka-validate sa
+         _apply_promo_code())
+    Ang resultang total_price ang siyang naka-save sa Booking.
+
+    NEW (safety net): bago pa man tingnan ang service catalog, sinusuri
+    muna kung shop.is_online — ibig sabihin, may naka-buk as na Service
+    Terminal ba ang shop na ito ngayon (see Shop.is_online sa models.py,
+    na-update ng ws_manager.py sa connect()/disconnect()). Kung offline
+    ang shop, walang talagang tatanggap/makakapag-accept ng booking na
+    ito kahit ma-create pa ito, kaya sinasarhan na natin ito dito bago pa
+    man mag-deduct ng anuman. Ito ang "totoong" hadlang — ang UI-level
+    check (disabled na "Book Now" button sa mobile app) ay convenience
+    lang, hindi ito dapat pag-asahan bilang tanging proteksyon, dahil
+    puwede pa ring i-bypass ang UI (direktang API call, atbp.).
+
+    Broadcasts a real-time WebSocket notification to the shop's connected
+    Service Terminal instance(s) after a successful commit.
     """
     shop = db.query(models.Shop).filter(models.Shop.id == booking_data.shop_id).first()
     if not shop or not shop.is_published:
@@ -490,6 +579,8 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             detail="Shop not found."
         )
 
+    # --- SAFETY NET: block bookings while the shop has no live Service
+    # Terminal connection, regardless of what the client-side UI shows. ---
     if not shop.is_online:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -515,6 +606,8 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         service_type_record.pricing_unit, booking_data.quantity
     )
 
+    # Minimum weight check applies only to per-kg services — per-load
+    # and per-piece services don't use the weight field meaningfully.
     if service_type_record.pricing_unit == "kg":
         settings = db.query(Setting).filter(Setting.shop_id == booking_data.shop_id).first()
         minimum_weight = (settings.minimum_weight_kg if settings else None) or 6.0
@@ -524,6 +617,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
                 detail=f"Minimum booking weight is {minimum_weight}kg. Please adjust the quantity."
             )
 
+    # --- DELIVERY MODE VALIDATION ---
     delivery_fee_charged = 0.0
     if booking_data.fulfillment_mode == "delivery":
         if not shop.has_delivery:
@@ -533,7 +627,8 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             )
         delivery_fee_charged = shop.delivery_fee
 
-    validated_add_ons = []
+    # --- ADD-ONS VALIDATION + PRICING ---
+    validated_add_ons = []  # list of (AddOn, price_at_booking)
     add_ons_total = 0.0
     for add_on_id in booking_data.add_on_ids:
         add_on = (
@@ -553,6 +648,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         validated_add_ons.append((add_on, add_on.price))
         add_ons_total += add_on.price
 
+    # --- PRICE COMPUTATION ---
     base_price = round(service_type_record.price * booking_data.quantity, 2)
     subtotal = round(base_price + add_ons_total + delivery_fee_charged, 2)
 
@@ -589,7 +685,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
 
     try:
         db.add(new_booking)
-        db.flush()
+        db.flush()  # kailangan para makuha ang new_booking.id bago mag-commit
 
         for add_on, price_at_booking in validated_add_ons:
             db.add(BookingAddOnUsage(
@@ -616,6 +712,10 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             .first()
         )
 
+        # --- WEBSOCKET BROADCAST ---
+        # Tahimik lang ang epekto kung walang naka-connect na Service
+        # Terminal ngayon (walang error) — GET /bookings/awaiting-approval
+        # pa rin ang siguradong makikita ito sa susunod na refresh/load.
         await manager.broadcast(booking_data.shop_id, {
             "type": "new_booking_request",
             "booking_id": reloaded.id,
@@ -640,6 +740,7 @@ def get_awaiting_approval_bookings(db: Session, shop_id: int):
     """
     Retrieves customer-submitted bookings still waiting for the shop's
     Accept/Decline decision. Backs the notification panel on the web app.
+    NOTE: read-only, no Activity Log entry.
     """
     return (
         db.query(Booking)
@@ -658,23 +759,21 @@ def get_awaiting_approval_bookings(db: Session, shop_id: int):
 
 def get_customer_bookings(db: Session, customer_id: int):
     """
-    NEW — Retrieves ALL bookings made by a specific customer (any shop,
-    any status), most recent first. Backs the mobile app's Booking Page
-    (booking history + live tracking) and Notifications Page (both
-    derive their content by polling this same endpoint periodically —
-    see GET /bookings/mine).
+    NEW — Retrieves EVERY booking made by a given customer, across ALL
+    shops, any status — the data behind the mobile app's History page
+    (and, if reused, a Notifications page). Most recent first.
 
-    Eager-loads Booking.shop so BookingResponse.shop_name can be
-    populated without triggering a separate query per row (N+1
-    avoidance) — see the shop_name field validator on BookingResponse.
+    NOTE: read-only, no Activity Log entry (Activity Log is a shop-side
+    accountability trail — this is the customer looking at their own
+    data, not an action being performed on the shop's behalf).
 
-    NOTE: read-only, no Activity Log entry (matches get_active_bookings'
-    reasoning above).
+    Booking.shop is lazy="joined" (see models.py) so the shop_name
+    property is populated without triggering a separate query per
+    booking, even though this list can span many different shops.
     """
     return (
         db.query(Booking)
         .options(
-            joinedload(Booking.shop),
             joinedload(Booking.washer),
             joinedload(Booking.dryer),
             joinedload(Booking.inventory_usages),
@@ -689,7 +788,9 @@ def get_customer_bookings(db: Session, customer_id: int):
 def accept_customer_booking(db: Session, booking_id: int, current_user: models.User):
     """
     Accepts a customer-submitted booking — moves it from "Awaiting
-    Approval" to "Pending".
+    Approval" to "Pending", at which point it behaves exactly like any
+    manually-created booking (appears in the Service Terminal, can be
+    assigned a machine via assign_machine_to_booking()).
     """
     shop_id = current_user.shop_id
 
@@ -728,6 +829,17 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
 def decline_customer_booking(db: Session, booking_id: int, reason: str, current_user: models.User):
     """
     Declines a customer-submitted booking — moves it to "Declined".
+    Kept in the database (not deleted) so it stays visible in the
+    Activity Log/history, but it will never appear in the Service
+    Terminal's active bookings list (see get_active_bookings() filter).
+
+    NEW: now REQUIRES a `reason` (see BookingDeclineRequest validator —
+    the empty-string case never reaches here). Saved onto
+    Booking.decline_reason so the customer can see WHY their request was
+    declined (e.g. "Fully booked") the next time they check the booking
+    in the mobile app, instead of just seeing a bare "Declined" status.
+    Also folded into the Activity Log description for the shop's own
+    history/accountability.
     """
     shop_id = current_user.shop_id
 

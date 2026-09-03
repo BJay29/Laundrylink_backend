@@ -676,9 +676,21 @@ class BookingDeclineRequest(BaseModel):
         return cleaned
 
 class BookingResponse(BaseModel):
-    """Detailed transaction response for the Service Terminal UI."""
+    """
+    Detailed transaction response for the Service Terminal UI AND the
+    mobile app's booking history/tracking (GET /bookings/mine) — same
+    shape is reused for both.
+    """
     id: int
     customer_name: str
+
+    # NEW — resolved from Booking.shop_name (a Python @property on the
+    # model, not a DB column — see models.py). Needed because the mobile
+    # app's booking history spans MULTIPLE shops in one list; without
+    # this, there'd be no way to show which shop each booking belongs to
+    # short of a separate lookup per item.
+    shop_name: Optional[str] = None
+
     service_type: str
     category: str
     weight: float
