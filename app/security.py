@@ -127,24 +127,8 @@ def get_current_user(
 
 def get_current_shop_id(current_user: models.User = Depends(get_current_user)) -> int:
     """
-    NEW — Convenience dependency na direktang nagbabalik ng shop_id (int)
+    Convenience dependency na direktang nagbabalik ng shop_id (int)
     imbes na buong User object.
-
-    Ginawa ito dahil may mga routes (analytics_routes.py) na dati'y
-    tumatawag sa isang function na "get_current_shop_id" na hindi pa
-    umiiral sa security.py — sanhi ito ng ImportError sa deploy
-    ("cannot import name 'get_current_shop_id' from 'app.security'").
-
-    Gamitin ito sa mga endpoints na hindi na kailangan pa ng ibang
-    detalye ng user (role, email, atbp.) — direkta lang kailangan
-    ang shop_id para sa query scoping:
-
-        def some_endpoint(shop_id: int = Depends(get_current_shop_id)):
-            ...
-
-    Internally, umaasa pa rin ito kay get_current_user() — kaya
-    pareho pa ring naka-enforce ang lahat ng existing checks (valid
-    JWT, "type": "user", active account) bago ibalik ang shop_id.
     """
     return current_user.shop_id
 
@@ -182,6 +166,12 @@ def get_current_customer(
 
     Tinatanggihan ang staff/owner tokens kahit valid ang signature —
     dahil ibang "type" ang laman ng payload nila.
+
+    UPDATED: Tinanggal na ang is_verified check dito — awtomatiko nang
+    verified ang lahat ng bagong customer sa registration (see
+    customer_auth_controller.register_customer()). Nananatili pa rin
+    ang is_verified column sa DB para hindi na kailangang mag-migrate,
+    pero hindi na ito ginagamit bilang gate para sa access.
     """
     payload = decode_access_token(credentials.credentials)
 
@@ -203,12 +193,6 @@ def get_current_customer(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Customer not found or inactive",
-        )
-
-    if not customer.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account not verified",
         )
 
     return customer

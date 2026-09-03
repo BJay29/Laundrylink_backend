@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app import schemas, models
 from app.controller import customer_auth_controller
-from app.security import get_current_customer  # ⬅️ BAGONG IMPORT
+from app.security import get_current_customer
 
 router = APIRouter(
     prefix="/customer",
@@ -15,28 +15,12 @@ router = APIRouter(
 def register_customer(customer: schemas.CustomerCreate, db: Session = Depends(get_db)):
     """
     Endpoint for customer self-registration via the Flutter mobile app.
-    Creates an unverified customer account and emails a 6-digit verification code.
+
+    UPDATED: Awtomatikong verified na agad ang account sa oras ng
+    pagpaparehistro — tinanggal na ang email verification step
+    (walang na-ge-generate na code, walang email na pinapadala).
     """
     return customer_auth_controller.register_customer(db, customer)
-
-
-# --- EMAIL VERIFICATION ---
-@router.post("/verify")
-def verify_email(payload: schemas.CustomerVerifyEmail, db: Session = Depends(get_db)):
-    """
-    Validates the 6-digit code submitted by the customer and activates the account.
-    """
-    return customer_auth_controller.verify_customer_email(db, payload)
-
-
-# --- RESEND VERIFICATION CODE ---
-@router.post("/resend-verification")
-def resend_verification(payload: schemas.CustomerResendCode, db: Session = Depends(get_db)):
-    """
-    Sends a new 6-digit verification code to the customer's email,
-    used when the original code expired or was not received.
-    """
-    return customer_auth_controller.resend_verification_code(db, payload)
 
 
 # --- CUSTOMER LOGIN (Mobile App) ---
@@ -45,7 +29,6 @@ def login(credentials: schemas.CustomerLogin, db: Session = Depends(get_db)):
     """
     Authentication endpoint for the Flutter mobile app.
     Validates credentials and returns a REAL JWT + the customer profile.
-    Login is blocked until the account's email has been verified.
     """
     return customer_auth_controller.authenticate_customer(db, credentials)
 
@@ -56,16 +39,11 @@ def get_my_customer_profile(current_customer: models.Customer = Depends(get_curr
     """
     Retrieves session details of the CURRENTLY LOGGED-IN customer only,
     based on the verified JWT sent in the Authorization header.
-
-    Dating "/profile/{customer_id}" ay open sa kahit sino, basta alam
-    ang isang valid customer ID (1, 2, 3...) — walang authentication
-    check. Ngayon, base na sa verified JWT ang result, kaya imposibleng
-    makita ng isang customer ang profile ng iba.
     """
     return current_customer
 
 
-# NOTE: Tinanggal na ang "/test-email/{test_email}" debug endpoint.
-# Nag-expose ito ng SMTP config info (env var presence) nang walang
-# authentication — dapat lang ito naka-enable habang nagte-test,
-# at tinanggal na ngayong secure na ang buong auth flow.
+# NOTE: Tinanggal na ang "/verify" at "/resend-verification" endpoints —
+# hindi na kailangan dahil walang email verification step. Tinanggal
+# na rin dati ang "/test-email/{test_email}" debug endpoint (nag-expose
+# ito ng SMTP config info nang walang authentication).

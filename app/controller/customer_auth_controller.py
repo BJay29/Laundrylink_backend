@@ -1,19 +1,21 @@
 import bcrypt
-from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from app import models, schemas
-from app.services.email_service import generate_verification_code, send_verification_email
-from app.security import create_customer_access_token  # ⬅️ BAGONG IMPORT
-
-CODE_EXPIRY_MINUTES = 10
+from app.security import create_customer_access_token
 
 
 def register_customer(db: Session, customer: schemas.CustomerCreate):
     """
     Registers a new customer account for the mobile app.
     Customers are not tied to a shop_id since they can book across shops.
-    Account starts as unverified; a 6-digit code is emailed for verification.
+
+    UPDATED: Tinanggal na ang email verification step. Awtomatikong
+    is_verified=True na ang account sa mismong oras ng pagpaparehistro —
+    walang na-ge-generate na 6-digit code, walang email na pinapadala.
+    Ito ay pansamantalang desisyon habang wala pang gumaganang
+    production-ready na email delivery (SMTP blocked ng Render Free
+    Tier; email API provider hindi pa fully na-se-setup).
     """
     # 1. Check if the email is already in use
     db_customer = db.query(models.Customer).filter(models.Customer.email == customer.email).first()
@@ -29,118 +31,34 @@ def register_customer(db: Session, customer: schemas.CustomerCreate):
         bcrypt.gensalt()
     ).decode('utf-8')
 
-    # 3. Generate verification code
-    code = generate_verification_code()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=CODE_EXPIRY_MINUTES)
-
-    # 4. Create the customer account (unverified)
+    # 3. Create the customer account — VERIFIED AGAD, walang OTP/email step.
     new_customer = models.Customer(
         full_name=customer.full_name,
         email=customer.email,
         mobile_number=customer.mobile_number,
         hashed_password=hashed_pass,
-        is_verified=False,
-        verification_code=code,
-        verification_expires_at=expires_at,
+        is_verified=True,   # <-- dating False + code/email flow, ngayon True agad
+        verification_code=None,
+        verification_expires_at=None,
     )
     db.add(new_customer)
     db.commit()
     db.refresh(new_customer)
 
-    # 5. Send verification email (best-effort — account still created if email fails)
-    email_sent = send_verification_email(new_customer.email, new_customer.full_name, code)
-    if not email_sent:
-        print(f"Warning: verification email failed to send for {new_customer.email}")
-
     return new_customer
-
-
-def verify_customer_email(db: Session, payload: schemas.CustomerVerifyEmail):
-    """
-    Validates the 6-digit code submitted by the customer and activates the account.
-    """
-    customer = db.query(models.Customer).filter(models.Customer.email == payload.email).first()
-
-    if not customer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found"
-        )
-
-    if customer.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Account is already verified"
-        )
-
-    if not customer.verification_code or customer.verification_code != payload.code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid verification code"
-        )
-
-    expires_at = customer.verification_expires_at
-    if expires_at and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-    if not expires_at or datetime.now(timezone.utc) > expires_at:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Verification code has expired. Please request a new one."
-        )
-
-    customer.is_verified = True
-    customer.verification_code = None
-    customer.verification_expires_at = None
-    db.commit()
-    db.refresh(customer)
-
-    return customer
-
-
-def resend_verification_code(db: Session, payload: schemas.CustomerResendCode):
-    """
-    Generates and sends a new 6-digit verification code to the customer.
-    """
-    customer = db.query(models.Customer).filter(models.Customer.email == payload.email).first()
-
-    if not customer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found"
-        )
-
-    if customer.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Account is already verified"
-        )
-
-    code = generate_verification_code()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=CODE_EXPIRY_MINUTES)
-
-    customer.verification_code = code
-    customer.verification_expires_at = expires_at
-    db.commit()
-
-    email_sent = send_verification_email(customer.email, customer.full_name, code)
-    if not email_sent:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send verification email. Please try again."
-        )
-
-    return {"message": "A new verification code has been sent to your email."}
 
 
 def authenticate_customer(db: Session, credentials: schemas.CustomerLogin):
     """
     Authenticates a customer via email and password for the mobile app.
-    Blocks login until the account has been verified.
     Returns a REAL signed JWT (type=customer) instead of a placeholder,
     consistent with the owner-side login response.
-    """
 
+    NOTE: Wala nang is_verified check dito — lahat ng bagong customer ay
+    verified na agad sa registration. Nananatili pa rin ang column sa DB
+    para hindi na kailangang mag-migrate/mag-alter table, pero hindi na
+    ito ginagamit bilang gate para sa login.
+    """
     # 1. Fetch customer by email
     customer = db.query(models.Customer).filter(
         models.Customer.email == credentials.email
@@ -162,21 +80,14 @@ def authenticate_customer(db: Session, credentials: schemas.CustomerLogin):
             detail="Invalid email or password"
         )
 
-    # 3. Check if the account has been verified
-    if not customer.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Please verify your email before logging in."
-        )
-
-    # 4. Check if the account is active
+    # 3. Check if the account is active
     if not customer.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is inactive. Contact support."
         )
 
-    # 5. Build response payload
+    # 4. Build response payload
     customer_payload = {
         "id": customer.id,
         "full_name": customer.full_name,
@@ -186,7 +97,7 @@ def authenticate_customer(db: Session, credentials: schemas.CustomerLogin):
         "is_verified": customer.is_verified,
     }
 
-    # 6. Generate a REAL signed JWT with "type": "customer" —
+    # 5. Generate a REAL signed JWT with "type": "customer" —
     #    hindi ito magagamit para mag-access ng shop-owner-only
     #    endpoints kahit valid ang signature nito.
     token = create_customer_access_token(customer_id=customer.id)
@@ -198,8 +109,8 @@ def authenticate_customer(db: Session, credentials: schemas.CustomerLogin):
     }
 
 
-# NOTE: Tinanggal na ang get_current_customer_profile(db, customer_id).
-# Pinalitan ito ng get_current_customer() dependency sa security.py,
-# na kumukuha na base sa verified JWT — hindi na sa pamamagitan ng
-# arbitrary customer_id sa URL (dating security hole: kahit sinong
-# customer_id, makikita ang profile ng ibang customer).
+# NOTE: Tinanggal na ang verify_customer_email() at resend_verification_code()
+# — hindi na kailangan dahil walang OTP/email verification step. Kung sa
+# hinaharap ay babalikan ang email verification (hal. kapag gumagana na
+# ang production email delivery), pwedeng ibalik ang mga functions na ito
+# gamit ang git history bilang reference.
