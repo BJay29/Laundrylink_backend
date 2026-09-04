@@ -82,7 +82,9 @@ def update_status(
 
     UPDATED: booking_controller.update_booking_status() now takes
     current_user (not shop_id) so the resulting Activity Log entry can
-    attribute this status change to whoever performed it.
+    attribute this status change to whoever performed it, AND now also
+    fires a customer notification (with a status-specific message) when
+    the booking belongs to a mobile-app customer.
     """
     return booking_controller.update_booking_status(
         db, booking_id, status_data.status, current_user
@@ -150,23 +152,6 @@ def get_my_bookings(
     return booking_controller.get_customer_bookings(db, current_customer.id)
 
 
-@router.patch("/{booking_id}/cancel", response_model=BookingResponse)
-def cancel_customer_booking(
-    booking_id: int,
-    current_customer: models.Customer = Depends(get_current_customer),  # ⬅️ galing sa customer JWT
-    db: Session = Depends(get_db)
-):
-    """
-    NEW — Lets the CUSTOMER cancel their own booking from the mobile
-    app's Booking Page. Only works while status is "Awaiting Approval"
-    or "Pending" (see cancel_customer_booking() in booking_controller.py
-    for why "In Progress" and beyond are blocked). Distinct from PATCH
-    /{booking_id}/status, which is the shop/staff-side endpoint and
-    requires a User (not Customer) JWT.
-    """
-    return booking_controller.cancel_customer_booking(db, booking_id, current_customer)
-
-
 @router.get("/awaiting-approval", response_model=List[BookingResponse])
 def get_awaiting_approval_bookings(
     current_user: models.User = Depends(get_current_user),  # ⬅️ galing sa JWT
@@ -191,6 +176,9 @@ def accept_customer_booking(
     Accepts a customer-submitted booking request — moves it from
     "Awaiting Approval" to "Pending", after which it appears in the
     normal Service Terminal list and can be assigned a machine.
+
+    UPDATED: now also creates a "booking_accepted" notification for the
+    customer (see booking_controller.accept_customer_booking()).
     """
     return booking_controller.accept_customer_booking(db, booking_id, current_user)
 
@@ -211,8 +199,29 @@ def decline_customer_booking(
     BookingDeclineRequest) — the Service Terminal offers quick presets
     ("Fully booked", "Closed for the day", "Service unavailable") plus a
     free-text option. The reason is saved onto the booking so the
-    customer can see it on their end.
+    customer can see it on their end, AND now also fires a
+    "booking_declined" notification carrying that same reason.
     """
     return booking_controller.decline_customer_booking(
         db, booking_id, decline_data.reason, current_user
     )
+
+
+@router.patch("/{booking_id}/cancel", response_model=BookingResponse)
+async def cancel_customer_booking(
+    booking_id: int,
+    current_customer: models.Customer = Depends(get_current_customer),  # ⬅️ galing sa customer JWT
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Kinakansela ng CUSTOMER MISMO (mobile app) ang sarili nilang
+    booking. Pinapayagan lang habang "Awaiting Approval" o "Pending" pa
+    ang status (wala pang naka-attach na machine/resources). Naka-scope
+    sa naka-login na customer's JWT — hindi pwedeng kanselahin ang
+    booking ng ibang customer.
+
+    Gumagawa ng "booking_cancelled" notification bilang kumpirmasyon,
+    at nagbo-broadcast (WebSocket) sa Service Terminal ng shop para agad
+    nilang malaman kung meron.
+    """
+    return await booking_controller.cancel_customer_booking(db, booking_id, current_customer)

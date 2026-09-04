@@ -3,8 +3,8 @@ from app.schemas import BookingCreate, BookingAssignMachine, CustomerBookingCrea
 from app.services.prediction_service import PredictionService
 from app.services.ws_manager import manager
 from app.controller import inventory_controller
+from app.controller import notification_controller
 from app.controller.activity_controller import log_activity
-from app.controller.notification_controller import create_notification
 from app import models
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
@@ -396,6 +396,45 @@ def get_active_bookings(db: Session, shop_id: int):
     )
 
 
+def _get_status_notification_content(new_status: str, booking: Booking):
+    """
+    NEW — Nagbabalik ng (type, title, message) tuple na naka-tugma sa
+    PARTIKULAR na status na pinasok ng booking. Ito ang gumagawa ng
+    magkakaibang notification kada pagbabago (In Progress, Ready,
+    Claimed, Cancelled) sa halip na iisang generic na "may update sa
+    booking mo" na paulit-ulit lang.
+
+    Nagbabalik ng None kung walang dapat i-notify para sa status na ito
+    (hal. "Pending", na karaniwang internal transition lang, hindi
+    kailangang batid agad ng customer bawat oras).
+    """
+    shop_label = booking.shop_name or "the shop"
+
+    content_map = {
+        "In Progress": (
+            "status_in_progress",
+            "Booking In Progress",
+            f"Your {booking.service_type} booking at {shop_label} is now in progress."
+        ),
+        "Ready": (
+            "status_ready",
+            "Ready for Pickup",
+            f"Your laundry at {shop_label} is ready for pickup!"
+        ),
+        "Claimed": (
+            "status_claimed",
+            "Booking Completed",
+            f"Your {booking.service_type} booking at {shop_label} has been completed. Thank you for booking with us!"
+        ),
+        "Cancelled": (
+            "status_cancelled",
+            "Booking Cancelled",
+            f"Your {booking.service_type} booking at {shop_label} was cancelled by the shop."
+        ),
+    }
+    return content_map.get(new_status)
+
+
 def update_booking_status(db: Session, booking_id: int, new_status: str, current_user: models.User):
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
@@ -405,15 +444,13 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
     is the endpoint used for status transitions including cancellation,
     so it's one of the more important actions to attribute correctly.
 
-    NEW (Notifications): if this booking has an associated mobile
-    customer (booking.customer_id is not None), a Notification row is
-    created for the relevant transitions — "In Progress" (being
-    processed), "Ready" (ready for pickup), "Claimed" (completed), and
-    "Cancelled" (shop-initiated cancellation, as opposed to the
-    customer cancelling their own booking via cancel_customer_booking()
-    below, which intentionally does NOT self-notify). create_notification()
-    is a no-op if customer_id is None (staff/terminal bookings), so no
-    extra branching is needed here for that case.
+    NEW (Notifications): kung ang booking na ito ay may naka-attach na
+    customer_id (galing sa mobile app), gumagawa ito ng isang
+    Notification para sa customer, na may sariling type/title/message
+    depende sa SPECIFIC na bagong status (see
+    _get_status_notification_content() sa itaas). Wala itong ginagawang
+    notification kung terminal-only ang booking (walang customer_id) o
+    kung ang bagong status ay wala sa content_map (hal. "Pending").
     """
     shop_id = current_user.shop_id
 
@@ -462,35 +499,19 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
             )
         )
 
-        # --- NOTIFICATION (mobile customer only, only for statuses the
-        # customer actually cares about seeing an event for) ---
-        notif_copy = {
-            "In Progress": (
-                "Your laundry is being processed",
-                f"{booking.shop_name or 'The shop'} is currently working on your {booking.service_type} order."
-            ),
-            "Ready": (
-                "Ready for pickup",
-                f"Your {booking.service_type} order at {booking.shop_name or 'the shop'} is ready."
-            ),
-            "Claimed": (
-                "Booking completed",
-                f"Your {booking.service_type} order at {booking.shop_name or 'the shop'} is complete. Thank you!"
-            ),
-            "Cancelled": (
-                "Booking cancelled",
-                f"{booking.shop_name or 'The shop'} cancelled your {booking.service_type} booking."
-            ),
-        }
-        if new_status in notif_copy:
-            title, message = notif_copy[new_status]
-            create_notification(
-                db,
-                customer_id=booking.customer_id,
-                title=title,
-                message=message,
-                booking_id=booking.id
-            )
+        # --- CUSTOMER NOTIFICATION (only for mobile-sourced bookings) ---
+        if booking.customer_id:
+            notif_content = _get_status_notification_content(new_status, booking)
+            if notif_content:
+                notif_type, notif_title, notif_message = notif_content
+                notification_controller.create_notification(
+                    db,
+                    customer_id=booking.customer_id,
+                    notif_type=notif_type,
+                    title=notif_title,
+                    message=notif_message,
+                    booking_id=booking.id
+                )
 
         db.commit()
         return (
@@ -738,18 +759,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         if promo_record:
             promo_record.times_used += 1
 
-        # --- NOTIFICATION --- (booking.id available after the flush()
-        # above; shop_name property works since Shop.shop = "shop" is
-        # already loaded — we fetched it via `shop` variable earlier in
-        # this function)
-        create_notification(
-            db,
-            customer_id=customer.id,
-            title="Booking submitted",
-            message=f"Your {booking_data.service_type} booking at {shop.shop_name} was sent. Waiting for the shop to respond.",
-            booking_id=new_booking.id
-        )
-
         db.commit()
         db.refresh(new_booking)
 
@@ -844,6 +853,11 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
     Approval" to "Pending", at which point it behaves exactly like any
     manually-created booking (appears in the Service Terminal, can be
     assigned a machine via assign_machine_to_booking()).
+
+    NEW (Notification): gumagawa rin ito ngayon ng "booking_accepted"
+    notification para sa customer, para malaman nila agad (sa
+    Notification Page + bell badge) na tinanggap na ng shop ang
+    kanilang request.
     """
     shop_id = current_user.shop_id
 
@@ -869,14 +883,18 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
             description=f"Accepted mobile booking request from {booking.customer_name} - {booking.service_type}"
         )
 
-        # --- NOTIFICATION ---
-        create_notification(
-            db,
-            customer_id=booking.customer_id,
-            title="Booking confirmed",
-            message=f"{booking.shop_name or 'The shop'} accepted your {booking.service_type} booking.",
-            booking_id=booking.id
-        )
+        if booking.customer_id:
+            notification_controller.create_notification(
+                db,
+                customer_id=booking.customer_id,
+                notif_type="booking_accepted",
+                title="Booking Accepted",
+                message=(
+                    f"Good news! Your {booking.service_type} booking at "
+                    f"{booking.shop_name or 'the shop'} has been accepted and is now being processed."
+                ),
+                booking_id=booking.id
+            )
 
         db.commit()
         db.refresh(booking)
@@ -902,7 +920,12 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
     declined (e.g. "Fully booked") the next time they check the booking
     in the mobile app, instead of just seeing a bare "Declined" status.
     Also folded into the Activity Log description for the shop's own
-    history/accountability, AND into a Notification for the customer.
+    history/accountability.
+
+    NEW (Notification): gumagawa rin ito ngayon ng "booking_declined"
+    notification para sa customer, kasama ang parehong `reason` sa
+    message — hindi na nila kailangang pumunta pa sa History page para
+    lang malaman kung bakit hindi natuloy ang booking nila.
     """
     shop_id = current_user.shop_id
 
@@ -932,14 +955,18 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
             )
         )
 
-        # --- NOTIFICATION ---
-        create_notification(
-            db,
-            customer_id=booking.customer_id,
-            title="Booking declined",
-            message=f"{booking.shop_name or 'The shop'} declined your {booking.service_type} booking: {reason}",
-            booking_id=booking.id
-        )
+        if booking.customer_id:
+            notification_controller.create_notification(
+                db,
+                customer_id=booking.customer_id,
+                notif_type="booking_declined",
+                title="Booking Declined",
+                message=(
+                    f"Unfortunately, your {booking.service_type} booking at "
+                    f"{booking.shop_name or 'the shop'} was declined. Reason: {reason}"
+                ),
+                booking_id=booking.id
+            )
 
         db.commit()
         db.refresh(booking)
@@ -952,29 +979,25 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
         )
 
 
-def cancel_customer_booking(db: Session, booking_id: int, customer: models.Customer):
+async def cancel_customer_booking(db: Session, booking_id: int, customer: models.Customer):
     """
-    NEW — Lets the CUSTOMER cancel their own booking from the mobile app
-    (as opposed to update_booking_status(), which is the shop/staff-side
-    status control). Scoped to Booking.customer_id == customer.id so a
-    customer can never cancel someone else's booking by guessing an ID.
+    NEW — Kinakansela ng CUSTOMER mismo (mobile app) ang sarili nilang
+    booking. Pinapayagan lang ito habang ang status ay "Awaiting
+    Approval" o "Pending" — sa dalawang puntong ito, wala pang aktibong
+    machine cycle/resources na ginagamit ng shop para dito. Kapag
+    "In Progress" na (naka-assign na ng washer/dryer, umiikot na ang
+    machine), hindi na ito basta pwedeng kanselahin mula sa app —
+    kailangan nang direktang kausapin ang shop, dahil may naikuha nang
+    hardware resource ang shop para dito.
 
-    Only allowed while status is "Awaiting Approval" or "Pending" — once
-    a machine has actually started running the order ("In Progress" or
-    later), cancelling from the app could leave a machine mid-cycle with
-    no way for the shop to know it was aborted from their side. At that
-    point the customer needs to contact the shop directly instead.
+    Naka-scope sa Booking.customer_id == customer.id (hindi lang
+    booking_id) para hindi makakansela ang isang customer ng booking ng
+    ibang tao sa pamamagitan lang ng pag-guess ng ID.
 
-    Deliberately does NOT create a Notification — the customer is the
-    one performing this action, so notifying them of their own action
-    would be redundant. (Contrast with update_booking_status() above,
-    where a SHOP-initiated cancellation DOES notify the customer, since
-    they wouldn't otherwise know it happened.)
-
-    If a machine was already assigned (shouldn't normally be true for
-    "Pending" bookings, but defensively handled anyway), it's released
-    back to Available, mirroring update_booking_status()'s behavior for
-    the "Cancelled" transition.
+    Gumagawa rin ito ng notification PARA SA CUSTOMER MISMO (type
+    "booking_cancelled") bilang kumpirmasyon na naitala ang kanilang
+    pagkansela, at nagbo-broadcast sa Service Terminal (WebSocket) para
+    agad na malaman ng shop kung meron.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -992,19 +1015,23 @@ def cancel_customer_booking(db: Session, booking_id: int, customer: models.Custo
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"This booking can no longer be cancelled from the app "
-                f"(current status: '{booking.status}'). Please contact the shop directly."
+                f"This booking can no longer be cancelled (current status: "
+                f"'{booking.status}'). Please contact the shop directly."
             )
         )
 
+    old_status = booking.status
     booking.status = "Cancelled"
 
-    assigned_ids = [
-        m_id for m_id in [booking.washer_id, booking.dryer_id]
-        if m_id is not None
-    ]
+    # Defensive: release any machine that may already be attached.
+    # Normally wala pa nito sa "Awaiting Approval"/"Pending", pero
+    # sinasaklaw pa rin natin ito kung sakaling may edge case.
+    assigned_ids = [m_id for m_id in [booking.washer_id, booking.dryer_id] if m_id is not None]
     if assigned_ids:
-        machines = db.query(Machine).filter(Machine.id.in_(assigned_ids)).all()
+        machines = db.query(Machine).filter(
+            Machine.id.in_(assigned_ids),
+            Machine.shop_id == booking.shop_id
+        ).all()
         for machine in machines:
             if machine.status != "Maintenance":
                 machine.status = "Available"
@@ -1013,9 +1040,52 @@ def cancel_customer_booking(db: Session, booking_id: int, customer: models.Custo
                 machine.current_price = 0.0
 
     try:
+        log_activity(
+            db, booking.shop_id,
+            actor_name=customer.full_name,
+            actor_role="customer",
+            description=(
+                f"Customer cancelled their {old_status} booking - {booking.service_type}"
+            )
+        )
+
+        notification_controller.create_notification(
+            db,
+            customer_id=customer.id,
+            notif_type="booking_cancelled",
+            title="Booking Cancelled",
+            message=(
+                f"You've cancelled your {booking.service_type} booking at "
+                f"{booking.shop_name or 'the shop'}."
+            ),
+            booking_id=booking.id
+        )
+
         db.commit()
         db.refresh(booking)
-        return booking
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used)
+            )
+            .filter(Booking.id == booking.id)
+            .first()
+        )
+
+        # --- WEBSOCKET BROADCAST --- tahimik lang kung walang
+        # naka-connect na Service Terminal ngayon (walang error).
+        await manager.broadcast(booking.shop_id, {
+            "type": "booking_cancelled_by_customer",
+            "booking_id": reloaded.id,
+            "customer_name": reloaded.customer_name,
+            "service_type": reloaded.service_type,
+        })
+
+        return reloaded
     except Exception as e:
         db.rollback()
         raise HTTPException(

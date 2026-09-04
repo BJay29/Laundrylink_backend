@@ -341,6 +341,23 @@ class Customer(Base):
     # ang mga notification kung matanggal man ang customer account.
     notifications = relationship("Notification", back_populates="customer", cascade="all, delete-orphan")
 
+    # NEW — mga naka-save na address ng customer (Home, Work, atbp.),
+    # ginagamit sa Profile page's "Saved addresses" section, at pwedeng
+    # gamitin sa hinaharap para mabilis mapili sa delivery bookings
+    # imbes na i-type paulit-ulit ang parehong address.
+    addresses = relationship("Address", back_populates="customer", cascade="all, delete-orphan")
+
+    # NEW — kontrolado ng customer sa Profile > Settings kung gusto ba
+    # nilang tumanggap ng notifications (booking accepted/declined/status
+    # updates). server_default="true" para lahat ng EXISTING rows ay
+    # naka-ON pa rin bilang default pagkatapos ng migration, hindi lang
+    # bagong accounts. Hindi ito humaharang sa Notification creation
+    # mismo — responsibilidad ito ng CALLER (booking_controller) na
+    # tingnan muna ang flag na ito bago tumawag sa
+    # notification_controller.create_notification(), para panatilihing
+    # simple ang Notification model/controller.
+    notifications_enabled = Column(Boolean, default=True, nullable=False, server_default="true")
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -349,6 +366,7 @@ class Customer(Base):
             "mobile_number": self.mobile_number,
             "is_active": self.is_active,
             "is_verified": self.is_verified,
+            "notifications_enabled": self.notifications_enabled,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
@@ -593,7 +611,7 @@ class BookingAddOnUsage(Base):
 
 class Notification(Base):
     """
-    NEW — Isang notification entry para sa isang customer, karaniwan ay
+    Isang notification entry para sa isang customer, karaniwan ay
     nauugnay sa isang partikular na Booking status change (submitted,
     accepted, declined, in progress, ready, claimed, cancelled).
 
@@ -605,6 +623,15 @@ class Notification(Base):
     (Awaiting Approval → Pending, Pending → In Progress, atbp.) ay
     isang HIWALAY na row — totoong history ng mga pangyayari, hindi
     isang "snapshot" lang ng pinaka-huling status.
+
+    NEW — `type` column: hiwalay sa `title`/`message` (na parehong
+    naka-freeform text), ito ay isang machine-readable string (hal.
+    "booking_accepted", "booking_declined", "status_in_progress",
+    "status_ready", "status_claimed", "status_cancelled",
+    "booking_cancelled") na ginagamit ng frontend para pumili ng tamang
+    icon/kulay kada notification nang hindi na kailangang mag-parse pa
+    ng laman ng `message`. Default "general" bilang safe fallback para
+    sa anumang notification na hindi (pa) naka-categorize.
 
     is_read ay nagbibigay-daan sa tunay na read/unread na UI sa mobile
     app (bell badge count = bilang ng is_read == False), sa halip na
@@ -622,6 +649,7 @@ class Notification(Base):
     customer_id = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False)
     booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
 
+    type = Column(String, nullable=False, default="general")
     title = Column(String, nullable=False)      # e.g. "Booking confirmed"
     message = Column(String, nullable=False)    # e.g. "CleanWave Laundry accepted your Regular Wash booking."
 
@@ -637,6 +665,7 @@ class Notification(Base):
             "id": self.id,
             "customer_id": self.customer_id,
             "booking_id": self.booking_id,
+            "type": self.type,
             "title": self.title,
             "message": self.message,
             "is_read": self.is_read,
@@ -688,4 +717,50 @@ class ActivityLog(Base):
             "actor_role": self.actor_role,
             "description": self.description,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None
+        }
+
+
+class Address(Base):
+    """
+    NEW — Isang naka-save na address ng isang customer (mobile app),
+    bumubuo sa "Saved addresses" section ng Profile page. Dinisenyo
+    itong madaling i-reuse sa hinaharap para mapili na lang ng customer
+    ang isang saved address sa halip na mag-type paulit-ulit tuwing
+    gagawa ng delivery booking.
+
+    label: libreng text pero karaniwang "Home", "Work", "Other", atbp.
+    Hindi dinagdagan ng allowed-values validator dahil gusto nating
+    payagan ang customer na mag-type ng sarili nilang label
+    (hal. "Mom's House").
+
+    is_default: isa lang dapat ang True sa lahat ng address ng isang
+    customer sa anumang oras — pinapatupad ito sa CONTROLLER level
+    (address_controller.py), hindi sa DB constraint, para mas simple
+    ang migration at flexible pa rin sa hinaharap.
+    """
+    __tablename__ = "addresses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False)
+
+    label = Column(String, nullable=False, default="Home")
+    address_line = Column(String, nullable=False)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    is_default = Column(Boolean, default=False, nullable=False, server_default="false")
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    customer = relationship("Customer", back_populates="addresses")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "customer_id": self.customer_id,
+            "label": self.label,
+            "address_line": self.address_line,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "is_default": self.is_default,
+            "created_at": self.created_at.isoformat() if self.created_at else None
         }

@@ -123,6 +123,11 @@ class CustomerResponse(BaseModel):
     mobile_number: str
     is_active: bool
     is_verified: bool
+    # NEW — kasabay ng Customer.notifications_enabled sa models.py.
+    # Ginagamit ng Settings section (notification toggle) para malaman
+    # kung naka-ON o OFF ito nang hindi na kailangang mag-fetch pa ng
+    # hiwalay na endpoint para lang dito.
+    notifications_enabled: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -140,6 +145,137 @@ class CustomerVerifyEmail(BaseModel):
 class CustomerResendCode(BaseModel):
     """Schema for requesting a new verification code."""
     email: EmailStr
+
+# --- CUSTOMER PROFILE EDIT SCHEMAS (NEW) ---
+
+class CustomerUpdate(BaseModel):
+    """
+    Schema para sa "Personal information" edit form sa Profile page.
+    Parehong optional (partial update) ang dalawang field — pwedeng
+    baguhin ang isa lang, o pareho. Email at password ay SINASADYANG
+    HINDI kasama dito: may sariling dedikadong "Change password" flow
+    ang password (see CustomerPasswordUpdate), at ang email ay hindi
+    muna pinapayagang baguhin dahil ginagamit ito bilang unique login
+    identifier (baka kailangan pa ng re-verification flow balang araw
+    kung papayagan itong baguhin).
+    """
+    full_name: Optional[str] = None
+    mobile_number: Optional[str] = None
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v):
+        if v is not None:
+            cleaned = v.strip()
+            if not cleaned:
+                raise ValueError("Full name cannot be empty.")
+            return cleaned
+        return v
+
+    @field_validator("mobile_number")
+    @classmethod
+    def validate_mobile_number(cls, v):
+        if v is not None:
+            cleaned = v.strip()
+            if not cleaned:
+                raise ValueError("Mobile number cannot be empty.")
+            return cleaned
+        return v
+
+
+class CustomerPasswordUpdate(BaseModel):
+    """
+    Schema para sa "Change password" form sa Settings. Hiwalay ito sa
+    generic PasswordUpdate (ginagamit ng shop Owner/Staff sa web app)
+    kahit magkaparehong laman, para malinaw na naka-scope sa customer
+    flow ito at pwedeng mag-iba ang validation rules nila balang araw
+    nang hindi nagkakabanggaan.
+    """
+    old_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v):
+        if len(v) < 8:
+            raise ValueError("New password must be at least 8 characters long.")
+        return v
+
+
+class CustomerNotificationSettingsUpdate(BaseModel):
+    """Schema para sa notification on/off toggle sa Settings."""
+    notifications_enabled: bool
+
+# --- ADDRESS (SAVED ADDRESSES) SCHEMAS (NEW) ---
+
+class AddressBase(BaseModel):
+    """
+    Base schema para sa isang naka-save na address ng customer.
+    latitude/longitude ay optional — pwedeng plain text address lang
+    (walang pin sa mapa) kung 'yun ang gagamitin ng Saved Addresses UI.
+    """
+    label: str = "Home"
+    address_line: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    is_default: bool = False
+
+    @field_validator("label")
+    @classmethod
+    def validate_label(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Label cannot be empty.")
+        return cleaned
+
+    @field_validator("address_line")
+    @classmethod
+    def validate_address_line(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Address cannot be empty.")
+        return cleaned
+
+
+class AddressCreate(AddressBase):
+    """Schema para sa paggawa ng bagong saved address."""
+    pass
+
+
+class AddressUpdate(BaseModel):
+    """Schema para sa pag-edit ng existing address. Lahat optional (partial update)."""
+    label: Optional[str] = None
+    address_line: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    is_default: Optional[bool] = None
+
+    @field_validator("label")
+    @classmethod
+    def validate_label(cls, v):
+        if v is not None:
+            cleaned = v.strip()
+            if not cleaned:
+                raise ValueError("Label cannot be empty.")
+            return cleaned
+        return v
+
+    @field_validator("address_line")
+    @classmethod
+    def validate_address_line(cls, v):
+        if v is not None:
+            cleaned = v.strip()
+            if not cleaned:
+                raise ValueError("Address cannot be empty.")
+            return cleaned
+        return v
+
+
+class AddressResponse(AddressBase):
+    """Full response schema para sa Saved Addresses list sa Profile page."""
+    id: int
+    customer_id: int
+    model_config = ConfigDict(from_attributes=True)
 
 # --- SERVICE TYPE SCHEMAS ---
 
@@ -867,9 +1003,17 @@ class NotificationResponse(BaseModel):
     reasoning. is_read powers the actual read/unread UI + bell badge
     count, replacing the old client-side heuristic that guessed
     "read" from whether the booking's status was final.
+
+    NEW — `type` field (see Notification.type in models.py): a
+    machine-readable string ("booking_accepted", "booking_declined",
+    "status_in_progress", "status_ready", "status_claimed",
+    "status_cancelled", "booking_cancelled", "general") the frontend
+    uses to pick the right icon/color per notification without parsing
+    the free-text `message`.
     """
     id: int
     booking_id: Optional[int] = None
+    type: str = "general"
     title: str
     message: str
     is_read: bool
@@ -882,6 +1026,14 @@ class NotificationMarkReadResponse(BaseModel):
     """Simple confirmation response for the mark-read / mark-all-read endpoints."""
     message: str
     updated_count: int
+
+
+class UnreadCountResponse(BaseModel):
+    """
+    NEW — Simple response para sa GET /notifications/unread-count,
+    pinapakita ng bell icon badge (tuldok/number) sa top bar.
+    """
+    unread_count: int
 
 # --- CUSTOMER-FACING (PUBLIC) SHOP SCHEMAS ---
 
