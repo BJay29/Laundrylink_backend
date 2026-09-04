@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from app.database import engine, SessionLocal
 from app import models
 # Import routes
-from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes, activity_routes, shop_routes, websocket_routes, addon_routes, promo_routes
+from app.routes import auth_routes, customer_auth_routes, booking_routes, machine_routes, setting_routes, analytics_routes, inventory_routes, activity_routes, shop_routes, websocket_routes, addon_routes, promo_routes, notification_routes
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -170,6 +170,7 @@ app.include_router(shop_routes.router)
 app.include_router(websocket_routes.router)
 app.include_router(addon_routes.router)
 app.include_router(promo_routes.router)
+app.include_router(notification_routes.router)
 
 # --- ROOT HEALTH CHECK ---
 

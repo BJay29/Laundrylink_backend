@@ -150,6 +150,23 @@ def get_my_bookings(
     return booking_controller.get_customer_bookings(db, current_customer.id)
 
 
+@router.patch("/{booking_id}/cancel", response_model=BookingResponse)
+def cancel_customer_booking(
+    booking_id: int,
+    current_customer: models.Customer = Depends(get_current_customer),  # ⬅️ galing sa customer JWT
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Lets the CUSTOMER cancel their own booking from the mobile
+    app's Booking Page. Only works while status is "Awaiting Approval"
+    or "Pending" (see cancel_customer_booking() in booking_controller.py
+    for why "In Progress" and beyond are blocked). Distinct from PATCH
+    /{booking_id}/status, which is the shop/staff-side endpoint and
+    requires a User (not Customer) JWT.
+    """
+    return booking_controller.cancel_customer_booking(db, booking_id, current_customer)
+
+
 @router.get("/awaiting-approval", response_model=List[BookingResponse])
 def get_awaiting_approval_bookings(
     current_user: models.User = Depends(get_current_user),  # ⬅️ galing sa JWT

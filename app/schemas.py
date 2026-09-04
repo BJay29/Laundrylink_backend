@@ -857,6 +857,32 @@ class ActivityLogResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+# --- NOTIFICATION SCHEMAS ---
+
+class NotificationResponse(BaseModel):
+    """
+    A single notification entry for the mobile app's Notifications page.
+    One row per booking-status EVENT (not a snapshot of current status) —
+    see the Notification model docstring in models.py for the full
+    reasoning. is_read powers the actual read/unread UI + bell badge
+    count, replacing the old client-side heuristic that guessed
+    "read" from whether the booking's status was final.
+    """
+    id: int
+    booking_id: Optional[int] = None
+    title: str
+    message: str
+    is_read: bool
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationMarkReadResponse(BaseModel):
+    """Simple confirmation response for the mark-read / mark-all-read endpoints."""
+    message: str
+    updated_count: int
+
 # --- CUSTOMER-FACING (PUBLIC) SHOP SCHEMAS ---
 
 class ShopServicePreview(BaseModel):
@@ -931,12 +957,20 @@ class ShopProfileUpdate(BaseModel):
     UPDATED: Added has_delivery + delivery_fee — parehong Shop model
     fields, kaya same update_shop_profile() controller function ang
     humahawak nito (walang bagong controller function na kailangan).
+
+    UPDATED: Added latitude + longitude — parehong Shop model fields
+    din, same generic update_shop_profile() loop ang humahawak. Kailangan
+    ito para may totoong coordinates ang shop para sa weather-based
+    forecasting (see app/services/weather_service.py) — dati walang
+    paraan para ma-set ito kahit saan sa API.
     """
     shop_name: Optional[str] = None
     address: Optional[str] = None
     email: Optional[EmailStr] = None
     has_delivery: Optional[bool] = None
     delivery_fee: Optional[float] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
     @field_validator("delivery_fee")
     @classmethod
@@ -945,17 +979,39 @@ class ShopProfileUpdate(BaseModel):
             raise ValueError("delivery_fee cannot be negative.")
         return v
 
+    @field_validator("latitude")
+    @classmethod
+    def validate_latitude(cls, v):
+        if v is not None and not (-90.0 <= v <= 90.0):
+            raise ValueError("latitude must be between -90 and 90.")
+        return v
+
+    @field_validator("longitude")
+    @classmethod
+    def validate_longitude(cls, v):
+        if v is not None and not (-180.0 <= v <= 180.0):
+            raise ValueError("longitude must be between -180 and 180.")
+        return v
+
 class PasswordUpdate(BaseModel):
     """Schema for validating password change requests."""
     old_password: str
     new_password: str
 
 class ShopProfileResponse(BaseModel):
-    """Schema for returning the current shop profile data."""
+    """
+    Schema for returning the current shop profile data.
+
+    UPDATED: Added latitude/longitude — surfaced here so the frontend's
+    Profile Settings form can show/set the shop's coordinates, which
+    the forecast pipeline needs to fetch real local weather.
+    """
     shop_name: str
     address: str
     email: str
     has_delivery: bool = False
     delivery_fee: float = 0.0
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)

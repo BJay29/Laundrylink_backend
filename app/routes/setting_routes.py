@@ -215,6 +215,8 @@ def get_shop_profile(
         email=current_user.email,
         has_delivery=shop.has_delivery,
         delivery_fee=shop.delivery_fee,
+        latitude=shop.latitude,
+        longitude=shop.longitude,
     )
 
 
@@ -245,6 +247,8 @@ def update_shop_profile(
         email=current_user.email,
         has_delivery=updated_shop.has_delivery,
         delivery_fee=updated_shop.delivery_fee,
+        latitude=updated_shop.latitude,
+        longitude=updated_shop.longitude,
     )
 
 

@@ -335,6 +335,12 @@ class Customer(Base):
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # NEW — isang customer ay pwedeng magkaroon ng maraming notification
+    # entries (isa per booking-status event — see Notification class sa
+    # ibaba). cascade="all, delete-orphan" para awtomatikong malinis din
+    # ang mga notification kung matanggal man ang customer account.
+    notifications = relationship("Notification", back_populates="customer", cascade="all, delete-orphan")
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -583,6 +589,58 @@ class BookingAddOnUsage(Base):
             "add_on_id": self.add_on_id,
             "add_on_name": self.add_on.name if self.add_on else None,
             "price_at_booking": self.price_at_booking,
+        }
+
+class Notification(Base):
+    """
+    NEW — Isang notification entry para sa isang customer, karaniwan ay
+    nauugnay sa isang partikular na Booking status change (submitted,
+    accepted, declined, in progress, ready, claimed, cancelled).
+
+    SADYANG hiwalay ito sa "current booking status" (BookingResponse) —
+    dating derive-lang ang mga "notification" sa mobile app mula sa
+    kasalukuyang status ng bawat booking, kaya IISA lang ang lumalabas
+    per booking (nagbabago lang ang text kapag nagbago ang status,
+    hindi dumadami). Sa pag-iral ng table na ito, bawat TRANSITION
+    (Awaiting Approval → Pending, Pending → In Progress, atbp.) ay
+    isang HIWALAY na row — totoong history ng mga pangyayari, hindi
+    isang "snapshot" lang ng pinaka-huling status.
+
+    is_read ay nagbibigay-daan sa tunay na read/unread na UI sa mobile
+    app (bell badge count = bilang ng is_read == False), sa halip na
+    yung dating heuristic na ibinabase na lang sa "final" statuses.
+
+    booking_id ay NULLABLE at ondelete="SET NULL" — kung sakaling
+    matanggal ang booking (hindi dapat mangyari sa normal flow, pero
+    hindi rin sinasadyang ipagbawal dito), mananatili pa rin ang
+    notification record bilang history, hindi na lang naka-link sa
+    isang partikular na booking.
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False)
+    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
+
+    title = Column(String, nullable=False)      # e.g. "Booking confirmed"
+    message = Column(String, nullable=False)    # e.g. "CleanWave Laundry accepted your Regular Wash booking."
+
+    is_read = Column(Boolean, default=False, nullable=False, server_default="false")
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    customer = relationship("Customer", back_populates="notifications")
+    booking = relationship("Booking")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "customer_id": self.customer_id,
+            "booking_id": self.booking_id,
+            "title": self.title,
+            "message": self.message,
+            "is_read": self.is_read,
+            "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
 class ActivityLog(Base):

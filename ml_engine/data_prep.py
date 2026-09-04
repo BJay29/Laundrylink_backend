@@ -18,10 +18,27 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.database import SessionLocal
-from app.models import Booking
+from app.models import Booking, Shop
+from app.services import weather_service
 
-# Feature columns used by the machine learning model
-FEATURE_COLUMNS = ["day_index", "day_of_week", "is_weekend", "booking_count", "total_loads"]
+# Feature columns used by the PER-SHOP machine learning model.
+# UPDATED: added "rain_mm" — daily rainfall (mm) at the shop's own
+# location, matched by date against real historical weather.
+FEATURE_COLUMNS = ["day_index", "day_of_week", "is_weekend", "booking_count", "total_loads", "rain_mm"]
+
+# Feature columns used by the POOLED (multi-shop, cold-start) model.
+# No day_index/booking_count/total_loads here — those are meaningful
+# only within a single shop's own trend/scale, not across shops with
+# different sizes and different start dates. Weekday pattern + rain are
+# the only signals that generalize across shops.
+POOLED_FEATURE_COLUMNS = ["day_of_week", "is_weekend", "rain_mm"]
+
+# Minimum number of daily rows a shop must have before its data is
+# folded into the pooled/global training set. Matches the 14-day floor
+# already enforced for training a shop's own model in ml_engine/train.py,
+# so a shop only ever "graduates" from contributing-to-pooled to
+# having-its-own-model, never skips a state.
+MIN_DAYS_FOR_POOLING = 14
 
 
 def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
@@ -60,11 +77,28 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     # Prepare time-series features
     frame["booking_date"] = pd.to_datetime(frame["booking_date"])
     first_date = frame["booking_date"].min()
-    
+
     # Calculate index, weekday, and weekend status for the AI model
     frame["day_index"] = (frame["booking_date"] - first_date).dt.days.astype(int)
     frame["day_of_week"] = frame["booking_date"].dt.weekday.astype(int)
     frame["is_weekend"] = frame["day_of_week"].isin([5, 6]).astype(int)
+
+    # NEW — attach real historical rainfall for this shop's own location,
+    # matched to each booking date. If the shop has no lat/long set, or
+    # the external call fails, rain_mm falls back to 0.0 rather than
+    # breaking training.
+    shop = db.query(Shop).filter(Shop.id == shop_id).first()
+    rain_frame = weather_service.get_historical_rain_mm(
+        shop.latitude if shop else None,
+        shop.longitude if shop else None,
+        frame["booking_date"].min().date(),
+        frame["booking_date"].max().date(),
+    )
+    if not rain_frame.empty:
+        frame = frame.merge(rain_frame, on="booking_date", how="left")
+    else:
+        frame["rain_mm"] = 0.0
+    frame["rain_mm"] = frame["rain_mm"].fillna(0.0)
 
     return frame[
         [
@@ -76,8 +110,59 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
             "total_loads",
             "total_weight",
             "total_revenue",
+            "rain_mm",
         ]
     ]
+
+
+def fetch_pooled_daily_frame(db: Session) -> pd.DataFrame:
+    """
+    NEW — builds the multi-shop training set for the pooled/global
+    cold-start model.
+
+    Each contributing shop's daily booking_count and total_revenue are
+    converted into RATIOS against that shop's own average — this is
+    what lets a tiny shop and a big shop sit in the same training set
+    without the big shop's raw numbers dominating the fit. The pooled
+    model then learns "how much a day's revenue deviates from a shop's
+    own normal, given the day of week and how much it rained" — a
+    coefficient that transfers to a brand-new shop with zero history,
+    scaled by that new shop's own baseline once it has one (see
+    PredictionService._get_shop_baseline_revenue).
+
+    Shops with fewer than MIN_DAYS_FOR_POOLING days of data are skipped
+    entirely — not enough signal to compute a meaningful average yet.
+    """
+    shops = db.query(Shop).all()
+    pooled_rows = []
+
+    for shop in shops:
+        shop_frame = fetch_daily_booking_frame(db, shop_id=shop.id)
+        if shop_frame.empty or len(shop_frame) < MIN_DAYS_FOR_POOLING:
+            continue
+
+        avg_daily_bookings = shop_frame["booking_count"].mean()
+        avg_daily_revenue = shop_frame["total_revenue"].mean()
+        if avg_daily_bookings <= 0 or avg_daily_revenue <= 0:
+            continue
+
+        shop_frame = shop_frame.copy()
+        shop_frame["booking_ratio"] = shop_frame["booking_count"] / avg_daily_bookings
+        shop_frame["revenue_ratio"] = shop_frame["total_revenue"] / avg_daily_revenue
+        shop_frame["shop_id"] = shop.id
+
+        pooled_rows.append(
+            shop_frame[
+                ["shop_id", "booking_date", "day_of_week", "is_weekend", "rain_mm", "booking_ratio", "revenue_ratio"]
+            ]
+        )
+
+    if not pooled_rows:
+        return pd.DataFrame(
+            columns=["shop_id", "booking_date", "day_of_week", "is_weekend", "rain_mm", "booking_ratio", "revenue_ratio"]
+        )
+
+    return pd.concat(pooled_rows, ignore_index=True)
 
 
 def load_training_data(shop_id: int = 1) -> pd.DataFrame:
@@ -87,6 +172,15 @@ def load_training_data(shop_id: int = 1) -> pd.DataFrame:
     db = SessionLocal()
     try:
         return fetch_daily_booking_frame(db, shop_id=shop_id)
+    finally:
+        db.close()
+
+
+def load_pooled_training_data() -> pd.DataFrame:
+    """Establishes a database session and retrieves the pooled multi-shop frame."""
+    db = SessionLocal()
+    try:
+        return fetch_pooled_daily_frame(db)
     finally:
         db.close()
 

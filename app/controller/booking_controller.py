@@ -4,6 +4,7 @@ from app.services.prediction_service import PredictionService
 from app.services.ws_manager import manager
 from app.controller import inventory_controller
 from app.controller.activity_controller import log_activity
+from app.controller.notification_controller import create_notification
 from app import models
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
@@ -403,6 +404,16 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
     shop_id, for the same attribution reason as create_booking(). This
     is the endpoint used for status transitions including cancellation,
     so it's one of the more important actions to attribute correctly.
+
+    NEW (Notifications): if this booking has an associated mobile
+    customer (booking.customer_id is not None), a Notification row is
+    created for the relevant transitions — "In Progress" (being
+    processed), "Ready" (ready for pickup), "Claimed" (completed), and
+    "Cancelled" (shop-initiated cancellation, as opposed to the
+    customer cancelling their own booking via cancel_customer_booking()
+    below, which intentionally does NOT self-notify). create_notification()
+    is a no-op if customer_id is None (staff/terminal bookings), so no
+    extra branching is needed here for that case.
     """
     shop_id = current_user.shop_id
 
@@ -450,6 +461,36 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
                 f"{old_status} → {new_status}"
             )
         )
+
+        # --- NOTIFICATION (mobile customer only, only for statuses the
+        # customer actually cares about seeing an event for) ---
+        notif_copy = {
+            "In Progress": (
+                "Your laundry is being processed",
+                f"{booking.shop_name or 'The shop'} is currently working on your {booking.service_type} order."
+            ),
+            "Ready": (
+                "Ready for pickup",
+                f"Your {booking.service_type} order at {booking.shop_name or 'the shop'} is ready."
+            ),
+            "Claimed": (
+                "Booking completed",
+                f"Your {booking.service_type} order at {booking.shop_name or 'the shop'} is complete. Thank you!"
+            ),
+            "Cancelled": (
+                "Booking cancelled",
+                f"{booking.shop_name or 'The shop'} cancelled your {booking.service_type} booking."
+            ),
+        }
+        if new_status in notif_copy:
+            title, message = notif_copy[new_status]
+            create_notification(
+                db,
+                customer_id=booking.customer_id,
+                title=title,
+                message=message,
+                booking_id=booking.id
+            )
 
         db.commit()
         return (
@@ -697,6 +738,18 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         if promo_record:
             promo_record.times_used += 1
 
+        # --- NOTIFICATION --- (booking.id available after the flush()
+        # above; shop_name property works since Shop.shop = "shop" is
+        # already loaded — we fetched it via `shop` variable earlier in
+        # this function)
+        create_notification(
+            db,
+            customer_id=customer.id,
+            title="Booking submitted",
+            message=f"Your {booking_data.service_type} booking at {shop.shop_name} was sent. Waiting for the shop to respond.",
+            booking_id=new_booking.id
+        )
+
         db.commit()
         db.refresh(new_booking)
 
@@ -815,6 +868,16 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
             actor_role=current_user.role,
             description=f"Accepted mobile booking request from {booking.customer_name} - {booking.service_type}"
         )
+
+        # --- NOTIFICATION ---
+        create_notification(
+            db,
+            customer_id=booking.customer_id,
+            title="Booking confirmed",
+            message=f"{booking.shop_name or 'The shop'} accepted your {booking.service_type} booking.",
+            booking_id=booking.id
+        )
+
         db.commit()
         db.refresh(booking)
         return booking
@@ -839,7 +902,7 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
     declined (e.g. "Fully booked") the next time they check the booking
     in the mobile app, instead of just seeing a bare "Declined" status.
     Also folded into the Activity Log description for the shop's own
-    history/accountability.
+    history/accountability, AND into a Notification for the customer.
     """
     shop_id = current_user.shop_id
 
@@ -868,6 +931,16 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
                 f"- {booking.service_type} (Reason: {reason})"
             )
         )
+
+        # --- NOTIFICATION ---
+        create_notification(
+            db,
+            customer_id=booking.customer_id,
+            title="Booking declined",
+            message=f"{booking.shop_name or 'The shop'} declined your {booking.service_type} booking: {reason}",
+            booking_id=booking.id
+        )
+
         db.commit()
         db.refresh(booking)
         return booking
@@ -876,4 +949,76 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error declining booking: {str(e)}"
+        )
+
+
+def cancel_customer_booking(db: Session, booking_id: int, customer: models.Customer):
+    """
+    NEW — Lets the CUSTOMER cancel their own booking from the mobile app
+    (as opposed to update_booking_status(), which is the shop/staff-side
+    status control). Scoped to Booking.customer_id == customer.id so a
+    customer can never cancel someone else's booking by guessing an ID.
+
+    Only allowed while status is "Awaiting Approval" or "Pending" — once
+    a machine has actually started running the order ("In Progress" or
+    later), cancelling from the app could leave a machine mid-cycle with
+    no way for the shop to know it was aborted from their side. At that
+    point the customer needs to contact the shop directly instead.
+
+    Deliberately does NOT create a Notification — the customer is the
+    one performing this action, so notifying them of their own action
+    would be redundant. (Contrast with update_booking_status() above,
+    where a SHOP-initiated cancellation DOES notify the customer, since
+    they wouldn't otherwise know it happened.)
+
+    If a machine was already assigned (shouldn't normally be true for
+    "Pending" bookings, but defensively handled anyway), it's released
+    back to Available, mirroring update_booking_status()'s behavior for
+    the "Cancelled" transition.
+    """
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.customer_id == customer.id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    cancellable_statuses = ["Awaiting Approval", "Pending"]
+    if booking.status not in cancellable_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"This booking can no longer be cancelled from the app "
+                f"(current status: '{booking.status}'). Please contact the shop directly."
+            )
+        )
+
+    booking.status = "Cancelled"
+
+    assigned_ids = [
+        m_id for m_id in [booking.washer_id, booking.dryer_id]
+        if m_id is not None
+    ]
+    if assigned_ids:
+        machines = db.query(Machine).filter(Machine.id.in_(assigned_ids)).all()
+        for machine in machines:
+            if machine.status != "Maintenance":
+                machine.status = "Available"
+                machine.remaining_time = 0
+                machine.current_service_type = "None"
+                machine.current_price = 0.0
+
+    try:
+        db.commit()
+        db.refresh(booking)
+        return booking
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error cancelling booking: {str(e)}"
         )

@@ -190,17 +190,15 @@ class AnalyticsController:
     @staticmethod
     def get_forecast_data(db: Session, shop_id: int):
         """
-        NOTE: raw_forecast comes from PredictionService.get_revenue_forecast(),
-        which does NOT currently take a shop_id — meaning the AI forecast
-        numbers themselves are likely global/shop-1-only regardless of who's
-        viewing them, even though the "history" comparison data below IS
-        correctly shop-scoped. This is a separate, deeper issue (the ML
-        model itself may need to be trained per-shop) — flagging it here
-        rather than silently leaving it unaddressed. Worth reviewing
-        app/services/prediction_service.py and the feature_engineering
-        pipeline if per-shop forecasting accuracy matters for your use case.
+        FIXED: PredictionService.get_revenue_forecast() previously took no
+        shop_id at all, meaning the AI forecast numbers were effectively
+        global/shop-1-only regardless of who was viewing the dashboard —
+        every shop saw the exact same graph. It now takes shop_id and
+        resolves the forecast through a 3-tier fallback (the shop's own
+        trained model → the pooled/cold-start model → a weather-only
+        outlook for brand-new shops), documented in prediction_service.py.
         """
-        raw_forecast = PredictionService.get_revenue_forecast(days=7)
+        raw_forecast = PredictionService.get_revenue_forecast(shop_id=shop_id, days=7)
         ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
 
         return {

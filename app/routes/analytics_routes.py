@@ -35,6 +35,10 @@ def get_forecast_graph(
     """
     Returns the 7-day AI income and booking forecast data
     along with the AI-generated executive insight narrative.
+
+    Each row now includes "model_tier" ("shop_model" | "pooled_model" |
+    "weather_only") and "rain_mm" — see AnalyticsController.get_forecast_data()
+    and PredictionService.get_revenue_forecast() for the 3-tier fallback.
     """
     try:
         return AnalyticsController.get_forecast_data(db, shop_id)
@@ -98,8 +102,8 @@ def get_accuracy_metrics(db: Session = Depends(get_db)):
     """
     Returns AI model accuracy metrics read from model_metrics.json.
     Used by the Financial Forecast page AI Calibration section.
-    Not shop-specific — this reflects the global model's accuracy, not
-    per-shop data, so no shop_id is needed here.
+    Not shop-specific — this reflects whichever shop-specific model was
+    trained most recently, so no shop_id is needed here.
     """
     try:
         return AnalyticsController.get_ai_prediction_metrics(db)
@@ -108,15 +112,58 @@ def get_accuracy_metrics(db: Session = Depends(get_db)):
 
 
 @router.post("/retrain-model")
-def retrain_model():
+def retrain_model(
+    shop_id: int = Depends(get_current_shop_id),  # ⬅️ FIXED: dating always shop_id=1 regardless of caller
+    db: Session = Depends(get_db)
+):
     """
-    Manually triggers the AI model retraining pipeline.
-    Normally runs automatically every 24 hours via the scheduler.
+    Manually triggers the AI model retraining pipeline for the LOGGED-IN
+    user's own shop. Normally runs automatically every 24 hours via the
+    scheduler.
+
+    FIXED: this previously called PredictionService.retrain_model() with
+    no arguments, which trained shop_id=1's model regardless of which
+    shop the caller actually belonged to — meaning any owner clicking
+    "Retrain Model" was silently retraining shop 1's forecast, not
+    their own. It now trains the caller's own shop.
+
+    Requires 14+ days of this shop's own booking history — if the shop
+    doesn't have that yet, the forecast graph will keep serving from the
+    pooled/weather-only fallback tiers until it does.
     """
     try:
         from app.services.prediction_service import PredictionService
-        PredictionService.retrain_model()
-        return {"status": "success", "message": "Model retraining triggered successfully."}
+        PredictionService.retrain_model(shop_id=shop_id)
+        return {"status": "success", "message": f"Model retraining triggered successfully for shop {shop_id}."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/retrain-pooled-model")
+def retrain_pooled_model(
+    shop_id: int = Depends(get_current_shop_id),  # auth-gated, but not shop-scoped — see NOTE below
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — manually triggers training of the pooled/cold-start model
+    across every shop with enough history to contribute (see
+    ml_engine.data_prep.fetch_pooled_daily_frame). This is what powers
+    Tier 2 of a new shop's forecast, before that shop has trained a
+    model of its own.
+
+    NOTE: this affects the WHOLE platform's pooled model, not just the
+    caller's shop — shop_id here is only used to confirm the caller is
+    authenticated, same auth dependency as every other endpoint in this
+    file. If you want this restricted to owners only (rather than any
+    logged-in staff/manager), add a role check here once your role
+    dependency is available — none of the other /analytics endpoints
+    currently do role checks either, so this matches existing behavior
+    until that's decided.
+    """
+    try:
+        from app.services.prediction_service import PredictionService
+        PredictionService.retrain_pooled_model()
+        return {"status": "success", "message": "Pooled model retraining triggered successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
