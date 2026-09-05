@@ -1,6 +1,6 @@
 {
-    "accuracy_percentage": 87.95,
-    "mean_absolute_error": 302.15,
-    "r2_score": 0.96,
+    "accuracy_percentage": 92.49,
+    "mean_absolute_error": 368.37,
+    "r2_score": 0.8928,
     "validation_days": 18
 }

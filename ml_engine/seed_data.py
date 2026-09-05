@@ -2,9 +2,19 @@
 Seed 90 days of realistic laundry booking history for model training.
 
 Run from the project root:
-    python -m ml_engine.seed_data
+    python -m ml_engine.seed_data                    # seeds shop_id=1 (default)
+    python -m ml_engine.seed_data --shop-id 2         # seeds a different shop
+    python -m ml_engine.seed_data --reset-window
 
-Use --reset-window to replace existing bookings in the generated date window.
+UPDATED: shop_id is now a CLI argument instead of a hardcoded constant.
+
+UPDATED: also ensures an Owner User account exists for this shop, so you
+can actually log in and see the seeded data on the Dashboard — the
+seeded Shop/Setting/Machine/Booking rows alone don't give you a login,
+since this script writes straight to the database and never touched
+the User table before. Idempotent: if an account with --owner-email
+already exists, it's left alone (password is NOT reset), so re-running
+this script is always safe.
 """
 
 from __future__ import annotations
@@ -20,13 +30,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from passlib.context import CryptContext
+
 from app.database import SessionLocal, engine
-from app.models import Base, Booking, Machine, Setting, Shop
+from app.models import Base, Booking, Machine, Setting, Shop, User
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-SHOP_ID = 1
 WINDOW_DAYS = 90
 RANDOM_SEED = 42
+
+DEFAULT_OWNER_EMAIL = "shopa@gmail.com"
+DEFAULT_OWNER_PASSWORD = "12345678"
+DEFAULT_OWNER_NAME = "Shop A Owner"
 
 SERVICE_CONFIG = {
     "Full Service": {"category": "Mixed Laundry", "base_price": 210.0, "min_kg": 5.0, "max_kg": 9.5, "weight": 0.38},
@@ -45,29 +61,25 @@ CUSTOMER_LAST_NAMES = [
 ]
 
 
-def _ensure_shop(db) -> Shop:
-    shop = db.query(Shop).filter(Shop.id == SHOP_ID).first()
+def _ensure_shop(db, shop_id: int, shop_name: str) -> Shop:
+    shop = db.query(Shop).filter(Shop.id == shop_id).first()
     if shop:
         return shop
 
-    shop = Shop(id=SHOP_ID, shop_name="LaundryLink Demo Shop", address="Naga City")
+    shop = Shop(id=shop_id, shop_name=shop_name, address="Naga City")
     db.add(shop)
     db.flush()
     return shop
 
 
-def _ensure_settings(db) -> None:
-    settings = db.query(Setting).filter(Setting.shop_id == SHOP_ID).first()
+def _ensure_settings(db, shop_id: int) -> None:
+    settings = db.query(Setting).filter(Setting.shop_id == shop_id).first()
     if settings:
         return
 
     db.add(
         Setting(
-            shop_id=SHOP_ID,
-            full_service_price=210.0,
-            regular_wash_price=65.0,
-            titan_wash_price=100.0,
-            comforter_price=150.0,
+            shop_id=shop_id,
             electricity_rate=12.0,
             water_rate=50.0,
             detergent_cost_per_load=10.0,
@@ -77,8 +89,8 @@ def _ensure_settings(db) -> None:
     )
 
 
-def _ensure_machines(db) -> tuple[list[Machine], list[Machine]]:
-    existing = db.query(Machine).filter(Machine.shop_id == SHOP_ID).all()
+def _ensure_machines(db, shop_id: int) -> tuple[list[Machine], list[Machine]]:
+    existing = db.query(Machine).filter(Machine.shop_id == shop_id).all()
     washers = [machine for machine in existing if machine.machine_type.lower() == "washer"]
     dryers = [machine for machine in existing if machine.machine_type.lower() == "dryer"]
 
@@ -89,19 +101,43 @@ def _ensure_machines(db) -> tuple[list[Machine], list[Machine]]:
     next_dryer = max([machine.machine_number for machine in dryers], default=0) + 1
 
     while len(washers) < 6:
-        machine = Machine(machine_type="Washer", machine_number=next_washer, status="Available", shop_id=SHOP_ID)
+        machine = Machine(machine_type="Washer", machine_number=next_washer, status="Available", shop_id=shop_id)
         db.add(machine)
         washers.append(machine)
         next_washer += 1
 
     while len(dryers) < 6:
-        machine = Machine(machine_type="Dryer", machine_number=next_dryer, status="Available", shop_id=SHOP_ID)
+        machine = Machine(machine_type="Dryer", machine_number=next_dryer, status="Available", shop_id=shop_id)
         db.add(machine)
         dryers.append(machine)
         next_dryer += 1
 
     db.flush()
     return washers, dryers
+
+
+def _ensure_owner(db, shop_id: int, owner_email: str, owner_password: str, owner_name: str) -> None:
+    """
+    NEW — creates a login account for this shop if one doesn't exist yet.
+    Only checks by email: if that email is already registered (to this
+    shop or any other), nothing is created or modified — this never
+    overwrites an existing password.
+    """
+    existing = db.query(User).filter(User.email == owner_email).first()
+    if existing:
+        print(f"  (Owner account '{owner_email}' already exists — left as-is, not modified.)")
+        return
+
+    db.add(
+        User(
+            email=owner_email,
+            hashed_password=pwd_context.hash(owner_password),
+            role="owner",
+            full_name=owner_name,
+            shop_id=shop_id,
+            is_active=True,
+        )
+    )
 
 
 def _booking_count_for_day(day_number: int, current_date: datetime, washer_count: int, dryer_count: int) -> int:
@@ -125,7 +161,7 @@ def _random_timestamp_for_day(target_date: datetime) -> datetime:
     return business_start + timedelta(minutes=offset_minutes - 8 * 60)
 
 
-def _build_booking(created_at: datetime, washers: list[Machine], dryers: list[Machine]) -> Booking:
+def _build_booking(created_at: datetime, washers: list[Machine], dryers: list[Machine], shop_id: int) -> Booking:
     service_names = list(SERVICE_CONFIG)
     service_weights = [SERVICE_CONFIG[name]["weight"] for name in service_names]
     service_type = random.choices(service_names, weights=service_weights, k=1)[0]
@@ -163,21 +199,29 @@ def _build_booking(created_at: datetime, washers: list[Machine], dryers: list[Ma
         status=random.choices(["Claimed", "Ready", "In Progress"], weights=[0.88, 0.08, 0.04], k=1)[0],
         washer_id=washer.id if washer else None,
         dryer_id=dryer.id if dryer else None,
-        shop_id=SHOP_ID,
+        shop_id=shop_id,
         booking_timestamp=created_at,
         created_at=created_at,
     )
 
 
-def seed_bookings(reset_window: bool = False) -> int:
-    random.seed(RANDOM_SEED)
+def seed_bookings(
+    shop_id: int = 1,
+    shop_name: str = "Shop A",
+    owner_email: str = DEFAULT_OWNER_EMAIL,
+    owner_password: str = DEFAULT_OWNER_PASSWORD,
+    owner_name: str = DEFAULT_OWNER_NAME,
+    reset_window: bool = False,
+) -> int:
+    random.seed(RANDOM_SEED + shop_id)
     Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
     try:
-        _ensure_shop(db)
-        _ensure_settings(db)
-        washers, dryers = _ensure_machines(db)
+        _ensure_shop(db, shop_id, shop_name)
+        _ensure_settings(db, shop_id)
+        washers, dryers = _ensure_machines(db, shop_id)
+        _ensure_owner(db, shop_id, owner_email, owner_password, owner_name)
         db.commit()
 
         today = datetime.now(timezone.utc).date()
@@ -187,7 +231,7 @@ def seed_bookings(reset_window: bool = False) -> int:
 
         if reset_window:
             db.query(Booking).filter(
-                Booking.shop_id == SHOP_ID,
+                Booking.shop_id == shop_id,
                 Booking.created_at >= window_start,
                 Booking.created_at <= window_end,
             ).delete(synchronize_session=False)
@@ -197,7 +241,7 @@ def seed_bookings(reset_window: bool = False) -> int:
         for day_number in range(WINDOW_DAYS):
             target_date = datetime.combine(start_date + timedelta(days=day_number), time.min, tzinfo=timezone.utc)
             existing_count = db.query(Booking).filter(
-                Booking.shop_id == SHOP_ID,
+                Booking.shop_id == shop_id,
                 Booking.created_at >= target_date,
                 Booking.created_at < target_date + timedelta(days=1),
             ).count()
@@ -206,7 +250,7 @@ def seed_bookings(reset_window: bool = False) -> int:
 
             daily_count = _booking_count_for_day(day_number, target_date, len(washers), len(dryers))
             bookings = [
-                _build_booking(_random_timestamp_for_day(target_date), washers, dryers)
+                _build_booking(_random_timestamp_for_day(target_date), washers, dryers, shop_id)
                 for _ in range(daily_count)
             ]
             db.add_all(bookings)
@@ -223,11 +267,24 @@ def seed_bookings(reset_window: bool = False) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Seed historical booking rows for forecasting.")
+    parser.add_argument("--shop-id", type=int, default=1, help="Which shop to seed (created if it doesn't exist yet).")
+    parser.add_argument("--shop-name", default="LaundryLink Demo Shop", help="Name to use if the shop doesn't exist yet.")
+    parser.add_argument("--owner-email", default=DEFAULT_OWNER_EMAIL, help="Login email to create for this shop if it doesn't exist yet.")
+    parser.add_argument("--owner-password", default=DEFAULT_OWNER_PASSWORD, help="Login password for the owner account (only used if creating a new one).")
+    parser.add_argument("--owner-name", default=DEFAULT_OWNER_NAME, help="Display name for the owner account.")
     parser.add_argument("--reset-window", action="store_true", help="Delete and replace bookings in the 90-day seed window.")
     args = parser.parse_args()
 
-    created = seed_bookings(reset_window=args.reset_window)
-    print(f"Seed complete. Created {created} booking rows.")
+    created = seed_bookings(
+        shop_id=args.shop_id,
+        shop_name=args.shop_name,
+        owner_email=args.owner_email,
+        owner_password=args.owner_password,
+        owner_name=args.owner_name,
+        reset_window=args.reset_window,
+    )
+    print(f"Seed complete for shop_id={args.shop_id}. Created {created} booking rows.")
+    print(f"Login with: {args.owner_email} / {args.owner_password} (if this account was just created).")
 
 
 if __name__ == "__main__":
