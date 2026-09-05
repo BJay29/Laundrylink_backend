@@ -43,7 +43,6 @@ def create_owner(db: Session, user: schemas.OwnerCreate):
         email=user.email,
         hashed_password=hashed_pass,
         role="owner",
-        full_name=user.owner_name,
         shop_id=new_shop.id
     )
     db.add(new_user)

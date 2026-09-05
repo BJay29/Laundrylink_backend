@@ -14,19 +14,11 @@ class OwnerCreate(BaseModel):
     would show their email even after full_name support was added
     elsewhere).
     """
-    owner_name: str
     shop_name: str
     address: str
     email: EmailStr
     password: str
 
-    @field_validator("owner_name")
-    @classmethod
-    def validate_owner_name(cls, v):
-        cleaned = v.strip()
-        if not cleaned:
-            raise ValueError("Owner name cannot be empty.")
-        return cleaned
 
 class UserLogin(BaseModel):
     """Schema for user authentication requests."""
