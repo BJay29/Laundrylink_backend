@@ -257,7 +257,7 @@ class Setting(Base):
     
     electricity_rate = Column(Float, default=12.0)
     water_rate = Column(Float, default=50.0)
-    detergent_cost_per_load = Column(Float, default=10.0)
+    supplies_cost_per_load = Column(Float, default=10.0)
 
     minimum_weight_kg = Column(Float, default=6.0)
     
@@ -272,13 +272,12 @@ class Setting(Base):
             "id": self.id,
             "electricity_rate": self.electricity_rate,
             "water_rate": self.water_rate,
-            "detergent_cost_per_load": self.detergent_cost_per_load,
+            "supplies_cost_per_load": self.supplies_cost_per_load,
             "minimum_weight_kg": self.minimum_weight_kg,
             "off_peak_hours": self.off_peak_hours,
             "operation_start_hour": self.operation_start_hour,
             "shop_id": self.shop_id
         }
-
 class User(Base):
     """
     Identity management for Owners and Staff members with Role-Based Access Control (RBAC).

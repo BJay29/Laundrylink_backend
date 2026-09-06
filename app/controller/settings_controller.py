@@ -17,10 +17,16 @@ logger = logging.getLogger(__name__)
 # calculations. Service pricing (Full Service, Regular Wash, etc.) is no
 # longer part of these defaults — shop owners define their own services
 # via the ServiceType table, starting from an empty catalog.
+#
+# RENAMED: detergent_cost_per_load -> supplies_cost_per_load — "detergent"
+# was too narrow a label for what this rate actually covers (any per-load
+# consumable cost the shop wants to factor in, not just detergent brand
+# purchases). Matching rename applied to the Setting model column
+# (models.py) and SettingBase/SettingUpdate (schemas.py).
 SYSTEM_DEFAULTS = {
     "electricity_rate": 12.0,
     "water_rate": 50.0,
-    "detergent_cost_per_load": 10.0,
+    "supplies_cost_per_load": 10.0,
     "minimum_weight_kg": 6.0,
     "off_peak_hours": "8:00 AM - 11:00 AM"
 }
@@ -136,6 +142,13 @@ def get_pricing_for_booking(db: Session, shop_id: int):
     the shop owner has configured. If the shop hasn't added any services
     yet, this returns an empty pricing map.
     NOTE: read-only, no Activity Log entry.
+
+    RENAMED: reads settings.supplies_cost_per_load now (was
+    detergent_cost_per_load). The returned dict key "detergent_fee" is
+    LEFT AS-IS for now — the Booking Modal frontend consumes this exact
+    key, and it wasn't shown to confirm it's safe to rename there too.
+    Rename it here + in the frontend together if you want full
+    consistency.
     """
     settings = get_settings(db, shop_id)
 
@@ -150,7 +163,7 @@ def get_pricing_for_booking(db: Session, shop_id: int):
 
     logger.info(f"Fetching Live Pricing for Shop {shop_id}: {len(pricing)} active service(s) found.")
 
-    pricing["detergent_fee"] = float(settings.detergent_cost_per_load)
+    pricing["detergent_fee"] = float(settings.supplies_cost_per_load)
     pricing["minimum_weight_kg"] = float(settings.minimum_weight_kg or 6.0)
 
     return pricing
@@ -589,11 +602,12 @@ def update_shop_profile(db: Session, current_user: models.User, profile_data: sc
     """
     Updates the shop's contact information and business profile.
 
-    NOTE: has_delivery/delivery_fee (added to ShopProfileUpdate earlier)
-    are handled automatically here — this function already loops over
-    every field in the incoming schema and uses hasattr()/setattr() to
-    apply it to the Shop record, so no code change was needed to support
-    them; they just work the moment the schema declared them.
+    NOTE: has_delivery/delivery_fee/latitude/longitude (added to
+    ShopProfileUpdate earlier) are handled automatically here — this
+    function already loops over every field in the incoming schema and
+    uses hasattr()/setattr() to apply it to the Shop record, so no code
+    change was needed to support them; they just work the moment the
+    schema declared them.
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id.

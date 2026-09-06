@@ -23,6 +23,13 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     Machine Monitoring card reflects what the shop owner actually set
     in Optimization Settings.
 
+    UPDATED: PredictionService.get_overhead() now takes (db, shop_id, ...)
+    so machine cost telemetry (electricity/water/supplies) is computed
+    using THIS shop's own configured rates from Optimization Settings,
+    instead of hardcoded Naga City constants that ignored the Setting
+    table entirely (previously, changing rates in the UI had zero effect
+    on cost calculations here).
+
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id, so the action can be attributed to whoever actually
     performed it (current_user.full_name or current_user.email /
@@ -34,13 +41,6 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     applies to create_customer_booking() below (mobile app self-booking),
     where the customer's device has no way to know the terminal's live
     connection state on its own.
-
-    FIXED: PredictionService.get_overhead() requires (db, shop_id,
-    machine_type) — it was previously being called with only
-    machine.machine_type, which silently mapped that value onto the
-    method's `db` parameter and left shop_id/machine_type missing,
-    causing a 500 "missing 2 required positional arguments" error on
-    every booking that had a machine assigned at creation time.
     """
     shop_id = current_user.shop_id
 
@@ -147,7 +147,9 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         # service instead of the generic PredictionService estimate.
         machine.remaining_time = service_type_record.duration_minutes
 
-        # FIXED: pass db and shop_id — get_overhead(cls, db, shop_id, machine_type)
+        # UPDATED: now passes (db, shop_id) so this uses the shop's own
+        # electricity_rate/water_rate/supplies_cost_per_load instead of
+        # hardcoded class constants.
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
@@ -225,6 +227,10 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     PredictionService.get_machine_runtime() only if the service no longer
     exists in the catalog (e.g. it was deleted after the booking was made).
 
+    UPDATED: PredictionService.get_overhead() now takes (db, shop_id, ...) —
+    same fix as create_booking() above, so this shop's own configured
+    rates are actually used here too.
+
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id, for the same attribution reason as create_booking().
 
@@ -232,9 +238,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     (terminal or customer-accepted-from-mobile) — once a customer
     booking is Accepted, it becomes an ordinary "Pending" booking and
     can be assigned a machine exactly like any other.
-
-    FIXED: same PredictionService.get_overhead() argument bug as
-    create_booking() above — now passes (db, shop_id, machine_type).
     """
     shop_id = current_user.shop_id
 
@@ -319,7 +322,7 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             else PredictionService.get_machine_runtime(machine.machine_type, booking.service_type)
         )
 
-        # FIXED: pass db and shop_id — get_overhead(cls, db, shop_id, machine_type)
+        # UPDATED: now passes (db, shop_id) — see create_booking() note above.
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)

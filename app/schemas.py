@@ -528,6 +528,8 @@ class PromoCodeResponse(PromoCodeBase):
 
 # --- SETTINGS SCHEMAS ---
 
+# --- SETTINGS SCHEMAS ---
+
 class SettingBase(BaseModel):
     """
     Base settings schema containing operational rates and booking rules.
@@ -536,7 +538,7 @@ class SettingBase(BaseModel):
     """
     electricity_rate: float
     water_rate: float
-    detergent_cost_per_load: float
+    supplies_cost_per_load: float
 
     # Minimum billable weight (in KG) enforced on the Create Booking modal.
     # Defaults to 6kg but is configurable per shop from Optimization Settings.
@@ -548,7 +550,7 @@ class SettingUpdate(BaseModel):
     """Schema for updating shop parameters from the Optimization Settings page."""
     electricity_rate: Optional[float] = None
     water_rate: Optional[float] = None
-    detergent_cost_per_load: Optional[float] = None
+    supplies_cost_per_load: Optional[float] = None
 
     minimum_weight_kg: Optional[float] = None
 
@@ -565,7 +567,6 @@ class SettingResponse(SettingBase):
     """Full response schema for syncing global operational rates across all frontend modals."""
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
-
 # --- INVENTORY SCHEMAS ---
 
 class InventoryItemBase(BaseModel):

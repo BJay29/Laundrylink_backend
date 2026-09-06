@@ -163,6 +163,12 @@ def update_machine_usage_stats(db: Session, machine_id: int, duration_minutes: i
     Updates machine telemetry after a cycle is completed.
     Calculates utility costs and increments the lifetime profit tracking.
 
+    UPDATED: PredictionService.calculate_cycle_cost() now takes
+    (db, shop_id, ...) so this uses the shop's own configured
+    electricity_rate/water_rate/supplies_cost_per_load from Optimization
+    Settings, instead of hardcoded Naga City class constants that
+    ignored the Setting table entirely.
+
     NOTE: this function is currently NOT called by any route (confirmed
     unused/dead code in an earlier pass) — left with the shop_id-only
     signature since there's no HTTP-request context (no current_user)
@@ -177,7 +183,7 @@ def update_machine_usage_stats(db: Session, machine_id: int, duration_minutes: i
     if not machine:
         return None
 
-    costs = PredictionService.calculate_cycle_cost(machine.machine_type, duration_minutes)
+    costs = PredictionService.calculate_cycle_cost(db, shop_id, machine.machine_type, duration_minutes)
 
     machine.total_cycles += 1
     machine.accumulated_electricity = (machine.accumulated_electricity or 0.0) + costs["electricity"]
