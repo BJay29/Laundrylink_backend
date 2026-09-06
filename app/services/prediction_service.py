@@ -359,7 +359,7 @@ class PredictionService:
         return {
             "electricity_rate": settings.electricity_rate if settings.electricity_rate is not None else cls.ELEC_RATE_KWH,
             "water_rate": settings.water_rate if settings.water_rate is not None else cls.WATER_RATE_CUM,
-            "supplies_cost_per_load": settings.detergent_cost_per_load if settings.detergent_cost_per_load is not None else cls.DETERGENT_FIXED,
+            "supplies_cost_per_load": settings.supplies_cost_per_load if settings.supplies_cost_per_load is not None else cls.DETERGENT_FIXED,
         }
 
     @classmethod
