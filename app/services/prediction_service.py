@@ -326,7 +326,7 @@ class PredictionService:
     @classmethod
     def _get_shop_rates(cls, db, shop_id: int) -> Dict[str, float]:
         """
-        NEW — looks up THIS shop's own configured rates from Optimization
+        Looks up THIS shop's own configured rates from Optimization
         Settings, instead of the hardcoded class constants below (which
         were the actual bug: calculate_cycle_cost() ignored Setting
         entirely, so changing electricity_rate/water_rate/detergent_cost_per_load
@@ -336,9 +336,17 @@ class PredictionService:
         (shouldn't normally happen, but kept as a safety net so a
         missing row degrades gracefully instead of raising).
 
-        RENAMED: detergent_cost_per_load -> supplies_cost_per_load on the
-        Setting model/schema (see models.py, schemas.py) — "detergent"
-        was too narrow a label for what this field actually covers.
+        FIXED: this previously read `settings.supplies_cost_per_load`,
+        a rename that was never actually applied to the Setting model
+        (app/models.py still defines the column as
+        `detergent_cost_per_load`) — every call to get_overhead()
+        (i.e. every booking creation / machine assignment) was raising
+        AttributeError: 'Setting' object has no attribute
+        'supplies_cost_per_load'. Reading the model's real attribute
+        name here instead. The returned dict still uses the
+        "supplies_cost_per_load" KEY (internal to this method and
+        calculate_cycle_cost() below) — only the Setting attribute
+        being read on the right-hand side changed.
         """
         from app.models import Setting
         settings = db.query(Setting).filter(Setting.shop_id == shop_id).first()
@@ -351,7 +359,7 @@ class PredictionService:
         return {
             "electricity_rate": settings.electricity_rate if settings.electricity_rate is not None else cls.ELEC_RATE_KWH,
             "water_rate": settings.water_rate if settings.water_rate is not None else cls.WATER_RATE_CUM,
-            "supplies_cost_per_load": settings.supplies_cost_per_load if settings.supplies_cost_per_load is not None else cls.DETERGENT_FIXED,
+            "supplies_cost_per_load": settings.detergent_cost_per_load if settings.detergent_cost_per_load is not None else cls.DETERGENT_FIXED,
         }
 
     @classmethod
