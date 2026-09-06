@@ -324,44 +324,79 @@ class PredictionService:
         }
 
     @classmethod
-    def calculate_cycle_cost(cls, machine_type: str, duration_minutes: int) -> Dict[str, float]:
+    def _get_shop_rates(cls, db, shop_id: int) -> Dict[str, float]:
         """
-        Calculates utility consumption based on duration and Naga City rates.
+        NEW — looks up THIS shop's own configured rates from Optimization
+        Settings, instead of the hardcoded class constants below (which
+        were the actual bug: calculate_cycle_cost() ignored Setting
+        entirely, so changing electricity_rate/water_rate/detergent_cost_per_load
+        in the UI had zero effect on machine cost/profitability — those
+        numbers were purely decorative). Falls back to the class
+        constants only if the shop genuinely has no Setting row yet
+        (shouldn't normally happen, but kept as a safety net so a
+        missing row degrades gracefully instead of raising).
+
+        RENAMED: detergent_cost_per_load -> supplies_cost_per_load on the
+        Setting model/schema (see models.py, schemas.py) — "detergent"
+        was too narrow a label for what this field actually covers.
+        """
+        from app.models import Setting
+        settings = db.query(Setting).filter(Setting.shop_id == shop_id).first()
+        if not settings:
+            return {
+                "electricity_rate": cls.ELEC_RATE_KWH,
+                "water_rate": cls.WATER_RATE_CUM,
+                "supplies_cost_per_load": cls.DETERGENT_FIXED,
+            }
+        return {
+            "electricity_rate": settings.electricity_rate if settings.electricity_rate is not None else cls.ELEC_RATE_KWH,
+            "water_rate": settings.water_rate if settings.water_rate is not None else cls.WATER_RATE_CUM,
+            "supplies_cost_per_load": settings.supplies_cost_per_load if settings.supplies_cost_per_load is not None else cls.DETERGENT_FIXED,
+        }
+
+    @classmethod
+    def calculate_cycle_cost(cls, db, shop_id: int, machine_type: str, duration_minutes: int) -> Dict[str, float]:
+        """
+        Calculates utility consumption based on duration and THIS SHOP'S
+        OWN configured rates (electricity_rate, water_rate,
+        supplies_cost_per_load from Optimization Settings) — no longer
+        the hardcoded Naga City class constants regardless of shop.
         Electricity is calculated as: (Watts * Hours / 1000) * Rate.
         """
+        rates = cls._get_shop_rates(db, shop_id)
         m_type = machine_type.lower().strip()
         hours = duration_minutes / 60
-        
+
         # 1. Electricity Calculation
         watts = cls.WATTS_WASHER if m_type == "washer" else cls.WATTS_DRYER
         elec_consumed = (watts * hours) / 1000
-        elec_cost = elec_consumed * cls.ELEC_RATE_KWH
+        elec_cost = elec_consumed * rates["electricity_rate"]
 
         # 2. Water Calculation (Washers only)
         # Based on average 50L consumption (0.05 cubic meters) per wash cycle
         water_cost = 0.0
         if m_type == "washer":
-            water_cost = 0.05 * cls.WATER_RATE_CUM
+            water_cost = 0.05 * rates["water_rate"]
 
-        # 3. Detergent Calculation (Washers only)
-        detergent_cost = cls.DETERGENT_FIXED if m_type == "washer" else 0.0
+        # 3. Supplies Calculation (Washers only) — formerly "Detergent"
+        supplies_cost = rates["supplies_cost_per_load"] if m_type == "washer" else 0.0
 
         return {
             "electricity": round(elec_cost, 2),
             "water": round(water_cost, 2),
-            "detergent": detergent_cost,
-            "total": round(elec_cost + water_cost + detergent_cost, 2)
+            "detergent": round(supplies_cost, 2),  # dict key kept for now — see machine_controller.py note
+            "total": round(elec_cost + water_cost + supplies_cost, 2)
         }
 
     @classmethod
-    def get_overhead(cls, machine_type: str) -> Dict[str, float]:
+    def get_overhead(cls, db, shop_id: int, machine_type: str) -> Dict[str, float]:
         """
         Helper method used by controllers to get the standard cost breakdown
-        per cycle for a specific machine type.
+        per cycle for a specific machine type, using THIS shop's own rates.
         """
         m_type = machine_type.lower().strip()
         duration = cls.MACHINE_DURATIONS.get(m_type, 45)
-        costs = cls.calculate_cycle_cost(m_type, duration)
+        costs = cls.calculate_cycle_cost(db, shop_id, m_type, duration)
         
         return {
             "electricity_cost": costs["electricity"],

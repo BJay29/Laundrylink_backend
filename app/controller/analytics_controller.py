@@ -319,3 +319,60 @@ class AnalyticsController:
                 status_code=500,
                 detail=f"Customer segmentation failed: {str(e)}"
             )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SALES SUMMARY (Today / This Week / This Month)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def get_sales_summary(db: Session, shop_id: int):
+        """
+        NEW — Total income para sa Today / This Week / This Month.
+        Backs ang KPI cards sa Record Sales page.
+
+        UPDATED: "Today" ay ibinabase na sa operation_start_hour ng shop
+        (kagaya ng get_dashboard_summary() sa itaas), hindi literal na
+        midnight — para consistent ang "Today's Income" sa Dashboard at
+        sa Record Sales page. Halimbawa: kung 8AM ang operation start at
+        3AM pa lang ngayon, ang "Today" ay mula pa sa 8AM KAHAPON hanggang
+        ngayon, dahil hindi pa "bukas" ang shop mula nung huling reset.
+
+        "This Week" at "This Month" ay hindi apektado ng operation hour
+        (rolling 7-day window at calendar-month-to-date, tulad ng dati).
+        """
+        settings = db.query(models.Setting).filter(
+            models.Setting.shop_id == shop_id
+        ).first()
+
+        op_start_hour = settings.operation_start_hour if settings else 8
+
+        now = datetime.now()
+        today_reset_time = now.replace(
+            hour=op_start_hour, minute=0, second=0, microsecond=0
+        )
+        if now < today_reset_time:
+            today_reset_time -= timedelta(days=1)
+
+        week_start = now - timedelta(days=7)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        today_income = db.query(func.sum(models.Booking.total_price)).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.created_at >= today_reset_time
+        ).scalar() or 0.0
+
+        week_income = db.query(func.sum(models.Booking.total_price)).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.created_at >= week_start
+        ).scalar() or 0.0
+
+        month_income = db.query(func.sum(models.Booking.total_price)).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.created_at >= month_start
+        ).scalar() or 0.0
+
+        return {
+            "today_income": round(float(today_income), 2),
+            "week_income": round(float(week_income), 2),
+            "month_income": round(float(month_income), 2),
+        }

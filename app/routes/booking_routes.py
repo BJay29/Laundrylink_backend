@@ -206,6 +206,17 @@ def decline_customer_booking(
         db, booking_id, decline_data.reason, current_user
     )
 
+@router.get("/all", response_model=List[BookingResponse])
+def get_all_bookings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Returns every booking for the logged-in user's shop, any
+    status. Backs the Record Sales page.
+    """
+    return booking_controller.get_all_bookings(db, current_user.shop_id)
+
 
 @router.patch("/{booking_id}/cancel", response_model=BookingResponse)
 async def cancel_customer_booking(

@@ -906,6 +906,19 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
             detail=f"Error accepting booking: {str(e)}"
         )
 
+def get_all_bookings(db: Session, shop_id: int):
+    """
+    NEW — Retrieves EVERY booking for this shop, any status, most recent
+    first. Backs the Record Sales page's bookings table (Date, Customer,
+    Service, Payment). Read-only, no Activity Log entry.
+    """
+    return (
+        db.query(Booking)
+        .filter(Booking.shop_id == shop_id)
+        .order_by(Booking.booking_timestamp.desc())
+        .all()
+    )
+
 
 def decline_customer_booking(db: Session, booking_id: int, reason: str, current_user: models.User):
     """

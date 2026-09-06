@@ -169,6 +169,25 @@ def retrain_pooled_model(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SALES SUMMARY ENDPOINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/sales-summary")
+def get_sales_summary(
+    shop_id: int = Depends(get_current_shop_id),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Total income for Today / This Week / This Month.
+    Backs the KPI cards on the Record Sales page.
+    """
+    try:
+        return AnalyticsController.get_sales_summary(db, shop_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CUSTOMER SEGMENTATION ENDPOINT
 # ─────────────────────────────────────────────────────────────────────────────
 
