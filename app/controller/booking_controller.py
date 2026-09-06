@@ -34,6 +34,13 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     applies to create_customer_booking() below (mobile app self-booking),
     where the customer's device has no way to know the terminal's live
     connection state on its own.
+
+    FIXED: PredictionService.get_overhead() requires (db, shop_id,
+    machine_type) — it was previously being called with only
+    machine.machine_type, which silently mapped that value onto the
+    method's `db` parameter and left shop_id/machine_type missing,
+    causing a 500 "missing 2 required positional arguments" error on
+    every booking that had a machine assigned at creation time.
     """
     shop_id = current_user.shop_id
 
@@ -140,7 +147,8 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         # service instead of the generic PredictionService estimate.
         machine.remaining_time = service_type_record.duration_minutes
 
-        overhead_data = PredictionService.get_overhead(machine.machine_type)
+        # FIXED: pass db and shop_id — get_overhead(cls, db, shop_id, machine_type)
+        overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
@@ -224,6 +232,9 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     (terminal or customer-accepted-from-mobile) — once a customer
     booking is Accepted, it becomes an ordinary "Pending" booking and
     can be assigned a machine exactly like any other.
+
+    FIXED: same PredictionService.get_overhead() argument bug as
+    create_booking() above — now passes (db, shop_id, machine_type).
     """
     shop_id = current_user.shop_id
 
@@ -308,7 +319,8 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             else PredictionService.get_machine_runtime(machine.machine_type, booking.service_type)
         )
 
-        overhead_data = PredictionService.get_overhead(machine.machine_type)
+        # FIXED: pass db and shop_id — get_overhead(cls, db, shop_id, machine_type)
+        overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
