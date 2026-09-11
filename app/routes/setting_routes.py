@@ -187,7 +187,7 @@ def remove_service_type(
     return settings_controller.delete_service_type(db, current_user, service_id)
 
 
-# --- PROFILE & PASSWORD ROUTES ---
+# --- PROFILE ROUTES ---
 
 @router.get("/profile", response_model=schemas.ShopProfileResponse)
 def get_shop_profile(
@@ -252,21 +252,21 @@ def update_shop_profile(
     )
 
 
-@router.put("/password")
-def update_password(
-    password_update: schemas.PasswordUpdate,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Update the CURRENTLY LOGGED-IN user's own password after verifying
-    their current password.
-
-    NOTE: settings_controller.update_user_password() signature is
-    UNCHANGED (still user_id, not current_user) — password changes are
-    intentionally NOT written to the Activity Log for privacy reasons.
-    """
-    result = settings_controller.update_user_password(db, current_user.id, password_update)
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
+# REMOVED (Supabase Auth migration): PUT /settings/password — dating
+# tumatawag sa schemas.PasswordUpdate (na tinanggal na noong ginawa
+# nating Supabase migration, dahil ang password storage/verification
+# ay hawak na ng Supabase Auth mismo). Ito ang katapat sa Owner/Staff
+# side ng PUT /customer/password na tinanggal din natin sa
+# customer_auth_routes.py.
+#
+# Ang password change ng Owner/Staff (React web app) ay gagawin na
+# lang DIREKTA gamit ang Supabase Auth SDK (JS) sa frontend:
+#   const { data, error } = await supabase.auth.updateUser({
+#     password: newPassword
+#   });
+#
+# (Katulad ng ginawa natin sa Flutter side —
+# CustomerService.changePassword() — kung saan muna nire-verify ang
+# current password via signInWithPassword() bago tumawag ng
+# updateUser(), para hindi lang basta-basta ma-update ang password
+# nang walang pag-confirm sa luma.)
