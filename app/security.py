@@ -11,25 +11,17 @@ from app import models
 
 # --- CONFIG ---
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/jwks"
 
-# NEW — kailangan pala ng 'apikey' header ang mismong pag-fetch sa
-# JWKS endpoint (quirk ng Supabase's API gateway/Kong — kahit "public"
-# dapat itong endpoint, kailangan pa rin nitong makapasa sa gateway
-# gamit ang isang valid apikey, kahit hindi naman talaga "authenticated"
-# na request). Ito ang naging sanhi ng
-# "PyJWKClientConnectionError: HTTP Error 401" — walang apikey header
-# na naipapadala dati.
-#
-# NEW — kailangan mo idagdag itong env var sa Render:
-#   SUPABASE_ANON_KEY = <yung publishableKey/anonKey mo mismo sa
-#   main.dart's Supabase.initialize() call>
-SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
+# FIXED — dating "/auth/v1/jwks" (404 — mali). Ang tamang, OIDC-standard
+# na JWKS discovery endpoint ng Supabase ay "/auth/v1/.well-known/jwks.json".
+# Ito rin ay OPEN/PUBLIC na endpoint (hindi protected ng API gateway),
+# kaya HINDI na natin kailangan ang apikey header dito — tinanggal na
+# rin ang SUPABASE_ANON_KEY dependency (hindi na kailangan ang env var
+# na 'yon para dito, pero puwede mo pa ring iwan sa Render, walang
+# masamang epekto kung meron).
+SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
 
-_jwks_client = PyJWKClient(
-    SUPABASE_JWKS_URL,
-    headers={"apikey": SUPABASE_ANON_KEY},
-)
+_jwks_client = PyJWKClient(SUPABASE_JWKS_URL)
 
 bearer_scheme = HTTPBearer()
 
