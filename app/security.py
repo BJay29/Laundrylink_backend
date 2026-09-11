@@ -27,14 +27,6 @@ bearer_scheme = HTTPBearer()
 # =========================================================
 # TOKEN VERIFICATION (Supabase-issued tokens)
 # =========================================================
-#
-# REMOVED: create_access_token(), create_customer_access_token(), at
-# ang lumang decode_access_token() (na gumagamit ng sariling
-# SECRET_KEY at nag-iissue ng sariling tokens). Hindi na natin
-# ginagawa ang password check/token issuance sa FastAPI — ginagawa
-# na ito ng Supabase Auth mismo sa frontend (signUp/
-# signInWithPassword). Ang trabaho na lang ng FastAPI ay i-verify ang
-# token na dala ng request bago tumingin sa DB.
 
 def decode_supabase_token(token: str) -> dict:
     """
@@ -51,11 +43,19 @@ def decode_supabase_token(token: str) -> dict:
             audience="authenticated",
         )
     except jwt.ExpiredSignatureError:
+        print("DEBUG: JWT decode failed — token expired")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired. Please log in again.",
         )
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        # TEMPORARY DEBUG LOGGING — para makita natin sa Render logs
+        # ang TUNAY na dahilan ng 401 (mali bang secret/algorithm,
+        # invalid signature, wrong audience, atbp.) sa halip na ang
+        # generic message lang na nakikita ng client. Tatanggalin na
+        # lang ito once na-solve na ang root cause.
+        print(f"DEBUG: JWT decode failed — {type(e).__name__}: {e}")
+        print(f"DEBUG: token header (first 40 chars): {token[:40]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token.",
@@ -73,17 +73,6 @@ def get_current_user(
     """
     Dependency na ilalagay sa BAWAT protected route na para lang
     sa Shop Owner/Staff (booking, machine, inventory, analytics, settings).
-
-    UPDATED (Supabase Auth migration): kinukuha na ang user via
-    supabase_uid (galing sa 'sub' claim ng Supabase token) sa halip
-    na sariling integer user id na naka-embed sa dating custom JWT.
-    Same function signature/return type pa rin — WALANG BABAGUHIN sa
-    mga caller nito (booking_controller, machine_controller, atbp.).
-
-    Gamit:
-        current_user: models.User = Depends(get_current_user)
-        ...
-        db.query(Model).filter(Model.shop_id == current_user.shop_id)
     """
     claims = decode_supabase_token(credentials.credentials)
     supabase_uid = claims.get("sub")
@@ -107,7 +96,7 @@ def get_current_user(
 def get_current_shop_id(current_user: models.User = Depends(get_current_user)) -> int:
     """
     Convenience dependency na direktang nagbabalik ng shop_id (int)
-    imbes na buong User object. Walang binago dito.
+    imbes na buong User object.
     """
     return current_user.shop_id
 
@@ -116,8 +105,6 @@ def require_role(*allowed_roles: str):
     """
     Optional na dependency factory para sa role-based restrictions.
     Gamit: Depends(require_role("owner"))
-    Walang binago dito — role check pa rin gamit ang locally-stored
-    User.role column, hindi apektado ng auth migration.
     """
     def role_checker(current_user: models.User = Depends(get_current_user)):
         if current_user.role not in allowed_roles:
@@ -140,10 +127,6 @@ def get_current_customer(
     """
     Dependency na ilalagay sa BAWAT protected route na para lang
     sa Customer (mobile app booking, profile, order history, atbp.).
-
-    UPDATED (Supabase Auth migration): parehong pattern ng
-    get_current_user sa itaas — lookup na via supabase_uid, hindi na
-    sariling issued token. Same signature/return type pa rin.
     """
     claims = decode_supabase_token(credentials.credentials)
     supabase_uid = claims.get("sub")
