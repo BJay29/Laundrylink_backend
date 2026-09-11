@@ -1,5 +1,4 @@
 import os
-from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
@@ -11,71 +10,55 @@ from app.database import get_db
 from app import models
 
 # --- CONFIG ---
-# IMPORTANT: sa production, kunin ito galing sa environment variable
-# (.env file), huwag i-hardcode. Panandalian lang ang fallback dito.
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_THIS_IN_PRODUCTION_PLEASE")
+# UPDATED (Supabase Auth migration): hindi na natin sariling SECRET_KEY
+# ang ginagamit para mag-verify ng tokens — ang Supabase Auth na ang
+# gumagawa/nag-sign ng access tokens (sa React/Flutter side, via
+# signInWithPassword()). Ang FastAPI ay isa na lang na "consumer" ng
+# mga tokens na iyon — dito lang natin kailangan ang
+# SUPABASE_JWT_SECRET para i-verify ang signature. Makikita ito sa
+# Supabase Dashboard → Project Settings → API → JWT Keys →
+# "Legacy JWT Secret" → Reveal.
+SUPABASE_JWT_SECRET = os.environ["SUPABASE_JWT_SECRET"]
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours, i-adjust kung gusto mo
 
 bearer_scheme = HTTPBearer()
 
 
 # =========================================================
-# TOKEN CREATION
+# TOKEN VERIFICATION (Supabase-issued tokens)
 # =========================================================
+#
+# REMOVED: create_access_token(), create_customer_access_token(), at
+# ang lumang decode_access_token() (na gumagamit ng sariling
+# SECRET_KEY at nag-iissue ng sariling tokens). Hindi na natin
+# ginagawa ang password check/token issuance sa FastAPI — ginagawa
+# na ito ng Supabase Auth mismo sa frontend (signUp/
+# signInWithPassword). Ang trabaho na lang ng FastAPI ay i-verify ang
+# token na dala ng request bago tumingin sa DB.
 
-def create_access_token(user_id: int, shop_id: Optional[int], role: str) -> str:
+def decode_supabase_token(token: str) -> dict:
     """
-    Gumagawa ng totoong signed JWT para sa Shop Owner/Staff (models.User).
-    Ang shop_id na naka-embed dito ang magiging SATSATANG PINAGMUMULAN
-    ng shop scoping sa buong app — hindi na dapat tanggapin ang shop_id
-    galing sa client request (body/query/localStorage).
-
-    "type": "user" — nagsisilbing marker para hindi ito magamit
-    sa customer-only endpoints, kahit valid ang signature.
+    Ini-verify ang signature ng isang Supabase-issued JWT at ibinabalik
+    ang laman nito. 'sub' claim dito ang Supabase auth.users.id (UUID
+    string) — ito ang gagamitin nating hanapin sa local User/Customer
+    table via supabase_uid column (see models.py).
     """
-    payload = {
-        "sub": str(user_id),
-        "shop_id": shop_id,
-        "role": role,
-        "type": "user",
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-        "iat": datetime.now(timezone.utc),
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-
-def create_customer_access_token(customer_id: int) -> str:
-    """
-    Gumagawa ng totoong signed JWT para sa Customer (models.Customer, mobile app).
-    Walang shop_id/role dito dahil hindi naka-tie ang isang customer
-    sa iisang shop lang — pwede silang mag-book sa ibat-ibang shops.
-
-    "type": "customer" — nagsisilbing marker para hindi ito magamit
-    sa staff/owner-only endpoints, kahit valid ang signature.
-    """
-    payload = {
-        "sub": str(customer_id),
-        "type": "customer",
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-        "iat": datetime.now(timezone.utc),
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-
-def decode_access_token(token: str) -> dict:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=[ALGORITHM],
+            audience="authenticated",
+        )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token expired, please log in again",
+            detail="Session expired. Please log in again.",
         )
     except jwt.InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token",
+            detail="Invalid authentication token.",
         )
 
 
@@ -90,36 +73,32 @@ def get_current_user(
     """
     Dependency na ilalagay sa BAWAT protected route na para lang
     sa Shop Owner/Staff (booking, machine, inventory, analytics, settings).
-    Kinukuha ang user mula sa JWT — hindi galing sa request body/query.
+
+    UPDATED (Supabase Auth migration): kinukuha na ang user via
+    supabase_uid (galing sa 'sub' claim ng Supabase token) sa halip
+    na sariling integer user id na naka-embed sa dating custom JWT.
+    Same function signature/return type pa rin — WALANG BABAGUHIN sa
+    mga caller nito (booking_controller, machine_controller, atbp.).
 
     Gamit:
         current_user: models.User = Depends(get_current_user)
         ...
         db.query(Model).filter(Model.shop_id == current_user.shop_id)
-
-    Tinatanggihan ang customer tokens kahit valid ang signature —
-    dahil ibang "type" ang laman ng payload nila.
     """
-    payload = decode_access_token(credentials.credentials)
+    claims = decode_supabase_token(credentials.credentials)
+    supabase_uid = claims.get("sub")
 
-    if payload.get("type") != "user":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This endpoint is not accessible with a customer account",
-        )
-
-    user_id = payload.get("sub")
-    if user_id is None:
+    if supabase_uid is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token payload",
         )
 
-    user = db.query(models.User).filter(models.User.id == int(user_id)).first()
+    user = db.query(models.User).filter(models.User.supabase_uid == supabase_uid).first()
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
+            detail="User not found, inactive, or not yet synced. Please try again in a moment.",
         )
 
     return user
@@ -128,7 +107,7 @@ def get_current_user(
 def get_current_shop_id(current_user: models.User = Depends(get_current_user)) -> int:
     """
     Convenience dependency na direktang nagbabalik ng shop_id (int)
-    imbes na buong User object.
+    imbes na buong User object. Walang binago dito.
     """
     return current_user.shop_id
 
@@ -137,6 +116,8 @@ def require_role(*allowed_roles: str):
     """
     Optional na dependency factory para sa role-based restrictions.
     Gamit: Depends(require_role("owner"))
+    Walang binago dito — role check pa rin gamit ang locally-stored
+    User.role column, hindi apektado ng auth migration.
     """
     def role_checker(current_user: models.User = Depends(get_current_user)):
         if current_user.role not in allowed_roles:
@@ -159,40 +140,25 @@ def get_current_customer(
     """
     Dependency na ilalagay sa BAWAT protected route na para lang
     sa Customer (mobile app booking, profile, order history, atbp.).
-    Kinukuha ang customer mula sa JWT — hindi galing sa request body/query.
 
-    Gamit:
-        current_customer: models.Customer = Depends(get_current_customer)
-
-    Tinatanggihan ang staff/owner tokens kahit valid ang signature —
-    dahil ibang "type" ang laman ng payload nila.
-
-    UPDATED: Tinanggal na ang is_verified check dito — awtomatiko nang
-    verified ang lahat ng bagong customer sa registration (see
-    customer_auth_controller.register_customer()). Nananatili pa rin
-    ang is_verified column sa DB para hindi na kailangang mag-migrate,
-    pero hindi na ito ginagamit bilang gate para sa access.
+    UPDATED (Supabase Auth migration): parehong pattern ng
+    get_current_user sa itaas — lookup na via supabase_uid, hindi na
+    sariling issued token. Same signature/return type pa rin.
     """
-    payload = decode_access_token(credentials.credentials)
+    claims = decode_supabase_token(credentials.credentials)
+    supabase_uid = claims.get("sub")
 
-    if payload.get("type") != "customer":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This endpoint is only accessible with a customer account",
-        )
-
-    customer_id = payload.get("sub")
-    if customer_id is None:
+    if supabase_uid is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token payload",
         )
 
-    customer = db.query(models.Customer).filter(models.Customer.id == int(customer_id)).first()
+    customer = db.query(models.Customer).filter(models.Customer.supabase_uid == supabase_uid).first()
     if customer is None or not customer.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Customer not found or inactive",
+            detail="Customer not found, inactive, or not yet synced. Please try again in a moment.",
         )
 
     return customer

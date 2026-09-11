@@ -1,37 +1,29 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import uuid as uuid_lib
 
 # --- AUTHENTICATION & OWNER SCHEMAS ---
 
 class OwnerCreate(BaseModel):
     """
-    Schema for initial shop owner registration and shop creation.
+    Schema for shop creation, ginagamit PAGKATAPOS na-verify na ang
+    Owner sa Supabase Auth (hindi na ito ang registration endpoint mismo
+    — see webhook_controller.py para dun nangyayari ang pag-sync ng
+    User row). Ito ay para sa hiwalay na "create my shop" step na
+    tinatawag ng frontend gamit ang Supabase JWT ng bagong-verify na
+    owner, para gumawa ng kanilang Shop record.
 
-    Added full_name so the Owner's real name is captured at registration
-    time (previously only StaffCreate had this field, so Owners
-    registering their own shop had no name on file — the Activity Log
-    would show their email even after full_name support was added
-    elsewhere).
+    UPDATED (Supabase Auth migration): TINANGGAL ang password field —
+    hindi na ito FastAPI ang humahawak ng password, Supabase Auth na.
     """
     shop_name: str
     address: str
-    email: EmailStr
-    password: str
 
-
-class UserLogin(BaseModel):
-    """Schema for user authentication requests."""
-    email: EmailStr
-    password: str
 
 class UserResponse(BaseModel):
     """
     Profile data returned after successful login or session validation.
-
-    UPDATED: Added full_name so the frontend can display/cache the
-    logged-in user's real name (e.g. for Activity Log attribution,
-    greeting text, etc.) instead of falling back to email everywhere.
     """
     email: str
     full_name: Optional[str] = None
@@ -42,28 +34,33 @@ class UserResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True, exclude_none=True)
 
-class LoginResponse(BaseModel):
-    """Standardized OAuth2-compatible login response."""
-    access_token: str
-    token_type: str = "bearer"
-    user: UserResponse
+
+# UPDATED (Supabase Auth migration): TINANGGAL ang LoginResponse — hindi
+# na FastAPI ang nagbibigay ng access_token, Supabase Auth
+# (signInWithPassword) na ang gumagawa nito sa frontend mismo.
+# UserResponse pa rin ang gagamitin, pero ibabalik na lang ito ng isang
+# simpleng "GET /me"-style endpoint na gumagamit ng
+# Depends(get_current_user) sa halip na login endpoint.
+
 
 # --- STAFF MANAGEMENT SCHEMAS ---
 
 class StaffCreate(BaseModel):
     """
     Schema used by an OWNER to create a new staff/manager account under
-    their own shop. Unlike OwnerCreate, this does NOT create a new Shop —
-    shop_id is derived server-side from the currently logged-in Owner's
-    JWT (see auth_routes.py's /register/staff endpoint), never supplied
-    by the client. This is what powers a shop having multiple individual
-    login accounts (one per staff/manager) instead of one shared account,
-    which in turn is what makes the Activity Log meaningful — each action
-    can be attributed to a real person instead of a generic shared login.
+    their own shop. shop_id is derived server-side from the currently
+    logged-in Owner's JWT, never supplied by the client.
+
+    UPDATED (Supabase Auth migration): TINANGGAL ang password field —
+    ang bagong staff member mismo ang magsa-sign-up via Supabase Auth
+    (email/password nila mismo), hindi na ito gagawin ng Owner
+    papasok sa isang password. Ang endpoint na ito ay nagse-set na
+    lang ng "invited" na record (walang supabase_uid pa) na
+    ma-cclaim/ma-sync kapag nag-sign-up na ang staff gamit ang
+    parehong email.
     """
     full_name: str
     email: EmailStr
-    password: str
     role: str = "staff"  # "staff" or "manager"
 
     @field_validator("full_name")
@@ -95,17 +92,12 @@ class StaffResponse(BaseModel):
 
 # --- CUSTOMER (MOBILE APP) SCHEMAS ---
 
-class CustomerCreate(BaseModel):
-    """Schema for customer self-registration via the mobile app."""
-    full_name: str
-    email: EmailStr
-    mobile_number: str
-    password: str
-
-class CustomerLogin(BaseModel):
-    """Schema for customer authentication requests from the mobile app."""
-    email: EmailStr
-    password: str
+# UPDATED (Supabase Auth migration): TINANGGAL ang CustomerCreate,
+# CustomerLogin, CustomerVerifyEmail, CustomerResendCode, at
+# CustomerPasswordUpdate — lahat ng ito ay hinahawakan na ng Supabase
+# Auth SDK mismo sa Flutter app (signUp, signInWithPassword, verifyOTP,
+# resend, at updateUser para sa password change). Walang FastAPI
+# endpoint na kailangan para dito.
 
 class CustomerResponse(BaseModel):
     """Profile data returned after successful customer login or registration."""
@@ -115,41 +107,22 @@ class CustomerResponse(BaseModel):
     mobile_number: str
     is_active: bool
     is_verified: bool
-    # NEW — kasabay ng Customer.notifications_enabled sa models.py.
-    # Ginagamit ng Settings section (notification toggle) para malaman
-    # kung naka-ON o OFF ito nang hindi na kailangang mag-fetch pa ng
-    # hiwalay na endpoint para lang dito.
     notifications_enabled: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
-class CustomerLoginResponse(BaseModel):
-    """Standardized OAuth2-compatible login response for customers."""
-    access_token: str
-    token_type: str = "bearer"
-    customer: CustomerResponse
 
-class CustomerVerifyEmail(BaseModel):
-    """Schema for submitting the 6-digit verification code."""
-    email: EmailStr
-    code: str
+# UPDATED (Supabase Auth migration): TINANGGAL ang CustomerLoginResponse
+# — hindi na FastAPI ang nagbibigay ng access_token/login response.
 
-class CustomerResendCode(BaseModel):
-    """Schema for requesting a new verification code."""
-    email: EmailStr
-
-# --- CUSTOMER PROFILE EDIT SCHEMAS (NEW) ---
+# --- CUSTOMER PROFILE EDIT SCHEMAS ---
 
 class CustomerUpdate(BaseModel):
     """
     Schema para sa "Personal information" edit form sa Profile page.
-    Parehong optional (partial update) ang dalawang field — pwedeng
-    baguhin ang isa lang, o pareho. Email at password ay SINASADYANG
-    HINDI kasama dito: may sariling dedikadong "Change password" flow
-    ang password (see CustomerPasswordUpdate), at ang email ay hindi
-    muna pinapayagang baguhin dahil ginagamit ito bilang unique login
-    identifier (baka kailangan pa ng re-verification flow balang araw
-    kung papayagan itong baguhin).
+    Email at password ay SINASADYANG HINDI kasama dito: password ay
+    Supabase Auth SDK na ang bahala (client-side updateUser call), at
+    email ay hindi pa rin muna pinapayagang baguhin.
     """
     full_name: Optional[str] = None
     mobile_number: Optional[str] = None
@@ -175,36 +148,15 @@ class CustomerUpdate(BaseModel):
         return v
 
 
-class CustomerPasswordUpdate(BaseModel):
-    """
-    Schema para sa "Change password" form sa Settings. Hiwalay ito sa
-    generic PasswordUpdate (ginagamit ng shop Owner/Staff sa web app)
-    kahit magkaparehong laman, para malinaw na naka-scope sa customer
-    flow ito at pwedeng mag-iba ang validation rules nila balang araw
-    nang hindi nagkakabanggaan.
-    """
-    old_password: str
-    new_password: str
-
-    @field_validator("new_password")
-    @classmethod
-    def validate_new_password(cls, v):
-        if len(v) < 8:
-            raise ValueError("New password must be at least 8 characters long.")
-        return v
-
-
 class CustomerNotificationSettingsUpdate(BaseModel):
     """Schema para sa notification on/off toggle sa Settings."""
     notifications_enabled: bool
 
-# --- ADDRESS (SAVED ADDRESSES) SCHEMAS (NEW) ---
+# --- ADDRESS (SAVED ADDRESSES) SCHEMAS ---
 
 class AddressBase(BaseModel):
     """
     Base schema para sa isang naka-save na address ng customer.
-    latitude/longitude ay optional — pwedeng plain text address lang
-    (walang pin sa mapa) kung 'yun ang gagamitin ng Saved Addresses UI.
     """
     label: str = "Home"
     address_line: str
@@ -272,16 +224,7 @@ class AddressResponse(AddressBase):
 # --- SERVICE TYPE SCHEMAS ---
 
 class ServiceTypeBase(BaseModel):
-    """
-    Base schema for a shop-defined service. Shop owners create these
-    themselves from Optimization Settings — includes pricing AND how
-    long the service runs on a machine (duration_minutes), which drives
-    the Machine Monitoring card's remaining_time.
-
-    Added pricing_unit — bawat service ay may sariling unit ng presyo
-    ("load", "kg", o "piece"), dahil hindi pareho lahat ng service ng
-    isang shop (hal. Regular Wash = per load, Wash&Fold = per kg).
-    """
+    """Base schema for a shop-defined service."""
     name: str
     price: float
     is_active: bool = True
@@ -319,12 +262,7 @@ class ServiceTypeBase(BaseModel):
         return v
 
 class ServiceTypeCreate(ServiceTypeBase):
-    """
-    NOTE: kept for backward compatibility / potential internal use, but
-    setting_routes.py's POST /settings/services endpoint now uses
-    ServiceTypeBase directly (no shop_id field) since shop_id is derived
-    from the JWT via Depends(get_current_user), not supplied by the client.
-    """
+    """NOTE: kept for backward compatibility / potential internal use."""
     shop_id: int
 
 class ServiceTypeUpdate(BaseModel):
@@ -374,14 +312,10 @@ class ServiceTypeResponse(ServiceTypeBase):
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
 
-# --- ADD-ON SCHEMAS (NEW) ---
+# --- ADD-ON SCHEMAS ---
 
 class AddOnBase(BaseModel):
-    """
-    Base schema for a shop-defined add-on (fabric softener upgrade, rush
-    service, atbp.) — kagaya ng ServiceType pattern, shop owner ang
-    gumagawa nito sa Optimization Settings.
-    """
+    """Base schema for a shop-defined add-on."""
     name: str
     price: float
     is_active: bool = True
@@ -402,7 +336,7 @@ class AddOnBase(BaseModel):
         return v
 
 class AddOnCreate(AddOnBase):
-    """NOTE: shop_id kept for internal/compat use only — see ServiceTypeCreate note above."""
+    """NOTE: shop_id kept for internal/compat use only."""
     shop_id: int
 
 class AddOnUpdate(BaseModel):
@@ -442,14 +376,10 @@ class AddOnPreview(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- PROMO CODE SCHEMAS (NEW) ---
+# --- PROMO CODE SCHEMAS ---
 
 class PromoCodeBase(BaseModel):
-    """
-    Base schema for a shop-defined promo/discount code. discount_type ay
-    "percent" (10 = 10% off) o "fixed" (50 = ₱50 off). max_uses ay
-    optional na limit (null = walang limit).
-    """
+    """Base schema for a shop-defined promo/discount code."""
     code: str
     discount_type: str = "percent"
     discount_value: float
@@ -481,7 +411,7 @@ class PromoCodeBase(BaseModel):
         return v
 
 class PromoCodeCreate(PromoCodeBase):
-    """NOTE: shop_id kept for internal/compat use only — see ServiceTypeCreate note above."""
+    """NOTE: shop_id kept for internal/compat use only."""
     shop_id: int
 
 class PromoCodeUpdate(BaseModel):
@@ -528,22 +458,12 @@ class PromoCodeResponse(PromoCodeBase):
 
 # --- SETTINGS SCHEMAS ---
 
-# --- SETTINGS SCHEMAS ---
-
 class SettingBase(BaseModel):
-    """
-    Base settings schema containing operational rates and booking rules.
-    Service-specific pricing has moved to ServiceType — this now only
-    covers costs/rules that apply shop-wide regardless of service.
-    """
+    """Base settings schema containing operational rates and booking rules."""
     electricity_rate: float
     water_rate: float
     supplies_cost_per_load: float
-
-    # Minimum billable weight (in KG) enforced on the Create Booking modal.
-    # Defaults to 6kg but is configurable per shop from Optimization Settings.
     minimum_weight_kg: float = 6.0
-
     off_peak_hours: str = "8:00 AM - 11:00 AM"
 
 class SettingUpdate(BaseModel):
@@ -551,9 +471,7 @@ class SettingUpdate(BaseModel):
     electricity_rate: Optional[float] = None
     water_rate: Optional[float] = None
     supplies_cost_per_load: Optional[float] = None
-
     minimum_weight_kg: Optional[float] = None
-
     off_peak_hours: Optional[str] = None
 
     @field_validator("minimum_weight_kg")
@@ -567,6 +485,7 @@ class SettingResponse(SettingBase):
     """Full response schema for syncing global operational rates across all frontend modals."""
     shop_id: int
     model_config = ConfigDict(from_attributes=True)
+
 # --- INVENTORY SCHEMAS ---
 
 class InventoryItemBase(BaseModel):
@@ -695,12 +614,7 @@ class MachineNested(BaseModel):
 # --- BOOKING INVENTORY USAGE SCHEMAS ---
 
 class BookingInventoryItemInput(BaseModel):
-    """
-    Isang inventory item na ginamit sa isang booking, kasama ang quantity.
-    Listahan nito ang mapupunta sa BookingCreate.inventory_items —
-    pinapayagan nitong maraming consumables (detergent, fabcon, atbp.)
-    sa iisang booking, bawat isa may sariling quantity.
-    """
+    """Isang inventory item na ginamit sa isang booking, kasama ang quantity."""
     inventory_item_id: int
     quantity_used: float
 
@@ -721,7 +635,7 @@ class BookingInventoryUsageResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- BOOKING ADD-ON USAGE SCHEMAS (NEW) ---
+# --- BOOKING ADD-ON USAGE SCHEMAS ---
 
 class BookingAddOnUsageResponse(BaseModel):
     """Isang add-on na ginamit sa booking, para sa BookingResponse."""
@@ -735,11 +649,7 @@ class BookingAddOnUsageResponse(BaseModel):
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
-    """
-    Schema for creating a laundry transaction.
-    washer_id and dryer_id are fully optional — if both are None,
-    the backend will set the booking status to 'Pending'.
-    """
+    """Schema for creating a laundry transaction."""
     customer_name: str
     service_type: str  
     category: str
@@ -751,9 +661,6 @@ class BookingCreate(BaseModel):
 
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
-    # Listahan ng maraming consumables (hal. detergent + fabric conditioner)
-    # na ginamit sa isang booking. Optional — pwedeng walang laman kung
-    # walang consumable na ginamit (hal. walk-in na may sariling sabon).
     inventory_items: List[BookingInventoryItemInput] = []
 
     add_detergent: bool = False
@@ -766,11 +673,7 @@ class BookingCreate(BaseModel):
 
 
 class BookingAssignMachine(BaseModel):
-    """
-    Used when assigning a machine to an existing Pending booking
-    from the Service Terminal. At least one of washer_id or dryer_id
-    must be provided (validated in the controller).
-    """
+    """Used when assigning a machine to an existing Pending booking."""
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
@@ -783,15 +686,7 @@ class BookingStatusUpdate(BaseModel):
 
 
 class BookingDeclineRequest(BaseModel):
-    """
-    Schema for declining a customer-submitted booking request. `reason`
-    is free text so the Service Terminal can offer quick preset options
-    ("Fully booked", "Closed for the day", "Service unavailable") that
-    just populate this field, while still allowing a custom explanation
-    for anything the presets don't cover. Required (not optional) — a
-    decline should always come with a reason the customer can see,
-    rather than silently disappearing from their end.
-    """
+    """Schema for declining a customer-submitted booking request."""
     reason: str
 
     @field_validator("reason")
@@ -805,19 +700,9 @@ class BookingDeclineRequest(BaseModel):
         return cleaned
 
 class BookingResponse(BaseModel):
-    """
-    Detailed transaction response for the Service Terminal UI AND the
-    mobile app's booking history/tracking (GET /bookings/mine) — same
-    shape is reused for both.
-    """
+    """Detailed transaction response for the Service Terminal UI AND the mobile app."""
     id: int
     customer_name: str
-
-    # NEW — resolved from Booking.shop_name (a Python @property on the
-    # model, not a DB column — see models.py). Needed because the mobile
-    # app's booking history spans MULTIPLE shops in one list; without
-    # this, there'd be no way to show which shop each booking belongs to
-    # short of a separate lookup per item.
     shop_name: Optional[str] = None
 
     service_type: str
@@ -835,13 +720,9 @@ class BookingResponse(BaseModel):
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
-    # Nagsasabi kung saan galing ang booking (mobile customer vs.
-    # staff/Service Terminal) at kung sinong customer, kung meron.
     customer_id: Optional[int] = None
     source: Optional[str] = "terminal"
 
-    # NEW — special instructions, delivery/dropoff scheduling, at
-    # pricing breakdown (delivery fee, promo discount).
     special_instructions: Optional[str] = None
     fulfillment_mode: Optional[str] = "dropoff"
     pickup_datetime: Optional[datetime] = None
@@ -850,10 +731,8 @@ class BookingResponse(BaseModel):
     promo_code: Optional[str] = None
     discount_amount: Optional[float] = 0.0
 
-    # NEW — dahilan kung bakit na-decline (null maliban kung "Declined").
     decline_reason: Optional[str] = None
 
-    # Listahan ng lahat ng items/add-ons na ginamit sa booking na ito.
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     add_ons_used: List[BookingAddOnUsageResponse] = []
     
@@ -882,20 +761,7 @@ class BookingResponse(BaseModel):
 # --- CUSTOMER (MOBILE APP) BOOKING SCHEMAS ---
 
 class CustomerBookingCreate(BaseModel):
-    """
-    Schema para sa booking na ginawa mismo ng customer sa mobile app —
-    mas simple kaysa BookingCreate (walang machine assignment, walang
-    customer_name dahil galing na sa JWT).
-
-    quantity ay generic na number lang — ang ibig sabihin nito
-    (load/kg/piece) ay depende sa pricing_unit ng napiling service.
-
-    fulfillment_mode: "dropoff" (customer mismo magdadala/kukuha sa
-    shop) o "delivery" (may rider ang shop). "delivery" ay bawal lang
-    piliin kung ang shop ay walang Shop.has_delivery = True (che-check
-    ito sa controller, hindi dito, dahil kailangan pang i-query ang
-    shop). pickup_datetime ay REQUIRED lang kapag "delivery" ang mode.
-    """
+    """Schema para sa booking na ginawa mismo ng customer sa mobile app."""
     shop_id: int
     service_type: str
     quantity: float
@@ -958,10 +824,7 @@ class DashboardStats(BaseModel):
     optimization: Optional[Dict[str, str]] = None
 
 class InsightResponse(BaseModel):
-    """
-    Schema for real-time Operational Insights (Decision Support System).
-    Maps directly to the React 'Operational Insight' card.
-    """
+    """Schema for real-time Operational Insights (Decision Support System)."""
     hasIssue: bool
     type: str
     problemMessage: str
@@ -971,12 +834,7 @@ class InsightResponse(BaseModel):
 # --- ACTIVITY LOG SCHEMAS ---
 
 class ActivityLogResponse(BaseModel):
-    """
-    Response schema for a single Activity Log entry. actor_name and
-    actor_role are stored redundantly on the ActivityLog row itself
-    (not just looked up via a relationship) so history remains readable
-    even if the acting User account is later deleted.
-    """
+    """Response schema for a single Activity Log entry."""
     id: int
     shop_id: int
     actor_name: str
@@ -989,21 +847,7 @@ class ActivityLogResponse(BaseModel):
 # --- NOTIFICATION SCHEMAS ---
 
 class NotificationResponse(BaseModel):
-    """
-    A single notification entry for the mobile app's Notifications page.
-    One row per booking-status EVENT (not a snapshot of current status) —
-    see the Notification model docstring in models.py for the full
-    reasoning. is_read powers the actual read/unread UI + bell badge
-    count, replacing the old client-side heuristic that guessed
-    "read" from whether the booking's status was final.
-
-    NEW — `type` field (see Notification.type in models.py): a
-    machine-readable string ("booking_accepted", "booking_declined",
-    "status_in_progress", "status_ready", "status_claimed",
-    "status_cancelled", "booking_cancelled", "general") the frontend
-    uses to pick the right icon/color per notification without parsing
-    the free-text `message`.
-    """
+    """A single notification entry for the mobile app's Notifications page."""
     id: int
     booking_id: Optional[int] = None
     type: str = "general"
@@ -1022,20 +866,13 @@ class NotificationMarkReadResponse(BaseModel):
 
 
 class UnreadCountResponse(BaseModel):
-    """
-    NEW — Simple response para sa GET /notifications/unread-count,
-    pinapakita ng bell icon badge (tuldok/number) sa top bar.
-    """
+    """Simple response para sa GET /notifications/unread-count."""
     unread_count: int
 
 # --- CUSTOMER-FACING (PUBLIC) SHOP SCHEMAS ---
 
 class ShopServicePreview(BaseModel):
-    """
-    Safe, public view ng isang service — para sa customer-facing mobile
-    app. Walang internal cost breakdown (electricity/water/detergent
-    costs), 'yun ang dahilan kung bakit hiwalay ito sa ServiceTypeResponse.
-    """
+    """Safe, public view ng isang service — para sa customer-facing mobile app."""
     id: int
     name: str
     price: float
@@ -1046,30 +883,16 @@ class ShopServicePreview(BaseModel):
 
 
 class ShopPublicResponse(BaseModel):
-    """
-    Listing view ng isang shop — ginagamit sa mobile app's Home carousel
-    at Shop Selection Page. Walang financial/internal data, safe i-expose
-    nang walang auth.
-    """
+    """Listing view ng isang shop — ginagamit sa mobile app's Home carousel at Shop Selection Page."""
     id: int
     shop_name: str
     address: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    distance_km: Optional[float] = None  # populated lang ng GET /shops/nearby
+    distance_km: Optional[float] = None
 
-    # NEW — para makita agad sa listing/carousel kung may delivery
-    # ang shop na ito, kahit hindi pa binubuksan ang Shop Detail.
     has_delivery: bool = False
     delivery_fee: float = 0.0
-
-    # NEW — real-time na "online" status, ibinabase sa aktibong
-    # WebSocket connection ng Service Terminal (see Shop.is_online sa
-    # models.py). Ginagamit ng Home carousel / Shop Selection Page para
-    # magpakita ng "Currently Closed" badge at i-disable ang "Book Now"
-    # kung walang tumatanggap ng booking sa kasalukuyan. Default False
-    # para safe (offline) muna hanggang ma-confirm ang aktwal na status
-    # mula sa DB.
     is_online: bool = False
 
     model_config = ConfigDict(from_attributes=True)
@@ -1084,9 +907,6 @@ class ShopDetailResponse(BaseModel):
     longitude: Optional[float] = None
     has_delivery: bool = False
     delivery_fee: float = 0.0
-    # NEW — see ShopPublicResponse.is_online note above. Ito ang
-    # ginagamit ng Shop Detail page para i-disable ang "Book Now" button
-    # at magpakita ng "Currently Closed" / "Offline" label.
     is_online: bool = False
     services: List[ShopServicePreview] = []
     add_ons: List[AddOnPreview] = []
@@ -1096,19 +916,7 @@ class ShopDetailResponse(BaseModel):
 # --- SETTINGS & PROFILE SCHEMAS ---
 
 class ShopProfileUpdate(BaseModel):
-    """
-    Schema for updating the shop information.
-
-    UPDATED: Added has_delivery + delivery_fee — parehong Shop model
-    fields, kaya same update_shop_profile() controller function ang
-    humahawak nito (walang bagong controller function na kailangan).
-
-    UPDATED: Added latitude + longitude — parehong Shop model fields
-    din, same generic update_shop_profile() loop ang humahawak. Kailangan
-    ito para may totoong coordinates ang shop para sa weather-based
-    forecasting (see app/services/weather_service.py) — dati walang
-    paraan para ma-set ito kahit saan sa API.
-    """
+    """Schema for updating the shop information."""
     shop_name: Optional[str] = None
     address: Optional[str] = None
     email: Optional[EmailStr] = None
@@ -1138,19 +946,14 @@ class ShopProfileUpdate(BaseModel):
             raise ValueError("longitude must be between -180 and 180.")
         return v
 
-class PasswordUpdate(BaseModel):
-    """Schema for validating password change requests."""
-    old_password: str
-    new_password: str
+
+# UPDATED (Supabase Auth migration): TINANGGAL ang PasswordUpdate —
+# ang password change ay Supabase Auth SDK na ang bahala
+# (client-side supabase.auth.updateUser({ password: newPassword })).
+
 
 class ShopProfileResponse(BaseModel):
-    """
-    Schema for returning the current shop profile data.
-
-    UPDATED: Added latitude/longitude — surfaced here so the frontend's
-    Profile Settings form can show/set the shop's coordinates, which
-    the forecast pipeline needs to fetch real local weather.
-    """
+    """Schema for returning the current shop profile data."""
     shop_name: str
     address: str
     email: str
@@ -1160,3 +963,33 @@ class ShopProfileResponse(BaseModel):
     longitude: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# --- SUPABASE WEBHOOK SCHEMAS (NEW) ---
+
+class SupabaseAuthRecord(BaseModel):
+    """
+    Subset ng auth.users columns na kailangan natin mula sa Supabase
+    Database Webhook payload — hindi lahat ng columns, laman lang na
+    ginagamit ng sync logic (see webhook_controller.sync_verified_user).
+    """
+    id: uuid_lib.UUID
+    email: EmailStr
+    email_confirmed_at: Optional[datetime] = None
+    raw_user_meta_data: Optional[Dict[str, Any]] = None
+
+
+class SupabaseWebhookPayload(BaseModel):
+    """
+    Standard shape ng Supabase Database Webhook payload
+    (POST /webhooks/supabase-auth). 'schema' ay reserved word sa
+    Pydantic/Python conventions dito kaya naka-alias papuntang
+    schema_name.
+    """
+    type: str
+    table: str
+    schema_name: str = Field(alias="schema")
+    record: SupabaseAuthRecord
+    old_record: Optional[SupabaseAuthRecord] = None
+
+    model_config = ConfigDict(populate_by_name=True)

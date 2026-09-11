@@ -14,32 +14,14 @@ class Shop(Base):
     shop_name = Column(String, unique=True, nullable=False)
     address = Column(String, nullable=True)
 
-    # GPS coordinates for the "nearby shops" feature on the mobile app.
-    # Nullable dahil NULL muna ang existing shops hanggang ma-set ng owner.
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
 
-    # Controls kung lalabas ang shop na ito sa public/customer-facing
-    # listing (mobile app). Default True para hindi mawala ang existing
-    # registered shops sa listahan.
     is_published = Column(Boolean, default=True, nullable=False)
 
-    # NEW — kung meron bang delivery service ang shop, at magkano ang
-    # bayad kung meron. Kontrolado ng shop owner sa Optimization Settings.
     has_delivery = Column(Boolean, default=False, nullable=False)
     delivery_fee = Column(Float, default=0.0, nullable=False)
 
-    # NEW — real-time na "online" status ng shop, ibinabase sa kung may
-    # aktibong WebSocket connection ba ang Service Terminal nito
-    # (see app/services/ws_manager.py). True kapag may kahit isang
-    # naka-bukas na Service Terminal tab/device; False kapag naubos na
-    # ang lahat ng connections. Ginagamit ng mobile app para i-disable
-    # ang "Book Now" button at magpakita ng "Currently Closed" label
-    # kapag walang tumatanggap ng booking sa kasalukuyan.
-    #
-    # server_default="false" (bukod sa Python-side default=False) para
-    # sigurong may valid na value ang EXISTING rows pagkatapos ng
-    # migration (ALTER TABLE ... ADD COLUMN), hindi lang bagong rows.
     is_online = Column(Boolean, default=False, nullable=False, server_default="false")
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -50,11 +32,8 @@ class Shop(Base):
     inventory = relationship("InventoryItem", back_populates="shop", cascade="all, delete-orphan")
     settings = relationship("Setting", back_populates="shop", uselist=False, cascade="all, delete-orphan")
     service_types = relationship("ServiceType", back_populates="shop", cascade="all, delete-orphan")
-    # NEW — per-shop add-ons and promo codes.
     add_ons = relationship("AddOn", back_populates="shop", cascade="all, delete-orphan")
     promo_codes = relationship("PromoCode", back_populates="shop", cascade="all, delete-orphan")
-    # Activity trail for this shop; each entry attributes an action
-    # to a specific User (via actor_name/actor_role snapshot, see below).
     activity_logs = relationship("ActivityLog", back_populates="shop", cascade="all, delete-orphan")
 
     def to_dict(self):
@@ -140,24 +119,7 @@ class BookingInventoryUsage(Base):
 
 class ServiceType(Base):
     """
-    Dynamic, per-shop service catalog. Replaces the old fixed pricing columns
-    on Setting. A shop owner defines their own services and prices here from
-    the Optimization Settings page, and these records are what populate the
-    'Service Type' dropdown in the Create Booking modal.
-
-    Added duration_minutes so the shop owner also configures how long each
-    service actually runs on a machine. This drives machine.remaining_time
-    for any booking that references a configured service.
-
-    Added pricing_unit so bawat service ay may sariling paraan ng
-    pagpepresyo — may per load (Regular Wash), may per kg (Wash, Dry, and
-    Fold), may per piece (Comforter). Ito ang nagpapakita sa Optimization
-    Settings at sa customer-facing mobile app kung "₱65 / load" o
-    "₱15 / kg" ang display.
-
-    New shops intentionally start with ZERO service types — the owner must
-    configure at least one before bookings referencing that service can be
-    created.
+    Dynamic, per-shop service catalog.
     """
     __tablename__ = "service_types"
 
@@ -167,8 +129,6 @@ class ServiceType(Base):
     is_active = Column(Boolean, default=True)
     duration_minutes = Column(Integer, nullable=False, default=45)
 
-    # "load", "kg", o "piece". Default "load" dahil 'yun ang dating
-    # implicit assumption bago dumagdag ang concept na ito.
     pricing_unit = Column(String(20), nullable=False, default="load")
 
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
@@ -187,10 +147,7 @@ class ServiceType(Base):
 
 class AddOn(Base):
     """
-    NEW — Per-shop na listahan ng optional add-ons (fabric softener
-    upgrade, rush service, atbp.) na pwedeng idagdag ng customer sa
-    isang booking. Kagaya ng ServiceType, shop-defined ito — nagsisimula
-    sa ZERO add-ons ang bawat bagong shop.
+    Per-shop na listahan ng optional add-ons.
     """
     __tablename__ = "add_ons"
 
@@ -214,16 +171,13 @@ class AddOn(Base):
 
 class PromoCode(Base):
     """
-    NEW — Per-shop na promo/discount codes. discount_type ay "percent"
-    (hal. 10 = 10% off) o "fixed" (hal. 50 = ₱50 off). max_uses ay
-    optional na limit sa dami ng beses magagamit ito (null = walang
-    limit); times_used ay nagta-track kung ilang beses nagamit na.
+    Per-shop na promo/discount codes.
     """
     __tablename__ = "promo_codes"
 
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String, nullable=False, index=True)
-    discount_type = Column(String, nullable=False, default="percent")  # "percent" o "fixed"
+    discount_type = Column(String, nullable=False, default="percent")
     discount_value = Column(Float, nullable=False, default=0.0)
     is_active = Column(Boolean, default=True)
     max_uses = Column(Integer, nullable=True)
@@ -249,7 +203,6 @@ class PromoCode(Base):
 class Setting(Base):
     """
     Global configuration for operational unit costs and booking rules.
-    Service-specific pricing has moved to the ServiceType table.
     """
     __tablename__ = "settings"
 
@@ -278,27 +231,35 @@ class Setting(Base):
             "operation_start_hour": self.operation_start_hour,
             "shop_id": self.shop_id
         }
+
+
 class User(Base):
     """
     Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
 
-    Added full_name. Dating wala nito kahit meron nang full_name field
-    ang StaffCreate schema — hindi pa ito naisa-save kahit saan, kaya
-    laging email lang ang lumalabas sa Activity Log bilang actor (hal.
-    "juan@gmail.com" imbes na "Juan Dela Cruz"). Ngayon, kapag gumagawa
-    ng owner o staff account, kasama na ang tunay na pangalan. Nullable
-    dahil sa mga EXISTING accounts na wala pang laman dito (na-create
-    bago idagdag ang column na ito) — kailangang mag-fallback sa email
-    sa mga lugar na gumagamit nito.
+    UPDATED (Supabase Auth migration): TINANGGAL ang hashed_password —
+    ang Supabase Auth na ang humahawak ng password storage/verification.
+    IDINAGDAG ang supabase_uid — link papunta sa Supabase's
+    auth.users.id, sini-sync via ang /webhooks/supabase-auth endpoint
+    (see webhook_controller.py) pagkatapos ma-verify ng owner/staff ang
+    kanilang email/OTP. Ang integer id (PK) ay NANATILING PAREHO —
+    hindi ito ginalaw dahil dito naka-anchor ang shop_id at ibang
+    relationships; ang supabase_uid ay hiwalay/karagdagang column lang.
+
+    Nullable ang supabase_uid habang transition period pa
+    (existing accounts na wala pang Supabase counterpart).
     """
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
     role = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
-    
+
+    # NEW — Supabase auth.users.id (UUID string). Unique dahil isa lang
+    # dapat na local User ang naka-tapat sa bawat Supabase identity.
+    supabase_uid = Column(String(36), unique=True, index=True, nullable=True)
+
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -318,6 +279,16 @@ class User(Base):
 class Customer(Base):
     """
     Identity management for mobile app customers (laundry service bookers).
+
+    UPDATED (Supabase Auth migration): TINANGGAL ang hashed_password,
+    verification_code, at verification_expires_at — ang Supabase Auth
+    na ang humahawak ng password storage AT ng OTP email verification
+    (papalit sa dating sariling verification_code flow). IDINAGDAG ang
+    supabase_uid — parehong dahilan/pattern ng User.supabase_uid sa
+    itaas. is_verified ay NANATILI — ito pa rin ang gagamitin ng buong
+    app (booking creation checks, atbp.), sini-sync na lang ngayon
+    mula sa Supabase's email_confirmed_at sa halip na sa dating sariling
+    verification_code flow.
     """
     __tablename__ = "customers"
 
@@ -325,36 +296,17 @@ class Customer(Base):
     full_name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     mobile_number = Column(String, nullable=False)
-    hashed_password = Column(String, nullable=False)
+
+    # NEW — Supabase auth.users.id (UUID string).
+    supabase_uid = Column(String(36), unique=True, index=True, nullable=True)
 
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
-    verification_code = Column(String, nullable=True)
-    verification_expires_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    # NEW — isang customer ay pwedeng magkaroon ng maraming notification
-    # entries (isa per booking-status event — see Notification class sa
-    # ibaba). cascade="all, delete-orphan" para awtomatikong malinis din
-    # ang mga notification kung matanggal man ang customer account.
     notifications = relationship("Notification", back_populates="customer", cascade="all, delete-orphan")
-
-    # NEW — mga naka-save na address ng customer (Home, Work, atbp.),
-    # ginagamit sa Profile page's "Saved addresses" section, at pwedeng
-    # gamitin sa hinaharap para mabilis mapili sa delivery bookings
-    # imbes na i-type paulit-ulit ang parehong address.
     addresses = relationship("Address", back_populates="customer", cascade="all, delete-orphan")
-
-    # NEW — kontrolado ng customer sa Profile > Settings kung gusto ba
-    # nilang tumanggap ng notifications (booking accepted/declined/status
-    # updates). server_default="true" para lahat ng EXISTING rows ay
-    # naka-ON pa rin bilang default pagkatapos ng migration, hindi lang
-    # bagong accounts. Hindi ito humaharang sa Notification creation
-    # mismo — responsibilidad ito ng CALLER (booking_controller) na
-    # tingnan muna ang flag na ito bago tumawag sa
-    # notification_controller.create_notification(), para panatilihing
-    # simple ang Notification model/controller.
     notifications_enabled = Column(Boolean, default=True, nullable=False, server_default="true")
 
     def to_dict(self):
@@ -422,19 +374,6 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customer service requests to hardware units.
-
-    UPDATED: Added customer_id + source to support bookings self-created
-    by a mobile-app customer (as opposed to staff-created bookings from
-    the Service Terminal). A customer-sourced booking starts life with
-    status "Awaiting Approval" instead of "Pending"/"In Progress" — it
-    must be explicitly Accepted (→ "Pending", enters the normal flow) or
-    Declined (→ "Declined", stays out of the Service Terminal but is kept
-    for history) by the shop before it behaves like any other booking.
-
-    UPDATED: Added special_instructions, fulfillment_mode, pickup_datetime,
-    delivery_datetime, delivery_fee_charged, promo_code, discount_amount —
-    all customer-facing booking details captured by the mobile app's
-    booking flow (drop-off vs. delivery, scheduling, discounts).
     """
     __tablename__ = "bookings"
 
@@ -456,57 +395,28 @@ class Booking(Base):
     dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
 
-    # nag-uugnay sa Customer (mobile app user) kung sino ang gumawa ng
-    # booking na ito. Nullable dahil ang mga bookings na ginawa via
-    # Service Terminal (staff/manual) ay walang customer.
     customer_id = Column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
 
-    # "terminal" (staff-created, default) o "mobile" (customer
-    # self-booked via app). Ginagamit para malaman kung saan galing
-    # ang booking nang hindi na kailangang mag-infer mula sa customer_id.
     source = Column(String, default="terminal", nullable=False)
 
-    # NEW — libreng text note mula sa customer (hal. "huwag i-bleach").
     special_instructions = Column(String, nullable=True)
 
-    # NEW — "dropoff" (customer mismo magdadala/kukuha sa shop) o
-    # "delivery" (may rider ang shop na kukuha/maghahatid).
     fulfillment_mode = Column(String, default="dropoff", nullable=False)
 
-    # NEW — kailan kukunin ng rider ang maruming labada (delivery mode
-    # lang ito, null kung dropoff).
     pickup_datetime = Column(DateTime(timezone=True), nullable=True)
 
-    # NEW — inaasahang oras ng paghahatid pabalik ng malinis na labada
-    # (delivery mode lang ito, null kung dropoff).
     delivery_datetime = Column(DateTime(timezone=True), nullable=True)
 
-    # NEW — snapshot ng delivery fee noong oras ng booking (hindi 'yung
-    # current Shop.delivery_fee — baka magbago pa 'yun mamaya).
     delivery_fee_charged = Column(Float, default=0.0)
 
-    # NEW — snapshot ng promo code ginamit (kung meron) at ang nabawas
-    # na halaga dahil dito.
     promo_code = Column(String, nullable=True)
     discount_amount = Column(Float, default=0.0)
 
-    # NEW — dahilan ng pag-decline ng shop sa isang mobile booking request
-    # (hal. "Fully booked", "Closed for the day", o custom text). Null
-    # maliban kung "Declined" ang status. Makikita ito ng customer sa
-    # mobile app (History/Notifications) para malaman kung bakit hindi
-    # natuloy ang kanilang booking, sa halip na basta na lang "Declined"
-    # na walang paliwanag.
     decline_reason = Column(String, nullable=True)
 
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # NEW — eager-loaded (lazy="joined") kagaya ng washer/dryer sa ibaba.
-    # Ito ang dahilan kung bakit nagawa nating gawin ang shop_name bilang
-    # simpleng @property sa halip na hiwalay pang query: sigurado tayong
-    # naka-load na ang shop object bago pa man i-access ang property na
-    # ito, kahit sa isang listahan ng maraming bookings (GET
-    # /bookings/mine, na sumasaklaw sa MARAMING shops).
     shop = relationship("Shop", back_populates="bookings", lazy="joined")
     washer = relationship("Machine", foreign_keys=[washer_id], back_populates="washer_bookings", lazy="joined")
     dryer = relationship("Machine", foreign_keys=[dryer_id], back_populates="dryer_bookings", lazy="joined")
@@ -517,7 +427,6 @@ class Booking(Base):
         cascade="all, delete-orphan",
         lazy="joined"
     )
-    # NEW — add-ons na ginamit sa booking na ito.
     add_ons_used = relationship(
         "BookingAddOnUsage",
         back_populates="booking",
@@ -527,22 +436,6 @@ class Booking(Base):
 
     @property
     def shop_name(self):
-        """
-        NEW — read-only convenience property, HINDI isang DB column.
-        Sinasagot nito ang gap na dating wala: ang Booking mismo ay
-        walang naka-save na pangalan ng shop (shop_id lang), pero ang
-        mobile app's booking history (GET /bookings/mine) ay
-        sumasaklaw sa MARAMING shops sa iisang listahan — kailangan
-        niyang malaman kung "aling shop" ang bawat booking nang hindi
-        na kailangang mag-issue ng hiwalay na query kada item.
-
-        Dahil BookingResponse ay gumagamit ng ConfigDict(from_attributes=
-        True), awtomatikong makikita ni Pydantic ang property na ito
-        (parang ordinary attribute lang mula sa pananaw nito) basta
-        idagdag lang ang `shop_name` bilang field sa schema — walang
-        kailangang gawing field_validator na tulad ng washer_number/
-        dryer_number sa BookingResponse.
-        """
         return self.shop.shop_name if self.shop else None
 
     def to_dict(self):
@@ -584,11 +477,7 @@ class Booking(Base):
 
 class BookingAddOnUsage(Base):
     """
-    NEW — Junction table: anong add-ons ginamit sa isang booking.
-    price_at_booking ay snapshot ng presyo noong oras ng booking, hindi
-    'yung current AddOn.price — para hindi magbago ang dating booking
-    kahit baguhin pa ng shop ang presyo mamaya (parehong pattern gaya
-    ng BookingInventoryUsage sa itaas).
+    Junction table: anong add-ons ginamit sa isang booking.
     """
     __tablename__ = "booking_addon_usage"
 
@@ -610,37 +499,7 @@ class BookingAddOnUsage(Base):
 
 class Notification(Base):
     """
-    Isang notification entry para sa isang customer, karaniwan ay
-    nauugnay sa isang partikular na Booking status change (submitted,
-    accepted, declined, in progress, ready, claimed, cancelled).
-
-    SADYANG hiwalay ito sa "current booking status" (BookingResponse) —
-    dating derive-lang ang mga "notification" sa mobile app mula sa
-    kasalukuyang status ng bawat booking, kaya IISA lang ang lumalabas
-    per booking (nagbabago lang ang text kapag nagbago ang status,
-    hindi dumadami). Sa pag-iral ng table na ito, bawat TRANSITION
-    (Awaiting Approval → Pending, Pending → In Progress, atbp.) ay
-    isang HIWALAY na row — totoong history ng mga pangyayari, hindi
-    isang "snapshot" lang ng pinaka-huling status.
-
-    NEW — `type` column: hiwalay sa `title`/`message` (na parehong
-    naka-freeform text), ito ay isang machine-readable string (hal.
-    "booking_accepted", "booking_declined", "status_in_progress",
-    "status_ready", "status_claimed", "status_cancelled",
-    "booking_cancelled") na ginagamit ng frontend para pumili ng tamang
-    icon/kulay kada notification nang hindi na kailangang mag-parse pa
-    ng laman ng `message`. Default "general" bilang safe fallback para
-    sa anumang notification na hindi (pa) naka-categorize.
-
-    is_read ay nagbibigay-daan sa tunay na read/unread na UI sa mobile
-    app (bell badge count = bilang ng is_read == False), sa halip na
-    yung dating heuristic na ibinabase na lang sa "final" statuses.
-
-    booking_id ay NULLABLE at ondelete="SET NULL" — kung sakaling
-    matanggal ang booking (hindi dapat mangyari sa normal flow, pero
-    hindi rin sinasadyang ipagbawal dito), mananatili pa rin ang
-    notification record bilang history, hindi na lang naka-link sa
-    isang partikular na booking.
+    Isang notification entry para sa isang customer.
     """
     __tablename__ = "notifications"
 
@@ -649,8 +508,8 @@ class Notification(Base):
     booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
 
     type = Column(String, nullable=False, default="general")
-    title = Column(String, nullable=False)      # e.g. "Booking confirmed"
-    message = Column(String, nullable=False)    # e.g. "CleanWave Laundry accepted your Regular Wash booking."
+    title = Column(String, nullable=False)
+    message = Column(String, nullable=False)
 
     is_read = Column(Boolean, default=False, nullable=False, server_default="false")
 
@@ -673,36 +532,17 @@ class Notification(Base):
 
 class ActivityLog(Base):
     """
-    Talaan ng mahahalagang aksyon na ginawa ng mga User (Owner/Staff/
-    Manager) sa loob ng isang shop, para sa accountability at history
-    tracking.
-
-    actor_name at actor_role ay sinadyang naka-DUPLICATE dito (hindi
-    lang naka-relate sa User table) — kahit matanggal balang araw ang
-    User account na gumawa nito (nag-resign, na-deactivate), permanente
-    pa ring makikita sa log kung SINO at ANONG ROLE ang gumawa ng aksyon,
-    imbes na mawala o maging "Unknown User" na lang.
-
-    Walang direktang foreign key papuntang User dito nang sinasadya —
-    ang shop_id + actor_name snapshot na ang sapat para sa layunin ng
-    isang simpleng activity trail, at iniiwasan nito ang kailangang
-    isipin pa ang ondelete behavior kung matatanggal ang User.
-
-    FIXED: timestamp column ay ginawang DateTime(timezone=True) —
-    dating walang timezone info ang naka-save (naive datetime), kaya
-    kahit UTC talaga ang laman, walang "Z"/offset suffix sa isoformat()
-    output, kaya inaakala ng browser na LOCAL time na ito. Sanhi ito ng
-    maling oras (8-hour offset sa PH) sa Activity Log page.
+    Talaan ng mahahalagang aksyon na ginawa ng mga User sa loob ng isang shop.
     """
     __tablename__ = "activity_logs"
 
     id = Column(Integer, primary_key=True, index=True)
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
 
-    actor_name = Column(String, nullable=False)   # e.g. "Juan Dela Cruz"
-    actor_role = Column(String, nullable=False)   # "owner", "staff", "manager"
+    actor_name = Column(String, nullable=False)
+    actor_role = Column(String, nullable=False)
 
-    description = Column(String, nullable=False)  # e.g. "Created a booking for Maria - ₱250"
+    description = Column(String, nullable=False)
 
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -721,21 +561,7 @@ class ActivityLog(Base):
 
 class Address(Base):
     """
-    NEW — Isang naka-save na address ng isang customer (mobile app),
-    bumubuo sa "Saved addresses" section ng Profile page. Dinisenyo
-    itong madaling i-reuse sa hinaharap para mapili na lang ng customer
-    ang isang saved address sa halip na mag-type paulit-ulit tuwing
-    gagawa ng delivery booking.
-
-    label: libreng text pero karaniwang "Home", "Work", "Other", atbp.
-    Hindi dinagdagan ng allowed-values validator dahil gusto nating
-    payagan ang customer na mag-type ng sarili nilang label
-    (hal. "Mom's House").
-
-    is_default: isa lang dapat ang True sa lahat ng address ng isang
-    customer sa anumang oras — pinapatupad ito sa CONTROLLER level
-    (address_controller.py), hindi sa DB constraint, para mas simple
-    ang migration at flexible pa rin sa hinaharap.
+    Isang naka-save na address ng isang customer (mobile app).
     """
     __tablename__ = "addresses"
 

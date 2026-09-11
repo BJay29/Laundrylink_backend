@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app import schemas, models
@@ -10,18 +10,30 @@ router = APIRouter(
     tags=["Authentication"]
 )
 
-# --- BACKEND-ONLY REGISTRATION (Hidden from UI) ---
-@router.post("/register/owner", response_model=schemas.UserResponse)
-def register_owner(user: schemas.OwnerCreate, db: Session = Depends(get_db)):
+
+# --- SHOP REGISTRATION (kailangan nang naka-login via Supabase) ---
+@router.post("/register-shop", response_model=schemas.UserResponse)
+def register_shop(
+    shop_data: schemas.OwnerCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
-    Endpoint for creating shop owner accounts.
-    Public — anyone can register a new shop, since a Shop + its first
-    Owner account are created together.
+    UPDATED (Supabase Auth migration): pinalitan ang dating
+    POST /auth/register/owner.
+
+    BAGONG FLOW: hindi na ito ang gumagawa ng account — nangyari na
+    ang account creation sa Supabase Auth (signUp + OTP verify),
+    at nag-sync na ang User row (walang shop_id pa) papunta sa Aiven
+    DB via webhook BAGO pa man ma-tawag ang endpoint na ito. Kaya
+    PROTECTED na endpoint na ito (may Depends(get_current_user)) —
+    tinatawag ito ng frontend PAGKATAPOS mag-login (may valid Supabase
+    JWT na), para lang kumpletuhin ang "gumawa ng shop" na hakbang.
     """
-    return auth_controller.create_owner(db, user)
+    return auth_controller.register_shop_for_owner(db, shop_data, current_user)
 
 
-# --- STAFF/MANAGER REGISTRATION (Owner-only) ---
+# --- STAFF/MANAGER INVITATION (Owner-only) ---
 @router.post("/register/staff", response_model=schemas.StaffResponse, status_code=status.HTTP_201_CREATED)
 def register_staff(
     staff_data: schemas.StaffCreate,
@@ -29,35 +41,13 @@ def register_staff(
     db: Session = Depends(get_db)
 ):
     """
-    Creates a new staff/manager account UNDER THE LOGGED-IN OWNER'S OWN SHOP.
-
-    Unlike /register/owner, this does NOT create a new Shop — it links the
-    new account to current_user.shop_id, so it's always the Owner's own
-    shop, never a shop_id supplied by the client. Restricted to
-    role="owner" via require_role() — a staff or manager account cannot
-    create other staff accounts.
-
-    This is what the frontend's "Add Staff" button (inside the dashboard,
-    NOT the public Sign Up page) calls. The new staff member then logs in
-    normally via the SAME /auth/login endpoint everyone else uses — no
-    separate staff login flow exists.
+    Gumagawa ng "invitation" record para sa bagong staff/manager UNDER
+    THE LOGGED-IN OWNER'S OWN SHOP. Hindi pa ito kumpletong account —
+    kailangan pang mag-sign-up mismo ang staff member sa Supabase Auth
+    gamit ang PAREHONG email para makumpleto ang kanilang access
+    (see auth_controller.create_staff docstring).
     """
     return auth_controller.create_staff(db, staff_data, shop_id=current_user.shop_id)
-
-
-# --- UNIVERSAL LOGIN (Web & Mobile) ---
-@router.post("/login", response_model=schemas.LoginResponse)
-def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
-    """
-    Primary authentication endpoint for both React (Web) and Flutter (Mobile).
-    Validates credentials and returns a REAL JWT + shop context (ID, Name, Address).
-
-    Used by EVERYONE — Owner, Staff, and Manager accounts alike. The role
-    embedded in the resulting JWT is determined entirely by which User row
-    matches the given email (set once at account creation time), not by
-    anything this endpoint decides.
-    """
-    return auth_controller.authenticate_user(db, user_credentials)
 
 
 # --- SESSION DATA FETCHING (PROTECTED, SELF ONLY) ---
@@ -65,12 +55,9 @@ def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
 def get_my_profile(current_user: models.User = Depends(get_current_user)):
     """
     Retrieves session details of the CURRENTLY LOGGED-IN user only,
-    based on the JWT sent in the Authorization header.
-
-    Previously "/profile/{user_id}" was accessible by anyone who knew a
-    valid user ID (1, 2, 3...) — no authentication check. Now it's based
-    on the verified JWT, so it's impossible for one user to see another
-    user's profile/shop data.
+    based on the Supabase JWT sent in the Authorization header.
+    Walang binago dito — parehong gumagana ito kasama ng bagong
+    get_current_user() sa security.py.
     """
     return {
         "email": current_user.email,
@@ -80,3 +67,12 @@ def get_my_profile(current_user: models.User = Depends(get_current_user)):
         "shop_name": getattr(current_user.shop, 'shop_name', None) if current_user.shop else None,
         "address": getattr(current_user.shop, 'address', None) if current_user.shop else None,
     }
+
+
+# REMOVED: POST /auth/login — hindi na FastAPI ang nagbibigay ng JWT.
+# Sa frontend, gagamitin na lang ang Supabase Auth SDK mismo:
+#   supabase.auth.signInWithPassword({ email, password })
+# at ang ibinabalik na session.access_token ang ipapasa bilang
+# "Authorization: Bearer <token>" papunta sa lahat ng protected
+# FastAPI endpoints (kasama na ang /auth/profile at /auth/register-shop
+# sa itaas).

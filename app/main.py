@@ -12,6 +12,7 @@ from app.routes import (
     setting_routes, analytics_routes, inventory_routes, activity_routes,
     shop_routes, websocket_routes, addon_routes, promo_routes,
     notification_routes, address_routes,
+    webhook_routes,  # NEW — Supabase Auth webhook sync endpoint
 )
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
@@ -182,6 +183,12 @@ app.include_router(notification_routes.router)
 # NEW — customer's saved addresses (GET /addresses/mine, POST /addresses/,
 # PATCH /addresses/{id}, DELETE /addresses/{id}).
 app.include_router(address_routes.router)
+# NEW — Supabase Auth Database Webhook receiver (POST
+# /webhooks/supabase-auth). Ito ang tinatawag ng Supabase kapag
+# na-verify na ng isang user (customer o owner/staff) ang kanilang
+# email/OTP, at dito sini-sync ang kanilang supabase_uid papunta sa
+# Aiven Postgres (models.Customer o models.User).
+app.include_router(webhook_routes.router)
 
 # --- ROOT HEALTH CHECK ---
 
@@ -191,7 +198,12 @@ def read_root():
         "status": "Online",
         "system": "LaundryLink Optimization Engine",
         "database": "PostgreSQL Connected",
-        "modules_active": ["Auth", "CustomerAuth", "Bookings", "Machines", "Settings", "Analytics", "Inventory", "Activity", "Shops", "Notifications", "Addresses", "AddOns", "PromoCodes"]
+        "modules_active": [
+            "Auth", "CustomerAuth", "Bookings", "Machines", "Settings",
+            "Analytics", "Inventory", "Activity", "Shops", "Notifications",
+            "Addresses", "AddOns", "PromoCodes",
+            "SupabaseAuthWebhook",  # NEW
+        ]
     }
 
 # --- PRODUCTION ENTRY POINT ---

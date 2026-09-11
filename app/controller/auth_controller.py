@@ -1,78 +1,73 @@
-import bcrypt
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from app import models, schemas
-from app.security import create_access_token
 
 
-def create_owner(db: Session, user: schemas.OwnerCreate):
+def register_shop_for_owner(db: Session, shop_data: schemas.OwnerCreate, current_user: models.User):
     """
-    Backend-only registration for Shop Owners.
-    Creates a new shop entity and links the owner account to it.
-    Used for populating the database via Thunder Client.
+    UPDATED (Supabase Auth migration): pinalitan ang dating create_owner().
 
-    UPDATED: now saves user.owner_name to the new User's full_name
-    column. Previously the Owner's real name was never captured — only
-    Staff accounts (via StaffCreate) had a full_name field — so the
-    Activity Log would show the Owner's email instead of their name.
+    Bagong flow: sa Supabase Auth na nangyayari ang account creation
+    (signUp + OTP verify), tapos ang webhook (webhook_controller.
+    sync_verified_user) na ang gumagawa ng User row sa Aiven DB —
+    pero WALANG shop_id pa noon, dahil hindi pa alam ng webhook kung
+    anong shop ang gagawin ng owner na ito.
+
+    Ito ang TUMUTUPAD sa "gumawa ng shop" na parte: tinatawag ito ng
+    frontend PAGKATAPOS mag-login gamit ang Supabase JWT (kaya may
+    current_user na, na-resolve na via get_current_user dependency).
+    Ginagawa dito ang Shop entity, tapos ni-link ang current_user
+    (na naka-synced na mula sa webhook) papunta rito.
     """
-    # 1. Check if the email is already in use
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if db_user:
+    # Owner lang dapat ang tumatawag dito, at isang beses lang dapat
+    # (hindi na dapat may existing shop_id na).
+    if current_user.role != "owner":
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only owner accounts can register a shop."
         )
 
-    # 2. Create the Shop entity first
+    if current_user.shop_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This account is already linked to a shop."
+        )
+
     new_shop = models.Shop(
-        shop_name=user.shop_name,
-        address=user.address
+        shop_name=shop_data.shop_name,
+        address=shop_data.address
     )
     db.add(new_shop)
     db.commit()
     db.refresh(new_shop)
 
-    # 3. Create the Owner account linked to the new shop
-    hashed_pass = bcrypt.hashpw(
-        user.password.encode('utf-8'),
-        bcrypt.gensalt()
-    ).decode('utf-8')
-
-    new_user = models.User(
-        email=user.email,
-        hashed_password=hashed_pass,
-        role="owner",
-        shop_id=new_shop.id
-    )
-    db.add(new_user)
+    current_user.shop_id = new_shop.id
+    db.add(current_user)
     db.commit()
-    db.refresh(new_user)
+    db.refresh(current_user)
 
-    # 4. Attach shop details for the response
-    new_user.shop_name = new_shop.shop_name
-    new_user.address = new_shop.address
+    # Attach shop details for the response (parehong pattern ng dati).
+    current_user.shop_name = new_shop.shop_name
+    current_user.address = new_shop.address
 
-    return new_user
+    return current_user
 
 
 def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
     """
-    Creates a new staff/manager account UNDER AN EXISTING shop.
+    UPDATED (Supabase Auth migration): gumagawa na lang ng "placeholder"
+    User row (walang password, walang supabase_uid pa) sa halip na
+    kumpletong account. Ito ay isang "invitation" — kapag nag-sign-up
+    ang bagong staff member gamit ang PAREHONG email sa Supabase Auth
+    (at na-verify nila ang OTP), ang webhook_controller._sync_user()
+    ay makikita ang email match na ito at ang gagawin na lang niya ay
+    i-set ang supabase_uid dito (hindi na gagawa ng bagong duplicate
+    row) — see webhook_controller.py.
 
-    Unlike create_owner(), this does NOT create a new Shop — it links the
-    new User directly to shop_id, which is always supplied by the caller
-    (the auth_routes.py endpoint), never trusted from client input. The
-    caller is responsible for ensuring shop_id comes from the currently
-    logged-in Owner's own JWT (via require_role("owner")), so a staff
-    account can only ever be created under the Owner's own shop.
-
-    This is what enables individual login accounts per staff/manager,
-    which in turn is what makes the Activity Log meaningful — each
-    action gets attributed to the real person who performed it instead
-    of a generic shared account.
+    Ang Owner ang responsable na sabihan ang staff member (offline,
+    hal. via email/chat) kung anong email ang ginamit dito, para
+    magkatugma sila pag-sign-up ng staff sa Supabase.
     """
-    # 1. Check if the email is already in use
     existing = db.query(models.User).filter(models.User.email == staff_data.email).first()
     if existing:
         raise HTTPException(
@@ -80,19 +75,12 @@ def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
             detail="Email already registered"
         )
 
-    # 2. Hash the password
-    hashed_pass = bcrypt.hashpw(
-        staff_data.password.encode('utf-8'),
-        bcrypt.gensalt()
-    ).decode('utf-8')
-
-    # 3. Create the staff/manager account linked to the Owner's own shop
     new_staff = models.User(
         email=staff_data.email,
-        hashed_password=hashed_pass,
         role=staff_data.role,   # "staff" or "manager" — validated in schemas.py
         full_name=staff_data.full_name,
-        shop_id=shop_id
+        shop_id=shop_id,
+        supabase_uid=None,      # kakabit pa lang, hihintayin ang webhook sync
     )
     db.add(new_staff)
     db.commit()
@@ -101,78 +89,10 @@ def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
     return new_staff
 
 
-def authenticate_user(db: Session, credentials: schemas.UserLogin):
-    """
-    Authenticates administrative users (Owners/Staff/Managers) via email
-    and password. Returns a unified payload with a REAL signed JWT for
-    both React and Flutter.
-
-    NOTE: this function is UNCHANGED by the addition of staff accounts —
-    it looks up whichever User row matches the given email, and that
-    row's own `role`, `shop_id`, and `full_name` (set once, at account
-    creation time, either in create_owner() or create_staff()) are what
-    get returned/embedded. There is no separate "staff login" path; the
-    same lookup-by-email logic naturally returns the correct data for
-    whoever is logging in.
-    """
-
-    # 1. Fetch user by email
-    user = db.query(models.User).filter(
-        models.User.email == credentials.email
-    ).first()
-
-    # 2. Verify existence and password
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid email or password"
-        )
-
-    if not bcrypt.checkpw(
-        credentials.password.encode('utf-8'),
-        user.hashed_password.encode('utf-8')
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid email or password"
-        )
-
-    # 3. Check if user is active
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is inactive. Contact your administrator."
-        )
-
-    # 4. Build response payload
-    # UPDATED: added full_name so the frontend can cache/display the
-    # user's real name (e.g. localStorage.setItem('full_name', ...)).
-    user_payload = {
-        "email": user.email,
-        "full_name": user.full_name,
-        "role": user.role,
-        "shop_id": user.shop_id,
-        "shop_name": getattr(user.shop, 'shop_name', None) if user.shop else None,
-        "address": getattr(user.shop, 'address', None) if user.shop else None,
-    }
-
-    # 5. Generate a REAL signed JWT — shop_id at role naka-embed na dito.
-    #    Ito na ang magiging pinagmumulan ng shop scoping sa buong app,
-    #    hindi na yung shop_id na ipinapasa ng client.
-    token = create_access_token(
-        user_id=user.id,
-        shop_id=user.shop_id,
-        role=user.role
-    )
-
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": user_payload
-    }
-
-
-# NOTE: get_current_user_profile(db, user_id) was removed from here.
-# It was replaced by the get_current_user() dependency in security.py,
-# which resolves the user from the JWT instead of an arbitrary user_id
-# in the URL (previously a security hole: any user_id was viewable).
+# REMOVED: authenticate_user() — hindi na FastAPI ang humahawak ng
+# login/password verification, ang Supabase Auth SDK na
+# (signInWithPassword) sa frontend mismo ang gumagawa nito at
+# direktang nagbibigay ng JWT doon.
+#
+# REMOVED: get_current_user_profile() — dati pa itong tinanggal noon,
+# pinalitan ng get_current_user() dependency sa security.py.
