@@ -4,7 +4,8 @@ from typing import List
 from app.database import get_db
 from app.schemas import (
     BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine,
-    CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest
+    CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest,
+    PaymentStatusUpdate
 )
 from app.controller import booking_controller
 from app import models
@@ -39,6 +40,11 @@ def create_booking(
     the shop's configured minimum_weight_kg. This endpoint is for
     Service Terminal (staff) bookings only — see POST /bookings/customer
     for customer-initiated bookings from the mobile app.
+
+    UPDATED (Payment): tumatanggap na rin ng opsyonal na payment_method
+    (default "cash") — hindi na kailangang tawagin agad ang
+    /mark-paid pagkatapos gawin ang booking kung alam na agad ng staff
+    kung anong paraan ng bayad ang gagamitin.
     """
     return booking_controller.create_booking(db, booking_data, current_user)
 
@@ -116,6 +122,28 @@ def assign_machine(
     )
 
 
+@router.patch("/{booking_id}/mark-paid", response_model=BookingResponse)
+def mark_paid(
+    booking_id: int,
+    payment_data: PaymentStatusUpdate,
+    current_user: models.User = Depends(get_current_user),  # ⬅️ galing sa JWT
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Staff-triggered na pag-mark ng isang booking bilang "Paid".
+    Ginagamit ito ng Record Sales page at ng Booking Details/Service
+    Terminal UI kapag natanggap na ng staff ang bayad — cash man ito
+    (walk-in/dropoff) o COD (delivery). Manual ang trigger — walang
+    naka-bind na fixed na timing kung kailan ito dapat mangyari.
+
+    shop_id ay derived mula sa JWT — hindi pwedeng i-mark ng isang shop
+    ang booking ng ibang shop (404 kung hindi tugma).
+    """
+    return booking_controller.mark_booking_as_paid(
+        db, booking_id, payment_data, current_user
+    )
+
+
 # =========================================================
 # CUSTOMER (MOBILE APP) BOOKING ENDPOINTS
 # =========================================================
@@ -132,6 +160,11 @@ async def create_customer_booking(
     Decline it (see the two endpoints below) before it behaves like a
     normal Service Terminal booking. Broadcasts a real-time WebSocket
     notification to the shop's connected Service Terminal on success.
+
+    UPDATED (Payment): tumatanggap na rin ng payment_method mula sa
+    checkout choice ng customer ("cash" para sa dropoff, "cod" para sa
+    delivery, o "gcash"/"paymaya" kapag na-enable na ang online payment
+    flow sa future phase).
     """
     return await booking_controller.create_customer_booking(db, current_customer, booking_data)
 

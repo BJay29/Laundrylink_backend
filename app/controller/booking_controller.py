@@ -1,5 +1,5 @@
 from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage
-from app.schemas import BookingCreate, BookingAssignMachine, CustomerBookingCreate
+from app.schemas import BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate
 from app.services.prediction_service import PredictionService
 from app.services.ws_manager import manager
 from app.controller import inventory_controller
@@ -34,6 +34,12 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     shop_id, so the action can be attributed to whoever actually
     performed it (current_user.full_name or current_user.email /
     current_user.role) instead of just knowing which shop it happened in.
+
+    UPDATED (Payment): ini-set na rin ang payment_method galing sa
+    booking_data (default "cash", tumutugma sa Walk-in terminal flow).
+    payment_status ay laging nagsisimula sa "unpaid" (default sa model)
+    — ang pag-mark bilang "Paid" ay hiwalay at manual na action ng staff
+    (see mark_booking_as_paid() sa ibaba).
 
     NOTE: no is_online gate here — this is a staff-created booking from
     the Service Terminal itself, i.e. the terminal is, by definition,
@@ -115,6 +121,10 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
         source="terminal",
+        # NEW: payment_method mula sa request (default "cash").
+        # payment_status ay hindi na kailangang i-set dito nang explicit
+        # — kinukuha na nito ang default na "unpaid" mula sa Booking model.
+        payment_method=booking_data.payment_method or "cash",
         booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)
     )
@@ -549,6 +559,96 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
 
 
 # =========================================================
+# PAYMENT FUNCTIONS (NEW)
+# =========================================================
+
+def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStatusUpdate, current_user: models.User):
+    """
+    NEW — Manual na "Mark as Paid" action ng staff. Ginagamit ito sa
+    parehong Walk-in (cash, dropoff) at Mobile COD bookings, kung saan
+    ang staff mismo ang nagko-confirm na natanggap na ang bayad — walang
+    automated payment gateway verification pa dito (ang GCash/PayMaya
+    QR + proof-upload na flow ay hiwalay na future phase).
+
+    Staff mismo ang nagde-decide kung KAILAN i-mark bilang paid — walang
+    naka-bind na fixed na timing (hal. pwede itong gawin bago pa man
+    simulan ang laundry, o pagkatapos ng buong service, depende sa
+    proseso ng bawat shop).
+
+    Naka-scope sa parehong shop_id ng staff (current_user.shop_id) —
+    hindi pwedeng i-mark ng isang shop ang booking ng ibang shop.
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.payment_status == "paid":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This booking is already marked as paid."
+        )
+
+    booking.payment_method = payment_data.payment_method
+    booking.payment_status = "paid"
+    booking.paid_at = datetime.now(timezone.utc)
+
+    try:
+        # --- ACTIVITY LOG ---
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Marked booking for {booking.customer_name} as PAID "
+                f"(via {payment_data.payment_method})"
+            )
+        )
+
+        # --- CUSTOMER NOTIFICATION (only for mobile-sourced bookings) ---
+        if booking.customer_id:
+            notification_controller.create_notification(
+                db,
+                customer_id=booking.customer_id,
+                notif_type="payment_confirmed",
+                title="Payment Confirmed",
+                message=(
+                    f"Your payment for the {booking.service_type} booking at "
+                    f"{booking.shop_name or 'the shop'} has been confirmed. Thank you!"
+                ),
+                booking_id=booking.id
+            )
+
+        db.commit()
+        db.refresh(booking)
+        return (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used)
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Payment Update Error: {str(e)}"
+        )
+
+
+# =========================================================
 # CUSTOMER (MOBILE APP) BOOKING FUNCTIONS
 # =========================================================
 
@@ -634,6 +734,13 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
       4. − discount (kung may promo_code, naka-validate sa
          _apply_promo_code())
     Ang resultang total_price ang siyang naka-save sa Booking.
+
+    UPDATED (Payment): ini-set na rin ang payment_method galing sa
+    customer's checkout choice (booking_data.payment_method — "cash"
+    para sa dropoff, "cod" para sa delivery, o "gcash"/"paymaya" kapag
+    ini-enable na ang online payment sa future phase). payment_status
+    ay laging nagsisimula bilang "unpaid" — ang pag-verify/pag-mark ay
+    hiwalay pa ring action ng staff (see mark_booking_as_paid()).
 
     NEW (safety net): bago pa man tingnan ang service catalog, sinusuri
     muna kung shop.is_online — ibig sabihin, may naka-buk as na Service
@@ -756,6 +863,10 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         delivery_fee_charged=delivery_fee_charged,
         promo_code=promo_record.code if promo_record else None,
         discount_amount=discount_amount,
+        # NEW: payment_method mula sa checkout choice ng customer.
+        # payment_status ay hindi kailangang i-set dito nang explicit —
+        # default "unpaid" na mula sa Booking model.
+        payment_method=booking_data.payment_method or "cash",
         booking_timestamp=datetime.now(timezone.utc),
         created_at=datetime.now(timezone.utc)
     )

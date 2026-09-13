@@ -236,18 +236,6 @@ class Setting(Base):
 class User(Base):
     """
     Identity management for Owners and Staff members with Role-Based Access Control (RBAC).
-
-    UPDATED (Supabase Auth migration): TINANGGAL ang hashed_password —
-    ang Supabase Auth na ang humahawak ng password storage/verification.
-    IDINAGDAG ang supabase_uid — link papunta sa Supabase's
-    auth.users.id, sini-sync via ang /webhooks/supabase-auth endpoint
-    (see webhook_controller.py) pagkatapos ma-verify ng owner/staff ang
-    kanilang email/OTP. Ang integer id (PK) ay NANATILING PAREHO —
-    hindi ito ginalaw dahil dito naka-anchor ang shop_id at ibang
-    relationships; ang supabase_uid ay hiwalay/karagdagang column lang.
-
-    Nullable ang supabase_uid habang transition period pa
-    (existing accounts na wala pang Supabase counterpart).
     """
     __tablename__ = "users"
 
@@ -256,8 +244,6 @@ class User(Base):
     role = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
 
-    # NEW — Supabase auth.users.id (UUID string). Unique dahil isa lang
-    # dapat na local User ang naka-tapat sa bawat Supabase identity.
     supabase_uid = Column(String(36), unique=True, index=True, nullable=True)
 
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
@@ -279,16 +265,6 @@ class User(Base):
 class Customer(Base):
     """
     Identity management for mobile app customers (laundry service bookers).
-
-    UPDATED (Supabase Auth migration): TINANGGAL ang hashed_password,
-    verification_code, at verification_expires_at — ang Supabase Auth
-    na ang humahawak ng password storage AT ng OTP email verification
-    (papalit sa dating sariling verification_code flow). IDINAGDAG ang
-    supabase_uid — parehong dahilan/pattern ng User.supabase_uid sa
-    itaas. is_verified ay NANATILI — ito pa rin ang gagamitin ng buong
-    app (booking creation checks, atbp.), sini-sync na lang ngayon
-    mula sa Supabase's email_confirmed_at sa halip na sa dating sariling
-    verification_code flow.
     """
     __tablename__ = "customers"
 
@@ -297,7 +273,6 @@ class Customer(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     mobile_number = Column(String, nullable=False)
 
-    # NEW — Supabase auth.users.id (UUID string).
     supabase_uid = Column(String(36), unique=True, index=True, nullable=True)
 
     is_active = Column(Boolean, default=True)
@@ -374,6 +349,11 @@ class Machine(Base):
 class Booking(Base):
     """
     Laundry transactions linking customer service requests to hardware units.
+
+    NEW (Payment Feature): idinagdag ang payment_method, payment_status,
+    at paid_at para masubaybayan kung bayad na o hindi ang isang booking
+    (Walk-in cash o Mobile COD/Online) — ginagamit ito sa Record Sales
+    page (filter/column) at sa "Mark as Paid" action ng staff.
     """
     __tablename__ = "bookings"
 
@@ -413,6 +393,13 @@ class Booking(Base):
     discount_amount = Column(Float, default=0.0)
 
     decline_reason = Column(String, nullable=True)
+
+    # --- NEW: Payment tracking (Paid/Unpaid feature) ---
+    # payment_method: "cash" (walk-in/dropoff), "cod" (delivery), "gcash", "paymaya"
+    payment_method = Column(String, nullable=True, default="cash")
+    # payment_status: "unpaid", "pending_verification" (online, di pa na-verify), "paid"
+    payment_status = Column(String, nullable=False, default="unpaid", server_default="unpaid")
+    paid_at = Column(DateTime(timezone=True), nullable=True)
 
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -466,6 +453,11 @@ class Booking(Base):
             "promo_code": self.promo_code,
             "discount_amount": self.discount_amount,
             "decline_reason": self.decline_reason,
+            # --- NEW ---
+            "payment_method": self.payment_method,
+            "payment_status": self.payment_status,
+            "paid_at": self.paid_at.isoformat() if self.paid_at else None,
+            # -----------
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,

@@ -3,6 +3,8 @@ from fastapi import HTTPException, status
 from .. import models, schemas
 from .activity_controller import log_activity
 import logging
+import random
+import string
 from passlib.context import CryptContext # Added for password hashing
 
 # Set up password hashing context
@@ -475,30 +477,62 @@ def get_promo_codes(db: Session, shop_id: int):
         .all()
     )
 
-def create_promo_code(db: Session, current_user: models.User, promo_data: schemas.PromoCodeBase):
+
+def _generate_unique_promo_code(db: Session, shop_id: int, discount_type: str, discount_value: float) -> str:
     """
-    Registers a new promo code for the shop. Prevents exact duplicate
-    codes (case-insensitive, PromoCodeBase's validator already
-    uppercases it) for the same shop.
+    NEW — Gumagawa ng random na promo code, halimbawa "SAVE20-X7K9"
+    (percent discount) o "PROMO150-A3B8" (fixed amount discount).
+    Format: PREFIX + rounded discount value + "-" + 4-character random
+    alphanumeric suffix. Sinusuri kung unique sa loob ng shop bago
+    ibalik — kung sakaling mag-collide (napakabihirang mangyari), susubukan
+    ulit hanggang 10 beses bago mag-raise ng error.
+    """
+    prefix = "SAVE" if discount_type == "percent" else "PROMO"
+    value_part = str(int(discount_value))
+
+    for _ in range(10):
+        suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        candidate_code = f"{prefix}{value_part}-{suffix}"
+
+        existing = (
+            db.query(models.PromoCode)
+            .filter(
+                models.PromoCode.shop_id == shop_id,
+                models.PromoCode.code == candidate_code
+            )
+            .first()
+        )
+        if not existing:
+            return candidate_code
+
+    # Napaka-bihira nitong mangyari (10 consecutive collisions), pero
+    # kailangan pa ring i-handle nang maayos sa halip na mag-crash.
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Could not generate a unique promo code. Please try again."
+    )
+
+
+def create_promo_code(db: Session, current_user: models.User, promo_data: schemas.PromoCodeGenerateInput):
+    """
+    UPDATED — Registers a new promo code para sa shop, pero AUTO-
+    GENERATED na ngayon ang `code` (see _generate_unique_promo_code()
+    sa itaas) sa halip na kunin mula sa request body. Hindi na dapat
+    isipin ng shop owner ang code mismo — sapat na ang discount details
+    (type, value, max_uses, expiry).
+
+    Tinanggal ang duplicate-check sa dulo ng `promo_data.code` dahil
+    wala nang ganoong field sa PromoCodeGenerateInput — ang uniqueness
+    ay tinitiyak na ng _generate_unique_promo_code() mismo.
     """
     shop_id = current_user.shop_id
 
-    existing = (
-        db.query(models.PromoCode)
-        .filter(
-            models.PromoCode.shop_id == shop_id,
-            models.PromoCode.code == promo_data.code
-        )
-        .first()
+    generated_code = _generate_unique_promo_code(
+        db, shop_id, promo_data.discount_type, promo_data.discount_value
     )
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"A promo code '{promo_data.code}' already exists for this shop."
-        )
 
     new_promo = models.PromoCode(
-        code=promo_data.code,
+        code=generated_code,
         discount_type=promo_data.discount_type,
         discount_value=promo_data.discount_value,
         is_active=promo_data.is_active,
@@ -514,7 +548,7 @@ def create_promo_code(db: Session, current_user: models.User, promo_data: schema
         actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=(
-            f"Added a new promo code: {new_promo.code} "
+            f"Generated a new promo code: {new_promo.code} "
             f"({new_promo.discount_value}{'%' if new_promo.discount_type == 'percent' else '₱'} off)"
         )
     )
@@ -522,6 +556,7 @@ def create_promo_code(db: Session, current_user: models.User, promo_data: schema
     db.commit()
     db.refresh(new_promo)
     return new_promo
+
 
 def update_promo_code(db: Session, current_user: models.User, promo_id: int, promo_data: schemas.PromoCodeUpdate):
     """Edits an existing promo code's details."""

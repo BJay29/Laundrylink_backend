@@ -26,14 +26,18 @@ def list_promo_codes(
 
 @router.post("/", response_model=schemas.PromoCodeResponse, status_code=status.HTTP_201_CREATED)
 def add_promo_code(
-    promo_data: schemas.PromoCodeBase,
+    promo_data: schemas.PromoCodeGenerateInput,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Adds a new promo/discount code to the logged-in user's shop.
-    discount_type is "percent" or "fixed"; max_uses and expires_at are
-    optional limits.
+    UPDATED — Adds a new promo/discount code to the logged-in user's
+    shop. Ang `code` mismo ay AUTO-GENERATED na ng backend (see
+    settings_controller.create_promo_code() +
+    _generate_unique_promo_code()) — sapat na ang discount_type at
+    discount_value sa request body; hindi na kailangang magpadala ng
+    `code` (at kahit magpadala, hindi na ito babasahin — tinanggal na
+    ito sa PromoCodeGenerateInput).
     """
     return settings_controller.create_promo_code(db, current_user, promo_data)
 
@@ -48,6 +52,11 @@ def edit_promo_code(
     """
     Updates an existing promo code's details. Setting is_active=false
     disables it immediately without deleting its usage history.
+
+    NOTE: hindi ito nagbago — `PromoCodeUpdate` pa rin ang schema, kaya
+    kung gusto pa ring i-edit manually ang `code` ng isang existing
+    promo (hindi bagong-gawa), pwede pa rin ito — auto-generate lang
+    ang trigger sa PAGGAWA ng bago, hindi sa pag-edit.
     """
     return settings_controller.update_promo_code(db, current_user, promo_id, promo_data)
 

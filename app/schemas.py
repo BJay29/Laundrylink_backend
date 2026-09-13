@@ -414,6 +414,37 @@ class PromoCodeCreate(PromoCodeBase):
     """NOTE: shop_id kept for internal/compat use only."""
     shop_id: int
 
+
+class PromoCodeGenerateInput(BaseModel):
+    """
+    NEW — Schema para sa paggawa ng bagong promo code MULA SA WEB APP.
+    WALANG `code` field dito, sinasadya — ang backend na mismo
+    (settings_controller.create_promo_code()) ang bahalang mag-generate
+    ng random code, hindi na kailangang isipin ng shop owner. Ito ang
+    gagamitin ng POST /promo-codes/ sa halip na PromoCodeBase.
+    """
+    discount_type: str = "percent"
+    discount_value: float
+    is_active: bool = True
+    max_uses: Optional[int] = None
+    expires_at: Optional[datetime] = None
+
+    @field_validator("discount_type")
+    @classmethod
+    def validate_discount_type(cls, v):
+        allowed = {"percent", "fixed"}
+        if v not in allowed:
+            raise ValueError(f"discount_type must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("discount_value")
+    @classmethod
+    def validate_discount_value(cls, v):
+        if v <= 0:
+            raise ValueError("discount_value must be greater than 0.")
+        return v
+
+
 class PromoCodeUpdate(BaseModel):
     """Schema for editing an existing promo code. All fields optional (partial update)."""
     code: Optional[str] = None
@@ -646,6 +677,45 @@ class BookingAddOnUsageResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+# --- PAYMENT SCHEMAS (NEW) ---
+
+class PaymentStatusUpdate(BaseModel):
+    """
+    Schema para sa "Mark as Paid" action ng staff (Record Sales /
+    Booking Details). Manual trigger ito — staff mismo ang
+    nagde-decide kung kailan i-mark ang isang booking bilang paid,
+    kaya walang otomatikong timing na naka-bind dito. Ginagamit ito
+    sa parehong Walk-in (cash) at Mobile COD bookings. Ang
+    "gcash"/"paymaya" ay nakalaan na para sa Phase 6 (QR + proof
+    upload), pero pinapayagan na dito ang value kung sakaling
+    mano-manong i-verify muna ng staff ang isang online payment
+    proof bago i-mark as paid.
+    """
+    payment_method: str = "cash"  # "cash", "cod", "gcash", "paymaya"
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v):
+        allowed = {"cash", "cod", "gcash", "paymaya"}
+        if v not in allowed:
+            raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+
+class PaymentStatusResponse(BaseModel):
+    """
+    Minimal na response kapag na-query lang ang payment info ng isang
+    booking (hal. sa Record Sales row-level fetch), sa halip na buong
+    BookingResponse.
+    """
+    booking_id: int
+    payment_method: Optional[str] = None
+    payment_status: str
+    paid_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
@@ -667,9 +737,23 @@ class BookingCreate(BaseModel):
     add_delivery: bool = False
     is_rush: bool = False
 
+    # NEW: opsyonal na payment_method sa paggawa ng booking (hal. sa
+    # Service Terminal, pipiliin ng staff kung "cash" agad). Default
+    # "cash" para sa walk-in, tumutugma sa Booking model default.
+    payment_method: Optional[str] = "cash"
+
     booking_timestamp: Optional[datetime] = Field(default=None)
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v):
+        if v is not None:
+            allowed = {"cash", "cod", "gcash", "paymaya"}
+            if v not in allowed:
+                raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
+        return v
 
 
 class BookingAssignMachine(BaseModel):
@@ -733,6 +817,12 @@ class BookingResponse(BaseModel):
 
     decline_reason: Optional[str] = None
 
+    # --- NEW: Payment fields (Paid/Unpaid feature) ---
+    payment_method: Optional[str] = "cash"
+    payment_status: str = "unpaid"
+    paid_at: Optional[datetime] = None
+    # ---------------------------------------------------
+
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     add_ons_used: List[BookingAddOnUsageResponse] = []
     
@@ -771,6 +861,11 @@ class CustomerBookingCreate(BaseModel):
     add_on_ids: List[int] = []
     promo_code: Optional[str] = None
 
+    # NEW: pinipili ng customer sa checkout — "cash" (dropoff, babayaran
+    # sa shop), "cod" (delivery, babayaran sa rider), o online
+    # ("gcash"/"paymaya" — buong QR/proof upload flow ay Phase 6 pa).
+    payment_method: str = "cash"
+
     @field_validator("quantity")
     @classmethod
     def validate_quantity(cls, v):
@@ -791,6 +886,14 @@ class CustomerBookingCreate(BaseModel):
     def validate_pickup_required_for_delivery(cls, v, info):
         if info.data.get("fulfillment_mode") == "delivery" and v is None:
             raise ValueError("pickup_datetime is required when fulfillment_mode is 'delivery'.")
+        return v
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v):
+        allowed = {"cash", "cod", "gcash", "paymaya"}
+        if v not in allowed:
+            raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
         return v
 
 
