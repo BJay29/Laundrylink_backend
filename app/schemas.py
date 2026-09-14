@@ -783,6 +783,8 @@ class BookingCreate(BaseModel):
 
     payment_method: Optional[str] = "cash"
 
+    promo_code: Optional[str] = None
+
     booking_timestamp: Optional[datetime] = Field(default=None)
 
     model_config = ConfigDict(populate_by_name=True)

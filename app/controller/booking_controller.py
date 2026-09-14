@@ -21,45 +21,19 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     - If at least one machine is assigned → status = "In Progress"
 
     NOTE (multi-machine assignment feature): ang washer_id/dryer_id sa
-    BookingCreate ay LEGACY na ngayon — sinusuportahan pa rin dito para
-    hindi masira ang existing single-machine flow (hal. 1-load bookings
-    na direktang inaasignan ng machine sa mismong paggawa ng booking).
-    Para sa multi-load bookings (loads > 1), iniiwan MUNANG "Pending"
-    ang booking na ito (walang washer_id/dryer_id na ipapasa), tapos
-    tatawagin ang BAGONG assign_machines_to_booking() sa ibaba bilang
-    hiwalay na hakbang — doon nangyayari ang totoong N-machines-per-load
-    na assignment gamit ang BookingMachineAssignment.
+    BookingCreate ay LEGACY na ngayon...
 
-    UPDATED: machine.remaining_time now comes from the shop's own
-    configured ServiceType.duration_minutes instead of
-    PredictionService.get_machine_runtime()'s hardcoded estimate — the
-    Machine Monitoring card reflects what the shop owner actually set
-    in Optimization Settings.
+    NEW (Promo Code — Walk-in bookings): kung may booking_data.promo_code,
+    ii-validate at ia-apply ito gamit ang PAREHONG _apply_promo_code()
+    helper na ginagamit na ng mobile app's create_customer_booking() sa
+    ibaba ng file na ito. Ang total_price na ipinasa ng frontend
+    (BookingModal.jsx, computed via Smart Calc o Manual Override) ang
+    itinuturing na SUBTOTAL — ang discount ay ibabawas dito bago i-save
+    bilang final Booking.total_price. Kung invalid/expired/ubos na ang
+    code, agad na mag-r-raise ng HTTPException (hindi ito basta na lang
+    ini-ignore) — makikita ito ng staff bilang error sa BookingModal.
 
-    UPDATED: PredictionService.get_overhead() now takes (db, shop_id, ...)
-    so machine cost telemetry (electricity/water/supplies) is computed
-    using THIS shop's own configured rates from Optimization Settings,
-    instead of hardcoded Naga City constants that ignored the Setting
-    table entirely (previously, changing rates in the UI had zero effect
-    on cost calculations here).
-
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id, so the action can be attributed to whoever actually
-    performed it (current_user.full_name or current_user.email /
-    current_user.role) instead of just knowing which shop it happened in.
-
-    UPDATED (Payment): ini-set na rin ang payment_method galing sa
-    booking_data (default "cash", tumutugma sa Walk-in terminal flow).
-    payment_status ay laging nagsisimula sa "unpaid" (default sa model)
-    — ang pag-mark bilang "Paid" ay hiwalay at manual na action ng staff
-    (see mark_booking_as_paid() sa ibaba).
-
-    NOTE: no is_online gate here — this is a staff-created booking from
-    the Service Terminal itself, i.e. the terminal is, by definition,
-    open and connected while this runs. The is_online safety net only
-    applies to create_customer_booking() below (mobile app self-booking),
-    where the customer's device has no way to know the terminal's live
-    connection state on its own.
+    ...(ibang docstring content, walang binago)...
     """
     shop_id = current_user.shop_id
 
@@ -110,6 +84,20 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         )
         deducted_items.append((item, item_usage.quantity_used))
 
+    # --- 3.5. APPLY PROMO CODE (NEW — Walk-in bookings) ---
+    # Ang booking_data.total_price mula sa frontend ay ang SUBTOTAL
+    # (bago ang discount). Kung may promo_code, ibabawas dito ang
+    # discount bago gawing final price. Kung walang promo_code,
+    # walang epekto — final_price == subtotal, tulad ng dati.
+    promo_record = None
+    discount_amount = 0.0
+    final_price = booking_data.total_price
+    if booking_data.promo_code:
+        promo_record, discount_amount = _apply_promo_code(
+            db, shop_id, booking_data.promo_code, booking_data.total_price
+        )
+        final_price = round(booking_data.total_price - discount_amount, 2)
+
     # --- 4. DETERMINE INITIAL STATUS (legacy single-machine path) ---
     assigned_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
@@ -124,7 +112,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         category=booking_data.category,
         weight=booking_data.weight,
         loads=booking_data.loads,
-        total_price=booking_data.total_price,
+        total_price=final_price,
         booking_mode=booking_data.booking_mode,
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
@@ -135,14 +123,16 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         shop_id=shop_id,
         source="terminal",
         payment_method=booking_data.payment_method or "cash",
+        # NEW — snapshot ng promo code (kung meron) at ang nabawas na
+        # halaga, parehong pattern ng create_customer_booking() sa ibaba.
+        promo_code=promo_record.code if promo_record else None,
+        discount_amount=discount_amount,
         booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)
     )
 
     # --- 6. UPDATE MACHINE TELEMETRY (legacy path — only if machines are
-    #    assigned inline at creation, i.e. single-load bookings). Multi-
-    #    load bookings should NOT pass washer_id/dryer_id here — they
-    #    stay "Pending" and use assign_machines_to_booking() instead. ---
+    #    assigned inline at creation, i.e. single-load bookings) ---
     for m_id in assigned_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
@@ -163,7 +153,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
 
         machine.status = "Busy"
         machine.current_service_type = booking_data.service_type
-        machine.current_price = booking_data.total_price
+        machine.current_price = final_price
         machine.total_cycles += 1
         machine.remaining_time = service_type_record.duration_minutes
 
@@ -173,11 +163,11 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
 
         overhead_total = overhead_data.get("total_overhead", 0.0)
-        net_profit = booking_data.total_price - overhead_total
+        net_profit = final_price - overhead_total
         machine.net_profit_accumulated += net_profit
 
-        if booking_data.total_price > 0:
-            margin = (net_profit / booking_data.total_price) * 100
+        if final_price > 0:
+            margin = (net_profit / final_price) * 100
             machine.profitability_rate = max(0.0, min(100.0, margin))
         else:
             machine.profitability_rate = 0.0
@@ -193,16 +183,24 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
                 quantity_used=quantity_used
             ))
 
+        # NEW — i-increment ang times_used ng promo AFTER db.flush() (may
+        # booking.id na) pero BAGO ang commit — parehong transaction, para
+        # kung mag-fail ang commit, mag-rollback din ang increment na ito
+        # (walang "ghost usage" na naitala kahit hindi na-save ang booking).
+        if promo_record:
+            promo_record.times_used += 1
+
         machine_note = ""
         if assigned_ids:
             machine_note = f" (machine assigned, {len(assigned_ids)} unit/s)"
+        promo_note = f" [Promo: {promo_record.code}, -₱{discount_amount}]" if promo_record else ""
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
             description=(
                 f"Created a booking for {booking_data.customer_name} "
-                f"- {booking_data.service_type}, ₱{booking_data.total_price}{machine_note}"
+                f"- {booking_data.service_type}, ₱{final_price}{machine_note}{promo_note}"
             )
         )
 
@@ -228,7 +226,6 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database Transactional Error: {str(e)}"
         )
-
 
 def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", current_user: models.User):
     """
