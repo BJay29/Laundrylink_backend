@@ -49,6 +49,17 @@ class AnalyticsController:
         (reset based on operational hours), weekly totals, and expenses.
         shop_id is required (no more default=1) — the route now always
         supplies it from the authenticated user's JWT.
+
+        UPDATED (Income = paid only): dating iisang query lang ang
+        kumukuha ng revenue AT bookings count nang sabay
+        (today_stats.revenue, today_stats.bookings) — kaya kung
+        idinagdag lang ang payment_status=="paid" filter dito, maaapektuhan
+        din ang "Total Bookings" count (hindi na mabibilang ang mga
+        unpaid bookings, kahit totoong nangyari/tumakbo ang mga ito).
+        Hinati na ito sa DALAWANG hiwalay na query: revenue (paid-only,
+        tumutugma sa "income" logic ng RecordSales.jsx/get_sales_summary())
+        at bookings count (walang filter, totoong operational volume
+        pa rin, hindi income metric).
         """
         # 1. Fetch Operational Settings for Auto-Reset Logic
         settings = db.query(models.Setting).filter(
@@ -66,39 +77,57 @@ class AnalyticsController:
         if now < today_reset_time:
             today_reset_time -= timedelta(days=1)
 
-        # 2. Fetch "Today" Revenue (since operation start)
-        today_stats = db.query(
-            func.sum(models.Booking.total_price).label("revenue"),
-            func.count(models.Booking.id).label("bookings")
+        # 2a. Fetch "Today" Revenue — PAID ONLY (see UPDATED note above)
+        today_revenue = db.query(
+            func.sum(models.Booking.total_price)
+        ).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid",
+            models.Booking.created_at >= today_reset_time
+        ).scalar() or 0.0
+
+        # 2b. Fetch "Today" Bookings Count — ALL bookings (operational
+        # volume, not an income figure, so unaffected by payment status).
+        today_bookings_count = db.query(
+            func.count(models.Booking.id)
         ).filter(
             models.Booking.shop_id == shop_id,
             models.Booking.created_at >= today_reset_time
-        ).first()
+        ).scalar() or 0
 
-        # 3. Fetch Weekly Summary (last 7 days)
+        # 3. Fetch Weekly Summary (last 7 days) — Revenue is PAID ONLY.
         seven_days_ago = now - timedelta(days=7)
-        weekly_stats = db.query(
-            func.sum(models.Booking.total_price).label("revenue")
+        weekly_revenue = db.query(
+            func.sum(models.Booking.total_price)
         ).filter(
             models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid",
             models.Booking.created_at >= seven_days_ago
-        ).first()
+        ).scalar() or 0.0
 
         # 4. Calculate Expenses
-        total_revenue_weekly  = weekly_stats.revenue or 0.0
+        total_revenue_weekly  = weekly_revenue
         total_expenses_weekly = total_revenue_weekly * 0.35  # 35% operational cost estimate
 
-        # Previous week comparison
+        # Previous week comparison — Revenue PAID ONLY, Bookings count ALL.
         last_week_start = now - timedelta(days=14)
         last_week_end   = now - timedelta(days=8)
-        last_week_stats = db.query(
-            func.sum(models.Booking.total_price).label("revenue"),
-            func.count(models.Booking.id).label("bookings")
+        last_week_revenue = db.query(
+            func.sum(models.Booking.total_price)
+        ).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid",
+            models.Booking.created_at >= last_week_start,
+            models.Booking.created_at <= last_week_end
+        ).scalar() or 0.0
+
+        last_week_bookings_count = db.query(
+            func.count(models.Booking.id)
         ).filter(
             models.Booking.shop_id == shop_id,
             models.Booking.created_at >= last_week_start,
             models.Booking.created_at <= last_week_end
-        ).first()
+        ).scalar() or 0
 
         # 5. Aggregate Service Volumes
         service_counts = db.query(
@@ -115,18 +144,25 @@ class AnalyticsController:
             func.sum(models.Booking.weight)
         ).filter(models.Booking.shop_id == shop_id).scalar() or 0.0
 
-        # 7. Average Revenue Per Service (all-time)
+        # 7. Average Revenue Per Service (all-time) — PAID ONLY, para
+        # tumugma sa parehong "income" logic na ginamit sa buong file.
         total_rev_all_time = db.query(
             func.sum(models.Booking.total_price)
-        ).filter(models.Booking.shop_id == shop_id).scalar() or 0.0
+        ).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid"
+        ).scalar() or 0.0
 
-        total_bookings_all_time = db.query(
+        total_paid_bookings_all_time = db.query(
             func.count(models.Booking.id)
-        ).filter(models.Booking.shop_id == shop_id).scalar() or 0
+        ).filter(
+            models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid"
+        ).scalar() or 0
 
         avg_per_service = (
-            total_rev_all_time / total_bookings_all_time
-            if total_bookings_all_time > 0 else 0
+            total_rev_all_time / total_paid_bookings_all_time
+            if total_paid_bookings_all_time > 0 else 0
         )
 
         # 8. AI Engine Data
@@ -140,12 +176,12 @@ class AnalyticsController:
         ).count()
 
         return {
-            "today_revenue":            round(float(today_stats.revenue or 0.0), 2),
+            "today_revenue":            round(float(today_revenue), 2),
             "weekly_revenue":           round(float(total_revenue_weekly), 2),
             "weekly_expenses":          round(float(total_expenses_weekly), 2),
-            "last_week_revenue":        round(float(last_week_stats.revenue or 0.0), 2),
-            "total_bookings":           today_stats.bookings or 0,
-            "last_week_bookings":       last_week_stats.bookings or 0,
+            "last_week_revenue":        round(float(last_week_revenue), 2),
+            "total_bookings":           today_bookings_count,
+            "last_week_bookings":       last_week_bookings_count,
             "active_machines":          active_machines,
             "predicted_bookings_today": predicted_count_today,
             "projected_income_today":   projected_income_today,
@@ -166,6 +202,12 @@ class AnalyticsController:
         """
         Provides historical income data for the last 7 days.
         shop_id is required — the route always supplies it from the JWT.
+
+        UPDATED (Income = paid only): dating sinusuma ang total_price ng
+        LAHAT ng bookings bawat araw, kahit unpaid pa. Ngayon ay
+        idinagdag ang payment_status=="paid" filter, para tumugma ang
+        historical income chart na ito sa parehong "paid only" na
+        pamantayan ng ibang income figures sa file na ito.
         """
         history_data = []
         for i in range(6, -1, -1):
@@ -174,6 +216,7 @@ class AnalyticsController:
                 func.sum(models.Booking.total_price)
             ).filter(
                 models.Booking.shop_id == shop_id,
+                models.Booking.payment_status == "paid",
                 func.date(models.Booking.created_at) == target_date
             ).scalar() or 0.0
 
@@ -327,18 +370,17 @@ class AnalyticsController:
     @staticmethod
     def get_sales_summary(db: Session, shop_id: int):
         """
-        NEW — Total income para sa Today / This Week / This Month.
+        Total income para sa Today / This Week / This Month.
         Backs ang KPI cards sa Record Sales page.
 
-        UPDATED: "Today" ay ibinabase na sa operation_start_hour ng shop
-        (kagaya ng get_dashboard_summary() sa itaas), hindi literal na
-        midnight — para consistent ang "Today's Income" sa Dashboard at
-        sa Record Sales page. Halimbawa: kung 8AM ang operation start at
-        3AM pa lang ngayon, ang "Today" ay mula pa sa 8AM KAHAPON hanggang
-        ngayon, dahil hindi pa "bukas" ang shop mula nung huling reset.
+        "Today" ay ibinabase sa operation_start_hour ng shop (kagaya ng
+        get_dashboard_summary() sa itaas), hindi literal na midnight.
+        "This Week" at "This Month" ay rolling 7-day window at
+        calendar-month-to-date, respectively.
 
-        "This Week" at "This Month" ay hindi apektado ng operation hour
-        (rolling 7-day window at calendar-month-to-date, tulad ng dati).
+        Income = paid only — lahat ng tatlong queries dito ay may
+        payment_status == "paid" filter, tumutugma sa "paid only" na
+        logic ng RecordSales.jsx (rangeTotalIncome/paidBookingsInRange).
         """
         settings = db.query(models.Setting).filter(
             models.Setting.shop_id == shop_id
@@ -358,16 +400,19 @@ class AnalyticsController:
 
         today_income = db.query(func.sum(models.Booking.total_price)).filter(
             models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid",
             models.Booking.created_at >= today_reset_time
         ).scalar() or 0.0
 
         week_income = db.query(func.sum(models.Booking.total_price)).filter(
             models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid",
             models.Booking.created_at >= week_start
         ).scalar() or 0.0
 
         month_income = db.query(func.sum(models.Booking.total_price)).filter(
             models.Booking.shop_id == shop_id,
+            models.Booking.payment_status == "paid",
             models.Booking.created_at >= month_start
         ).scalar() or 0.0
 
