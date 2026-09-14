@@ -13,9 +13,6 @@ class OwnerCreate(BaseModel):
     User row). Ito ay para sa hiwalay na "create my shop" step na
     tinatawag ng frontend gamit ang Supabase JWT ng bagong-verify na
     owner, para gumawa ng kanilang Shop record.
-
-    UPDATED (Supabase Auth migration): TINANGGAL ang password field —
-    hindi na ito FastAPI ang humahawak ng password, Supabase Auth na.
     """
     shop_name: str
     address: str
@@ -35,29 +32,12 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, exclude_none=True)
 
 
-# UPDATED (Supabase Auth migration): TINANGGAL ang LoginResponse — hindi
-# na FastAPI ang nagbibigay ng access_token, Supabase Auth
-# (signInWithPassword) na ang gumagawa nito sa frontend mismo.
-# UserResponse pa rin ang gagamitin, pero ibabalik na lang ito ng isang
-# simpleng "GET /me"-style endpoint na gumagamit ng
-# Depends(get_current_user) sa halip na login endpoint.
-
-
 # --- STAFF MANAGEMENT SCHEMAS ---
 
 class StaffCreate(BaseModel):
     """
     Schema used by an OWNER to create a new staff/manager account under
-    their own shop. shop_id is derived server-side from the currently
-    logged-in Owner's JWT, never supplied by the client.
-
-    UPDATED (Supabase Auth migration): TINANGGAL ang password field —
-    ang bagong staff member mismo ang magsa-sign-up via Supabase Auth
-    (email/password nila mismo), hindi na ito gagawin ng Owner
-    papasok sa isang password. Ang endpoint na ito ay nagse-set na
-    lang ng "invited" na record (walang supabase_uid pa) na
-    ma-cclaim/ma-sync kapag nag-sign-up na ang staff gamit ang
-    parehong email.
+    their own shop.
     """
     full_name: str
     email: EmailStr
@@ -92,13 +72,6 @@ class StaffResponse(BaseModel):
 
 # --- CUSTOMER (MOBILE APP) SCHEMAS ---
 
-# UPDATED (Supabase Auth migration): TINANGGAL ang CustomerCreate,
-# CustomerLogin, CustomerVerifyEmail, CustomerResendCode, at
-# CustomerPasswordUpdate — lahat ng ito ay hinahawakan na ng Supabase
-# Auth SDK mismo sa Flutter app (signUp, signInWithPassword, verifyOTP,
-# resend, at updateUser para sa password change). Walang FastAPI
-# endpoint na kailangan para dito.
-
 class CustomerResponse(BaseModel):
     """Profile data returned after successful customer login or registration."""
     id: int
@@ -112,17 +85,11 @@ class CustomerResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# UPDATED (Supabase Auth migration): TINANGGAL ang CustomerLoginResponse
-# — hindi na FastAPI ang nagbibigay ng access_token/login response.
-
 # --- CUSTOMER PROFILE EDIT SCHEMAS ---
 
 class CustomerUpdate(BaseModel):
     """
     Schema para sa "Personal information" edit form sa Profile page.
-    Email at password ay SINASADYANG HINDI kasama dito: password ay
-    Supabase Auth SDK na ang bahala (client-side updateUser call), at
-    email ay hindi pa rin muna pinapayagang baguhin.
     """
     full_name: Optional[str] = None
     mobile_number: Optional[str] = None
@@ -231,6 +198,14 @@ class ServiceTypeBase(BaseModel):
     duration_minutes: int = 45
     pricing_unit: str = "load"
 
+    # NEW (multi-machine assignment feature) — sinasabi kung anong
+    # phase(s) ang kailangan ng service na ito. Ginagamit ito ng
+    # booking_controller para malaman kung washers lang, dryers lang,
+    # o pareho (washers muna, dryers mamaya) ang ipapakita sa
+    # AssignMachineModal para sa isang booking na gumagamit ng
+    # service na ito.
+    required_phases: str = "full_service"  # "wash_only" | "dry_only" | "full_service"
+
     @field_validator("name")
     @classmethod
     def validate_name(cls, v):
@@ -261,6 +236,14 @@ class ServiceTypeBase(BaseModel):
             raise ValueError(f"pricing_unit must be one of: {', '.join(sorted(allowed_units))}")
         return v
 
+    @field_validator("required_phases")
+    @classmethod
+    def validate_required_phases(cls, v):
+        allowed = {"wash_only", "dry_only", "full_service"}
+        if v not in allowed:
+            raise ValueError(f"required_phases must be one of: {', '.join(sorted(allowed))}")
+        return v
+
 class ServiceTypeCreate(ServiceTypeBase):
     """NOTE: kept for backward compatibility / potential internal use."""
     shop_id: int
@@ -272,6 +255,7 @@ class ServiceTypeUpdate(BaseModel):
     is_active: Optional[bool] = None
     duration_minutes: Optional[int] = None
     pricing_unit: Optional[str] = None
+    required_phases: Optional[str] = None  # NEW
 
     @field_validator("name")
     @classmethod
@@ -304,6 +288,15 @@ class ServiceTypeUpdate(BaseModel):
             allowed_units = {"load", "kg", "piece"}
             if v not in allowed_units:
                 raise ValueError(f"pricing_unit must be one of: {', '.join(sorted(allowed_units))}")
+        return v
+
+    @field_validator("required_phases")
+    @classmethod
+    def validate_required_phases(cls, v):
+        if v is not None:
+            allowed = {"wash_only", "dry_only", "full_service"}
+            if v not in allowed:
+                raise ValueError(f"required_phases must be one of: {', '.join(sorted(allowed))}")
         return v
 
 class ServiceTypeResponse(ServiceTypeBase):
@@ -417,11 +410,10 @@ class PromoCodeCreate(PromoCodeBase):
 
 class PromoCodeGenerateInput(BaseModel):
     """
-    NEW — Schema para sa paggawa ng bagong promo code MULA SA WEB APP.
+    Schema para sa paggawa ng bagong promo code MULA SA WEB APP.
     WALANG `code` field dito, sinasadya — ang backend na mismo
     (settings_controller.create_promo_code()) ang bahalang mag-generate
-    ng random code, hindi na kailangang isipin ng shop owner. Ito ang
-    gagamitin ng POST /promo-codes/ sa halip na PromoCodeBase.
+    ng random code, hindi na kailangang isipin ng shop owner.
     """
     discount_type: str = "percent"
     discount_value: float
@@ -642,6 +634,66 @@ class MachineNested(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+# --- MACHINE ASSIGNMENT SCHEMAS (NEW — multi-machine assignment feature) ---
+
+class MachineAssignmentInput(BaseModel):
+    """
+    Schema para sa pag-assign ng washers papunta sa loads ng isang
+    booking (AssignMachineModal). Isang LISTAHAN ng machine ids —
+    dapat eksaktong kasing-dami ng booking.loads (chinecheck ito sa
+    booking_controller, hindi dito, dahil kailangan muna nating i-load
+    ang booking mula sa DB para malaman ang bilang ng loads).
+
+    Kung "dry_only" ang required_phases ng service ng booking, ito
+    pa rin ang gagamitin, pero mga dryer machine ids na agad ang
+    ipapasa dito (hindi washers).
+    """
+    machine_ids: List[int]
+
+    @field_validator("machine_ids")
+    @classmethod
+    def validate_machine_ids(cls, v):
+        if not v:
+            raise ValueError("At least one machine must be assigned.")
+        if len(v) != len(set(v)):
+            raise ValueError("Duplicate machine ids are not allowed.")
+        return v
+
+
+class MoveLoadToDryerInput(BaseModel):
+    """
+    Schema para sa "Move to Dryer" action ng isang specific load —
+    tinatawag PER LOAD (hindi buong booking), dahil real-time na
+    pinipili ang available dryer sa mismong sandaling kailangan na
+    ito (hindi paunang commitment — see BookingMachineAssignment
+    docstring sa models.py para sa buong reasoning).
+    """
+    dryer_id: int
+
+
+class MachineAssignmentResponse(BaseModel):
+    """
+    Isang per-load machine assignment entry — kasama sa BookingResponse
+    bilang listahan (`machine_assignments`), at ginagamit din bilang
+    standalone response ng assign/move-to-dryer endpoints.
+    """
+    id: int
+    booking_id: int
+    load_number: int
+    phase: str  # "washing" | "drying" | "done"
+
+    washer_id: Optional[int] = None
+    washer_number: Optional[int] = None
+    dryer_id: Optional[int] = None
+    dryer_number: Optional[int] = None
+
+    washing_started_at: Optional[datetime] = None
+    washing_completed_at: Optional[datetime] = None
+    drying_started_at: Optional[datetime] = None
+    drying_completed_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
 # --- BOOKING INVENTORY USAGE SCHEMAS ---
 
 class BookingInventoryItemInput(BaseModel):
@@ -677,19 +729,12 @@ class BookingAddOnUsageResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- PAYMENT SCHEMAS (NEW) ---
+# --- PAYMENT SCHEMAS ---
 
 class PaymentStatusUpdate(BaseModel):
     """
     Schema para sa "Mark as Paid" action ng staff (Record Sales /
-    Booking Details). Manual trigger ito — staff mismo ang
-    nagde-decide kung kailan i-mark ang isang booking bilang paid,
-    kaya walang otomatikong timing na naka-bind dito. Ginagamit ito
-    sa parehong Walk-in (cash) at Mobile COD bookings. Ang
-    "gcash"/"paymaya" ay nakalaan na para sa Phase 6 (QR + proof
-    upload), pero pinapayagan na dito ang value kung sakaling
-    mano-manong i-verify muna ng staff ang isang online payment
-    proof bago i-mark as paid.
+    Booking Details).
     """
     payment_method: str = "cash"  # "cash", "cod", "gcash", "paymaya"
 
@@ -705,8 +750,7 @@ class PaymentStatusUpdate(BaseModel):
 class PaymentStatusResponse(BaseModel):
     """
     Minimal na response kapag na-query lang ang payment info ng isang
-    booking (hal. sa Record Sales row-level fetch), sa halip na buong
-    BookingResponse.
+    booking.
     """
     booking_id: int
     payment_method: Optional[str] = None
@@ -737,9 +781,6 @@ class BookingCreate(BaseModel):
     add_delivery: bool = False
     is_rush: bool = False
 
-    # NEW: opsyonal na payment_method sa paggawa ng booking (hal. sa
-    # Service Terminal, pipiliin ng staff kung "cash" agad). Default
-    # "cash" para sa walk-in, tumutugma sa Booking model default.
     payment_method: Optional[str] = "cash"
 
     booking_timestamp: Optional[datetime] = Field(default=None)
@@ -757,7 +798,14 @@ class BookingCreate(BaseModel):
 
 
 class BookingAssignMachine(BaseModel):
-    """Used when assigning a machine to an existing Pending booking."""
+    """
+    LEGACY (multi-machine assignment feature) — dating ginagamit para
+    sa pag-assign ng 1 washer + 1 dryer nang sabay. Pinapalitan na ito
+    ng MachineAssignmentInput (N washers, list) + MoveLoadToDryerInput
+    (per-load dryer, hiwalay na hakbang). Iniwan muna dito, hindi pa
+    tinatanggal, hanggang ma-confirm nating wala nang gumagamit dito
+    sa booking_controller.py/booking_routes.py pagkatapos ng update.
+    """
     washer_id: Optional[int] = None
     dryer_id: Optional[int] = None
 
@@ -817,11 +865,9 @@ class BookingResponse(BaseModel):
 
     decline_reason: Optional[str] = None
 
-    # --- NEW: Payment fields (Paid/Unpaid feature) ---
     payment_method: Optional[str] = "cash"
     payment_status: str = "unpaid"
     paid_at: Optional[datetime] = None
-    # ---------------------------------------------------
 
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     add_ons_used: List[BookingAddOnUsageResponse] = []
@@ -831,6 +877,11 @@ class BookingResponse(BaseModel):
 
     washer_number: Optional[int] = None
     dryer_number: Optional[int] = None
+
+    # NEW (multi-machine assignment feature) — per-load na machine
+    # assignments, sorted by load_number (see Booking.machine_assignments
+    # sa models.py).
+    machine_assignments: List[MachineAssignmentResponse] = []
 
     @field_validator("washer_number", mode="before")
     @classmethod
@@ -861,9 +912,6 @@ class CustomerBookingCreate(BaseModel):
     add_on_ids: List[int] = []
     promo_code: Optional[str] = None
 
-    # NEW: pinipili ng customer sa checkout — "cash" (dropoff, babayaran
-    # sa shop), "cod" (delivery, babayaran sa rider), o online
-    # ("gcash"/"paymaya" — buong QR/proof upload flow ay Phase 6 pa).
     payment_method: str = "cash"
 
     @field_validator("quantity")
@@ -1050,11 +1098,6 @@ class ShopProfileUpdate(BaseModel):
         return v
 
 
-# UPDATED (Supabase Auth migration): TINANGGAL ang PasswordUpdate —
-# ang password change ay Supabase Auth SDK na ang bahala
-# (client-side supabase.auth.updateUser({ password: newPassword })).
-
-
 class ShopProfileResponse(BaseModel):
     """Schema for returning the current shop profile data."""
     shop_name: str
@@ -1068,13 +1111,12 @@ class ShopProfileResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# --- SUPABASE WEBHOOK SCHEMAS (NEW) ---
+# --- SUPABASE WEBHOOK SCHEMAS ---
 
 class SupabaseAuthRecord(BaseModel):
     """
     Subset ng auth.users columns na kailangan natin mula sa Supabase
-    Database Webhook payload — hindi lahat ng columns, laman lang na
-    ginagamit ng sync logic (see webhook_controller.sync_verified_user).
+    Database Webhook payload.
     """
     id: uuid_lib.UUID
     email: EmailStr
@@ -1085,9 +1127,7 @@ class SupabaseAuthRecord(BaseModel):
 class SupabaseWebhookPayload(BaseModel):
     """
     Standard shape ng Supabase Database Webhook payload
-    (POST /webhooks/supabase-auth). 'schema' ay reserved word sa
-    Pydantic/Python conventions dito kaya naka-alias papuntang
-    schema_name.
+    (POST /webhooks/supabase-auth).
     """
     type: str
     table: str

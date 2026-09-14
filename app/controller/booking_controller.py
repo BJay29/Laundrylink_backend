@@ -1,5 +1,8 @@
-from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage
-from app.schemas import BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate
+from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage, BookingMachineAssignment
+from app.schemas import (
+    BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
+    MachineAssignmentInput, MoveLoadToDryerInput
+)
 from app.services.prediction_service import PredictionService
 from app.services.ws_manager import manager
 from app.controller import inventory_controller
@@ -16,6 +19,16 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     Creates a new booking.
     - If washer_id and dryer_id are both None → status = "Pending"
     - If at least one machine is assigned → status = "In Progress"
+
+    NOTE (multi-machine assignment feature): ang washer_id/dryer_id sa
+    BookingCreate ay LEGACY na ngayon — sinusuportahan pa rin dito para
+    hindi masira ang existing single-machine flow (hal. 1-load bookings
+    na direktang inaasignan ng machine sa mismong paggawa ng booking).
+    Para sa multi-load bookings (loads > 1), iniiwan MUNANG "Pending"
+    ang booking na ito (walang washer_id/dryer_id na ipapasa), tapos
+    tatawagin ang BAGONG assign_machines_to_booking() sa ibaba bilang
+    hiwalay na hakbang — doon nangyayari ang totoong N-machines-per-load
+    na assignment gamit ang BookingMachineAssignment.
 
     UPDATED: machine.remaining_time now comes from the shop's own
     configured ServiceType.duration_minutes instead of
@@ -97,7 +110,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         )
         deducted_items.append((item, item_usage.quantity_used))
 
-    # --- 4. DETERMINE INITIAL STATUS ---
+    # --- 4. DETERMINE INITIAL STATUS (legacy single-machine path) ---
     assigned_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
         if m_id is not None
@@ -121,15 +134,15 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
         source="terminal",
-        # NEW: payment_method mula sa request (default "cash").
-        # payment_status ay hindi na kailangang i-set dito nang explicit
-        # — kinukuha na nito ang default na "unpaid" mula sa Booking model.
         payment_method=booking_data.payment_method or "cash",
         booking_timestamp=actual_booking_time,
         created_at=datetime.now(timezone.utc)
     )
 
-    # --- 6. UPDATE MACHINE TELEMETRY (only if machines are assigned) ---
+    # --- 6. UPDATE MACHINE TELEMETRY (legacy path — only if machines are
+    #    assigned inline at creation, i.e. single-load bookings). Multi-
+    #    load bookings should NOT pass washer_id/dryer_id here — they
+    #    stay "Pending" and use assign_machines_to_booking() instead. ---
     for m_id in assigned_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
@@ -152,14 +165,8 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         machine.current_service_type = booking_data.service_type
         machine.current_price = booking_data.total_price
         machine.total_cycles += 1
-
-        # UPDATED: use the shop's own configured duration for this
-        # service instead of the generic PredictionService estimate.
         machine.remaining_time = service_type_record.duration_minutes
 
-        # UPDATED: now passes (db, shop_id) so this uses the shop's own
-        # electricity_rate/water_rate/supplies_cost_per_load instead of
-        # hardcoded class constants.
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
@@ -186,12 +193,6 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
                 quantity_used=quantity_used
             ))
 
-        # --- 7. ACTIVITY LOG ---
-        # Nasa loob ito ng try block nang sinasadya — kasama ito sa
-        # PAREHONG db.commit() sa ibaba. Kung mag-fail ang commit
-        # (halimbawa DB error), mag-rollback din ang log entry — walang
-        # "orphan log" na sasabihing may nagawang booking kahit hindi
-        # pala talaga na-save.
         machine_note = ""
         if assigned_ids:
             machine_note = f" (machine assigned, {len(assigned_ids)} unit/s)"
@@ -214,7 +215,8 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
                 joinedload(Booking.inventory_usages),
-                joinedload(Booking.add_ons_used)
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
             )
             .filter(Booking.id == new_booking.id)
             .first()
@@ -230,24 +232,12 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
 
 def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", current_user: models.User):
     """
-    Assigns a washer and/or dryer to an existing Pending booking that has no machine.
-
-    UPDATED: Looks up the booking's service_type in this shop's ServiceType
-    catalog to get the configured duration_minutes. Falls back to
-    PredictionService.get_machine_runtime() only if the service no longer
-    exists in the catalog (e.g. it was deleted after the booking was made).
-
-    UPDATED: PredictionService.get_overhead() now takes (db, shop_id, ...) —
-    same fix as create_booking() above, so this shop's own configured
-    rates are actually used here too.
-
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id, for the same attribution reason as create_booking().
-
-    NOTE: works the same for "Pending" bookings regardless of source
-    (terminal or customer-accepted-from-mobile) — once a customer
-    booking is Accepted, it becomes an ordinary "Pending" booking and
-    can be assigned a machine exactly like any other.
+    LEGACY (multi-machine assignment feature) — single washer + single
+    dryer lang, isang beses lang. Iniwan ito nang buo, hindi tinanggal,
+    para sa backward compatibility habang tinatapos ang paglipat ng buong
+    frontend papunta sa bagong assign_machines_to_booking() /
+    move_load_to_dryer() sa ibaba. Para sa BAGONG bookings, gamitin na
+    ang bagong dalawang function na iyon sa halip nito.
     """
     shop_id = current_user.shop_id
 
@@ -279,7 +269,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             detail="At least one machine (washer or dryer) must be provided."
         )
 
-    # Resolve the configured duration for this booking's service type
     service_type_record = (
         db.query(ServiceType)
         .filter(
@@ -332,7 +321,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             else PredictionService.get_machine_runtime(machine.machine_type, booking.service_type)
         )
 
-        # UPDATED: now passes (db, shop_id) — see create_booking() note above.
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
         machine.accumulated_water += overhead_data.get("water_cost", 0.0)
@@ -358,7 +346,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     booking.status = "In Progress"
 
     try:
-        # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
@@ -376,7 +363,8 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
                 joinedload(Booking.inventory_usages),
-                joinedload(Booking.add_ons_used)
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
             )
             .filter(Booking.id == booking_id)
             .first()
@@ -386,6 +374,371 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Machine Assignment Error: {str(e)}"
+        )
+
+
+# =========================================================
+# MULTI-MACHINE ASSIGNMENT FUNCTIONS (NEW)
+# =========================================================
+
+def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service_type_name: str, total_price: float, duration_minutes: int):
+    """
+    NEW — Shared helper factored out of the per-machine telemetry block
+    that used to be duplicated inline in assign_machine_to_booking() and
+    create_booking(). Marks the machine Busy, sets its countdown, and
+    applies overhead/profitability telemetry using the shop's own
+    configured rates. Used by BOTH assign_machines_to_booking() (washer
+    phase) and move_load_to_dryer() (dryer phase) below, so both phases
+    of a load get the same telemetry treatment as the legacy single-
+    machine flow did.
+    """
+    machine.status = "Busy"
+    machine.current_service_type = service_type_name
+    machine.current_price = total_price
+    machine.total_cycles += 1
+    machine.remaining_time = duration_minutes
+
+    overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
+    machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
+    machine.accumulated_water += overhead_data.get("water_cost", 0.0)
+    machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
+
+    overhead_total = overhead_data.get("total_overhead", 0.0)
+    net_profit = total_price - overhead_total
+    machine.net_profit_accumulated += net_profit
+
+    if total_price > 0:
+        margin = (net_profit / total_price) * 100
+        machine.profitability_rate = max(0.0, min(100.0, margin))
+    else:
+        machine.profitability_rate = 0.0
+
+
+def _release_machine(machine: Machine):
+    """
+    NEW — Shared helper for freeing up a machine back to "Available",
+    same pattern as the release block inside update_booking_status().
+    Skips machines currently in Maintenance (those stay in Maintenance
+    regardless of booking lifecycle).
+    """
+    if machine.status != "Maintenance":
+        machine.status = "Available"
+        machine.remaining_time = 0
+        machine.current_service_type = "None"
+        machine.current_price = 0.0
+
+
+def assign_machines_to_booking(db: Session, booking_id: int, assign_data: MachineAssignmentInput, current_user: models.User):
+    """
+    NEW — Multi-machine assignment para sa isang Pending booking.
+    Kailangan eksaktong kasing-dami ng booking.loads ang machine_ids na
+    ipinasa (isang machine per load).
+
+    Ang TYPE ng machine na hinihingi (Washer o Dryer) ay base sa
+    service_type_record.required_phases:
+      - "full_service" o "wash_only" → WASHERS ang kailangan; bawat
+        load ay nagsisimula sa phase="washing". Para sa "full_service",
+        may susunod pang "Move to Dryer" step (move_load_to_dryer()).
+        Para sa "wash_only", wala nang susunod na phase — deretso na
+        sa "Ready" ang buong booking sa pamamagitan ng normal na status
+        update kapag tapos na ang washing.
+      - "dry_only" → DRYERS agad ang kailangan; bawat load ay direktang
+        nagsisimula sa phase="drying" (walang washing phase na dinadaanan).
+
+    Gumagawa ng isang BookingMachineAssignment row PER LOAD (load_number
+    1-indexed), tapos ise-set ang Booking.status papuntang "In Progress".
+
+    Kung walang ServiceType record na nakita (hal. na-delete na pagkatapos
+    gawin ang booking), fina-fallback sa "full_service" (washers) bilang
+    default, at PredictionService.get_machine_runtime() bilang fallback
+    duration — parehong fallback pattern gaya ng legacy
+    assign_machine_to_booking() sa itaas.
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.status != "Pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot assign machines to a booking with status '{booking.status}'. Only Pending bookings can be assigned."
+        )
+
+    existing_assignments = (
+        db.query(BookingMachineAssignment)
+        .filter(BookingMachineAssignment.booking_id == booking.id)
+        .count()
+    )
+    if existing_assignments > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This booking already has machine assignments. Use Move to Dryer for per-load transitions instead."
+        )
+
+    required_loads = booking.loads or 1
+    if len(assign_data.machine_ids) != required_loads:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"This booking has {required_loads} load(s) — please select exactly {required_loads} machine(s)."
+        )
+
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == shop_id,
+            ServiceType.name == booking.service_type
+        )
+        .first()
+    )
+    required_phases = service_type_record.required_phases if service_type_record else "full_service"
+    duration_minutes = (
+        service_type_record.duration_minutes
+        if service_type_record
+        else PredictionService.get_machine_runtime("Washer", booking.service_type)
+    )
+
+    target_type = "Dryer" if required_phases == "dry_only" else "Washer"
+    initial_phase = "drying" if required_phases == "dry_only" else "washing"
+    now = datetime.now(timezone.utc)
+
+    new_assignments = []
+    assigned_machine_labels = []
+
+    for load_number, m_id in enumerate(assign_data.machine_ids, start=1):
+        machine = db.query(Machine).filter(
+            Machine.id == m_id,
+            Machine.shop_id == shop_id
+        ).first()
+
+        if not machine:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Hardware ID {m_id} is not registered in this shop."
+            )
+
+        if machine.machine_type != target_type:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{machine.machine_type} #{machine.machine_number} cannot be used here — "
+                    f"this service requires {target_type.lower()}s for the first phase."
+                )
+            )
+
+        if machine.status == "Maintenance":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{machine.machine_type} #{machine.machine_number} is Offline for Maintenance."
+            )
+
+        busy_statuses = ["busy", "in use", "running"]
+        if machine.status.lower() in busy_statuses:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{machine.machine_type} #{machine.machine_number} is currently busy."
+            )
+
+        _bind_machine_telemetry(db, shop_id, machine, booking.service_type, booking.total_price, duration_minutes)
+
+        assignment = BookingMachineAssignment(
+            booking_id=booking.id,
+            load_number=load_number,
+            phase=initial_phase,
+            washer_id=m_id if target_type == "Washer" else None,
+            dryer_id=m_id if target_type == "Dryer" else None,
+            washing_started_at=now if target_type == "Washer" else None,
+            drying_started_at=now if target_type == "Dryer" else None,
+        )
+        new_assignments.append(assignment)
+        assigned_machine_labels.append(f"Load {load_number}: {machine.machine_type} #{machine.machine_number}")
+
+    booking.status = "In Progress"
+
+    try:
+        for assignment in new_assignments:
+            db.add(assignment)
+
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Assigned {len(new_assignments)} machine(s) to {booking.customer_name}'s booking "
+                f"({'; '.join(assigned_machine_labels)})"
+            )
+        )
+
+        db.commit()
+        return (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Machine Assignment Error: {str(e)}"
+        )
+
+
+def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data: MoveLoadToDryerInput, current_user: models.User):
+    """
+    NEW — "Move to Dryer" action para sa isang SPECIFIC LOAD lang (hindi
+    buong booking). Real-time na pinipili ang available dryer sa mismong
+    sandaling ito tinawag — hindi paunang commitment nang ginawa pa lang
+    ang unang assignment (see BookingMachineAssignment docstring sa
+    models.py para sa buong reasoning kung bakit ganito ang disenyo).
+
+    Ire-release ang washer ng load na ito (papunta sa "Available"), tapos
+    bibigyan ito ng napiling dryer, ise-set ang phase papuntang "drying",
+    at magsisimula ang bagong countdown gamit ang PAREHONG
+    duration_minutes ng service (walang hiwalay na configured duration
+    para sa dry phase — parehong setting ang ginagamit sa dalawang phase).
+
+    Hindi ito applicable sa mga load na "dry_only" ang required_phases
+    (nagsisimula na sila agad sa "drying" mula sa assign_machines_to_
+    booking(), walang "washing" phase na dadaanan).
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    assignment = (
+        db.query(BookingMachineAssignment)
+        .filter(
+            BookingMachineAssignment.booking_id == booking.id,
+            BookingMachineAssignment.load_number == load_number
+        )
+        .first()
+    )
+    if not assignment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Load {load_number} not found for this booking."
+        )
+
+    if assignment.phase != "washing":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Load {load_number} is not currently in the washing phase (current phase: '{assignment.phase}')."
+        )
+
+    dryer = db.query(Machine).filter(
+        Machine.id == move_data.dryer_id,
+        Machine.shop_id == shop_id
+    ).first()
+
+    if not dryer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Hardware ID {move_data.dryer_id} is not registered in this shop."
+        )
+
+    if dryer.machine_type != "Dryer":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{dryer.machine_type} #{dryer.machine_number} is not a dryer."
+        )
+
+    if dryer.status == "Maintenance":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Dryer #{dryer.machine_number} is Offline for Maintenance."
+        )
+
+    busy_statuses = ["busy", "in use", "running"]
+    if dryer.status.lower() in busy_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Dryer #{dryer.machine_number} is currently busy."
+        )
+
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == shop_id,
+            ServiceType.name == booking.service_type
+        )
+        .first()
+    )
+    duration_minutes = (
+        service_type_record.duration_minutes
+        if service_type_record
+        else PredictionService.get_machine_runtime("Dryer", booking.service_type)
+    )
+
+    # Release the washer this load was using.
+    if assignment.washer_id:
+        washer = db.query(Machine).filter(
+            Machine.id == assignment.washer_id,
+            Machine.shop_id == shop_id
+        ).first()
+        if washer:
+            _release_machine(washer)
+
+    now = datetime.now(timezone.utc)
+    assignment.washing_completed_at = now
+    assignment.dryer_id = dryer.id
+    assignment.phase = "drying"
+    assignment.drying_started_at = now
+
+    _bind_machine_telemetry(db, shop_id, dryer, booking.service_type, booking.total_price, duration_minutes)
+
+    try:
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Moved Load {load_number} of {booking.customer_name}'s booking "
+                f"to Dryer #{dryer.machine_number}"
+            )
+        )
+
+        db.commit()
+        return (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Move to Dryer Error: {str(e)}"
         )
 
 
@@ -410,7 +763,8 @@ def get_active_bookings(db: Session, shop_id: int):
             joinedload(Booking.washer),
             joinedload(Booking.dryer),
             joinedload(Booking.inventory_usages),
-            joinedload(Booking.add_ons_used)
+            joinedload(Booking.add_ons_used),
+            joinedload(Booking.machine_assignments),
         )
         .filter(
             Booking.shop_id == shop_id,
@@ -464,6 +818,15 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
 
+    UPDATED (multi-machine assignment feature): ang pag-release ng
+    machines papuntang "Available" ay hindi na umaasa lamang sa legacy
+    washer_id/dryer_id — ngayon ay ini-iterate na rin ang lahat ng
+    Booking.machine_assignments (kung meron), at ire-release ang bawat
+    washer_id/dryer_id na naka-attach doon, saka mamarkahan ang bawat
+    assignment na phase="done" na may completed timestamp. Sinasaklaw
+    parehong lumang single-machine bookings AT bagong multi-load
+    bookings sa iisang function.
+
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id, for the same attribution reason as create_booking(). This
     is the endpoint used for status transitions including cancellation,
@@ -494,26 +857,49 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
     booking.status = new_status
 
     if new_status in ["Ready", "Claimed", "Cancelled"]:
-        assigned_ids = [
+        # --- Legacy single-machine release (washer_id/dryer_id) ---
+        legacy_assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
             if m_id is not None
         ]
-
-        if assigned_ids:
-            machines = db.query(Machine).filter(
-                Machine.id.in_(assigned_ids),
+        if legacy_assigned_ids:
+            legacy_machines = db.query(Machine).filter(
+                Machine.id.in_(legacy_assigned_ids),
                 Machine.shop_id == shop_id
             ).all()
+            for machine in legacy_machines:
+                _release_machine(machine)
 
-            for machine in machines:
-                if machine.status != "Maintenance":
-                    machine.status = "Available"
-                    machine.remaining_time = 0
-                    machine.current_service_type = "None"
-                    machine.current_price = 0.0
+        # --- NEW: multi-machine release (BookingMachineAssignment rows) ---
+        assignments = (
+            db.query(BookingMachineAssignment)
+            .filter(BookingMachineAssignment.booking_id == booking.id)
+            .all()
+        )
+        if assignments:
+            machine_ids_to_release = set()
+            for assignment in assignments:
+                if assignment.washer_id:
+                    machine_ids_to_release.add(assignment.washer_id)
+                if assignment.dryer_id:
+                    machine_ids_to_release.add(assignment.dryer_id)
+
+                assignment.phase = "done"
+                now = datetime.now(timezone.utc)
+                if assignment.dryer_id and not assignment.drying_completed_at:
+                    assignment.drying_completed_at = now
+                elif assignment.washer_id and not assignment.washing_completed_at:
+                    assignment.washing_completed_at = now
+
+            if machine_ids_to_release:
+                machines_to_release = db.query(Machine).filter(
+                    Machine.id.in_(machine_ids_to_release),
+                    Machine.shop_id == shop_id
+                ).all()
+                for machine in machines_to_release:
+                    _release_machine(machine)
 
     try:
-        # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
@@ -524,7 +910,6 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
             )
         )
 
-        # --- CUSTOMER NOTIFICATION (only for mobile-sourced bookings) ---
         if booking.customer_id:
             notif_content = _get_status_notification_content(new_status, booking)
             if notif_content:
@@ -545,7 +930,8 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
                 joinedload(Booking.inventory_usages),
-                joinedload(Booking.add_ons_used)
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
             )
             .filter(Booking.id == booking_id)
             .first()
@@ -559,16 +945,16 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
 
 
 # =========================================================
-# PAYMENT FUNCTIONS (NEW)
+# PAYMENT FUNCTIONS
 # =========================================================
 
 def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStatusUpdate, current_user: models.User):
     """
-    NEW — Manual na "Mark as Paid" action ng staff. Ginagamit ito sa
-    parehong Walk-in (cash, dropoff) at Mobile COD bookings, kung saan
-    ang staff mismo ang nagko-confirm na natanggap na ang bayad — walang
-    automated payment gateway verification pa dito (ang GCash/PayMaya
-    QR + proof-upload na flow ay hiwalay na future phase).
+    Manual na "Mark as Paid" action ng staff. Ginagamit ito sa parehong
+    Walk-in (cash, dropoff) at Mobile COD bookings, kung saan ang staff
+    mismo ang nagko-confirm na natanggap na ang bayad — walang automated
+    payment gateway verification pa dito (ang GCash/PayMaya QR +
+    proof-upload na flow ay hiwalay na future phase).
 
     Staff mismo ang nagde-decide kung KAILAN i-mark bilang paid — walang
     naka-bind na fixed na timing (hal. pwede itong gawin bago pa man
@@ -602,7 +988,6 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
     booking.paid_at = datetime.now(timezone.utc)
 
     try:
-        # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
@@ -613,7 +998,6 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
             )
         )
 
-        # --- CUSTOMER NOTIFICATION (only for mobile-sourced bookings) ---
         if booking.customer_id:
             notification_controller.create_notification(
                 db,
@@ -635,7 +1019,8 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
                 joinedload(Booking.inventory_usages),
-                joinedload(Booking.add_ons_used)
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
             )
             .filter(Booking.id == booking_id)
             .first()
@@ -710,7 +1095,6 @@ def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> 
     else:
         discount = promo.discount_value
 
-    # Hindi pwedeng lumagpas sa subtotal ang discount (walang negative total).
     discount = min(discount, subtotal)
     return promo, round(discount, 2)
 
@@ -742,6 +1126,12 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
     ay laging nagsisimula bilang "unpaid" — ang pag-verify/pag-mark ay
     hiwalay pa ring action ng staff (see mark_booking_as_paid()).
 
+    NOTE (multi-machine assignment feature): hindi pa rin dito nagaganap
+    ang machine assignment — nananatiling "Awaiting Approval" muna, tapos
+    "Pending" (via accept_customer_booking()), at doon pa lang ito
+    aassignan ng machine gamit ang assign_machines_to_booking(), gaya rin
+    ng manual bookings.
+
     NEW (safety net): bago pa man tingnan ang service catalog, sinusuri
     muna kung shop.is_online — ibig sabihin, may naka-buk as na Service
     Terminal ba ang shop na ito ngayon (see Shop.is_online sa models.py,
@@ -763,8 +1153,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             detail="Shop not found."
         )
 
-    # --- SAFETY NET: block bookings while the shop has no live Service
-    # Terminal connection, regardless of what the client-side UI shows. ---
     if not shop.is_online:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -790,8 +1178,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         service_type_record.pricing_unit, booking_data.quantity
     )
 
-    # Minimum weight check applies only to per-kg services — per-load
-    # and per-piece services don't use the weight field meaningfully.
     if service_type_record.pricing_unit == "kg":
         settings = db.query(Setting).filter(Setting.shop_id == booking_data.shop_id).first()
         minimum_weight = (settings.minimum_weight_kg if settings else None) or 6.0
@@ -801,7 +1187,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
                 detail=f"Minimum booking weight is {minimum_weight}kg. Please adjust the quantity."
             )
 
-    # --- DELIVERY MODE VALIDATION ---
     delivery_fee_charged = 0.0
     if booking_data.fulfillment_mode == "delivery":
         if not shop.has_delivery:
@@ -811,8 +1196,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             )
         delivery_fee_charged = shop.delivery_fee
 
-    # --- ADD-ONS VALIDATION + PRICING ---
-    validated_add_ons = []  # list of (AddOn, price_at_booking)
+    validated_add_ons = []
     add_ons_total = 0.0
     for add_on_id in booking_data.add_on_ids:
         add_on = (
@@ -832,7 +1216,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         validated_add_ons.append((add_on, add_on.price))
         add_ons_total += add_on.price
 
-    # --- PRICE COMPUTATION ---
     base_price = round(service_type_record.price * booking_data.quantity, 2)
     subtotal = round(base_price + add_ons_total + delivery_fee_charged, 2)
 
@@ -863,9 +1246,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         delivery_fee_charged=delivery_fee_charged,
         promo_code=promo_record.code if promo_record else None,
         discount_amount=discount_amount,
-        # NEW: payment_method mula sa checkout choice ng customer.
-        # payment_status ay hindi kailangang i-set dito nang explicit —
-        # default "unpaid" na mula sa Booking model.
         payment_method=booking_data.payment_method or "cash",
         booking_timestamp=datetime.now(timezone.utc),
         created_at=datetime.now(timezone.utc)
@@ -873,7 +1253,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
 
     try:
         db.add(new_booking)
-        db.flush()  # kailangan para makuha ang new_booking.id bago mag-commit
+        db.flush()
 
         for add_on, price_at_booking in validated_add_ons:
             db.add(BookingAddOnUsage(
@@ -894,16 +1274,13 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
                 joinedload(Booking.inventory_usages),
-                joinedload(Booking.add_ons_used)
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
             )
             .filter(Booking.id == new_booking.id)
             .first()
         )
 
-        # --- WEBSOCKET BROADCAST ---
-        # Tahimik lang ang epekto kung walang naka-connect na Service
-        # Terminal ngayon (walang error) — GET /bookings/awaiting-approval
-        # pa rin ang siguradong makikita ito sa susunod na refresh/load.
         await manager.broadcast(booking_data.shop_id, {
             "type": "new_booking_request",
             "booking_id": reloaded.id,
@@ -965,7 +1342,8 @@ def get_customer_bookings(db: Session, customer_id: int):
             joinedload(Booking.washer),
             joinedload(Booking.dryer),
             joinedload(Booking.inventory_usages),
-            joinedload(Booking.add_ons_used)
+            joinedload(Booking.add_ons_used),
+            joinedload(Booking.machine_assignments),
         )
         .filter(Booking.customer_id == customer_id)
         .order_by(Booking.booking_timestamp.desc())
@@ -978,7 +1356,7 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
     Accepts a customer-submitted booking — moves it from "Awaiting
     Approval" to "Pending", at which point it behaves exactly like any
     manually-created booking (appears in the Service Terminal, can be
-    assigned a machine via assign_machine_to_booking()).
+    assigned machine(s) via assign_machines_to_booking()).
 
     NEW (Notification): gumagawa rin ito ngayon ng "booking_accepted"
     notification para sa customer, para malaman nila agad (sa
@@ -1162,9 +1540,6 @@ async def cancel_customer_booking(db: Session, booking_id: int, customer: models
     old_status = booking.status
     booking.status = "Cancelled"
 
-    # Defensive: release any machine that may already be attached.
-    # Normally wala pa nito sa "Awaiting Approval"/"Pending", pero
-    # sinasaklaw pa rin natin ito kung sakaling may edge case.
     assigned_ids = [m_id for m_id in [booking.washer_id, booking.dryer_id] if m_id is not None]
     if assigned_ids:
         machines = db.query(Machine).filter(
@@ -1172,11 +1547,7 @@ async def cancel_customer_booking(db: Session, booking_id: int, customer: models
             Machine.shop_id == booking.shop_id
         ).all()
         for machine in machines:
-            if machine.status != "Maintenance":
-                machine.status = "Available"
-                machine.remaining_time = 0
-                machine.current_service_type = "None"
-                machine.current_price = 0.0
+            _release_machine(machine)
 
     try:
         log_activity(
@@ -1209,14 +1580,13 @@ async def cancel_customer_booking(db: Session, booking_id: int, customer: models
                 joinedload(Booking.washer),
                 joinedload(Booking.dryer),
                 joinedload(Booking.inventory_usages),
-                joinedload(Booking.add_ons_used)
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
             )
             .filter(Booking.id == booking.id)
             .first()
         )
 
-        # --- WEBSOCKET BROADCAST --- tahimik lang kung walang
-        # naka-connect na Service Terminal ngayon (walang error).
         await manager.broadcast(booking.shop_id, {
             "type": "booking_cancelled_by_customer",
             "booking_id": reloaded.id,

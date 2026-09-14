@@ -131,6 +131,14 @@ class ServiceType(Base):
 
     pricing_unit = Column(String(20), nullable=False, default="load")
 
+    # NEW (multi-machine assignment feature) — sinasabi kung anong mga
+    # phase ang kailangan ng service na ito: "wash_only", "dry_only", o
+    # "full_service" (default). Ginagamit ito ng booking_controller at
+    # ng AssignMachineModal (frontend) para malaman kung dapat bang
+    # ipakita ang washers lang, dryers lang, o washers muna tapos
+    # dryers mamaya sa isang booking.
+    required_phases = Column(String(20), nullable=False, default="full_service")
+
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="service_types")
 
@@ -142,6 +150,7 @@ class ServiceType(Base):
             "is_active": self.is_active,
             "duration_minutes": self.duration_minutes,
             "pricing_unit": self.pricing_unit,
+            "required_phases": self.required_phases,
             "shop_id": self.shop_id
         }
 
@@ -354,6 +363,16 @@ class Booking(Base):
     at paid_at para masubaybayan kung bayad na o hindi ang isang booking
     (Walk-in cash o Mobile COD/Online) — ginagamit ito sa Record Sales
     page (filter/column) at sa "Mark as Paid" action ng staff.
+
+    NOTE (multi-machine assignment feature): ang `washer_id`/`dryer_id`
+    columns dito ay LEGACY na ngayon — dating iisang washer + iisang
+    dryer lang ang sinusuportahan per booking. Sa bagong sistema, kung
+    higit sa 1 ang `loads`, ang totoong per-load na machine assignment
+    ay nasa bagong `BookingMachineAssignment` rows na (see
+    `machine_assignments` relationship sa ibaba), HINDI na dito.
+    Iniwan muna ang `washer_id`/`dryer_id` para hindi masira ang mga
+    lumang query/response na umaasa pa rito habang tinatapos natin ang
+    migration sa buong booking_controller.py flow.
     """
     __tablename__ = "bookings"
 
@@ -394,7 +413,7 @@ class Booking(Base):
 
     decline_reason = Column(String, nullable=True)
 
-    # --- NEW: Payment tracking (Paid/Unpaid feature) ---
+    # --- Payment tracking (Paid/Unpaid feature) ---
     # payment_method: "cash" (walk-in/dropoff), "cod" (delivery), "gcash", "paymaya"
     payment_method = Column(String, nullable=True, default="cash")
     # payment_status: "unpaid", "pending_verification" (online, di pa na-verify), "paid"
@@ -419,6 +438,19 @@ class Booking(Base):
         back_populates="booking",
         cascade="all, delete-orphan",
         lazy="joined"
+    )
+
+    # NEW (multi-machine assignment feature) — isang row per load,
+    # tracking kung anong washer/dryer ang ginamit at kung anong phase
+    # kasalukuyan ang load na iyon. Ito na ang "source of truth" para
+    # sa machine assignment sa mga bagong booking (loads > 1 lalo na),
+    # sa halip na ang legacy washer_id/dryer_id sa itaas.
+    machine_assignments = relationship(
+        "BookingMachineAssignment",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+        lazy="joined",
+        order_by="BookingMachineAssignment.load_number",
     )
 
     @property
@@ -453,18 +485,75 @@ class Booking(Base):
             "promo_code": self.promo_code,
             "discount_amount": self.discount_amount,
             "decline_reason": self.decline_reason,
-            # --- NEW ---
             "payment_method": self.payment_method,
             "payment_status": self.payment_status,
             "paid_at": self.paid_at.isoformat() if self.paid_at else None,
-            # -----------
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
+            # NEW — per-load machine assignments, sorted by load_number.
+            "machine_assignments": [a.to_dict() for a in self.machine_assignments],
             "shop_id": self.shop_id,
             "booking_timestamp": self.booking_timestamp.isoformat() if self.booking_timestamp else None,
             "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+
+class BookingMachineAssignment(Base):
+    """
+    ... (walang binago sa docstring) ...
+    """
+    __tablename__ = "booking_machine_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False)
+
+    load_number = Column(Integer, nullable=False)
+
+    phase = Column(String(20), nullable=False, default="washing")
+
+    washer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
+    dryer_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
+
+    washing_started_at = Column(DateTime(timezone=True), nullable=True)
+    washing_completed_at = Column(DateTime(timezone=True), nullable=True)
+    drying_started_at = Column(DateTime(timezone=True), nullable=True)
+    drying_completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    booking = relationship("Booking", back_populates="machine_assignments")
+    washer = relationship("Machine", foreign_keys=[washer_id])
+    dryer = relationship("Machine", foreign_keys=[dryer_id])
+
+    # NEW — read-only convenience properties, HINDI mga DB column.
+    # Kailangan ito para makuha ni Pydantic ang washer_number/
+    # dryer_number bilang plain attribute (see MachineAssignmentResponse
+    # sa schemas.py, na gumagamit ng ConfigDict(from_attributes=True)) —
+    # kung wala ito, mag-r-raise ng AttributeError si Pydantic dahil
+    # walang totoong column na ganito, laman lang ito ng to_dict() sa
+    # ibaba. Parehong pattern gaya ng Booking.shop_name sa itaas.
+    @property
+    def washer_number(self):
+        return self.washer.machine_number if self.washer else None
+
+    @property
+    def dryer_number(self):
+        return self.dryer.machine_number if self.dryer else None
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "booking_id": self.booking_id,
+            "load_number": self.load_number,
+            "phase": self.phase,
+            "washer_id": self.washer_id,
+            "washer_number": self.washer_number,
+            "dryer_id": self.dryer_id,
+            "dryer_number": self.dryer_number,
+            "washing_started_at": self.washing_started_at.isoformat() if self.washing_started_at else None,
+            "washing_completed_at": self.washing_completed_at.isoformat() if self.washing_completed_at else None,
+            "drying_started_at": self.drying_started_at.isoformat() if self.drying_started_at else None,
+            "drying_completed_at": self.drying_completed_at.isoformat() if self.drying_completed_at else None,
         }
 
 class BookingAddOnUsage(Base):

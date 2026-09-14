@@ -5,26 +5,13 @@ from .activity_controller import log_activity
 import logging
 import random
 import string
-from passlib.context import CryptContext # Added for password hashing
-
-# Set up password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Set up logging to track if the system is falling back to defaults
 logger = logging.getLogger(__name__)
 
 # --- SYSTEM CONSTANTS ---
 # These are strictly "Factory Defaults" used ONLY for new shop initialization
-# or manual resets of OPERATIONAL RATES. They should NOT be used for active
-# calculations. Service pricing (Full Service, Regular Wash, etc.) is no
-# longer part of these defaults — shop owners define their own services
-# via the ServiceType table, starting from an empty catalog.
-#
-# RENAMED: detergent_cost_per_load -> supplies_cost_per_load — "detergent"
-# was too narrow a label for what this rate actually covers (any per-load
-# consumable cost the shop wants to factor in, not just detergent brand
-# purchases). Matching rename applied to the Setting model column
-# (models.py) and SettingBase/SettingUpdate (schemas.py).
+# or manual resets of OPERATIONAL RATES.
 SYSTEM_DEFAULTS = {
     "electricity_rate": 12.0,
     "water_rate": 50.0,
@@ -39,15 +26,11 @@ def get_settings(db: Session, shop_id: int):
     """
     Retrieves the optimization settings for a specific shop.
     If no settings exist in the database, it initializes them using SYSTEM_DEFAULTS.
-    NOTE: read-only from the caller's perspective — no Activity Log entry
-    for this "silent init on first access" behavior, since it's not a
-    user-initiated change.
     """
     settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
     if not settings:
         logger.info(f"No settings found for shop_id {shop_id}. Initializing with defaults.")
-        # Create a new record in the database so the user can modify it later.
         settings = models.Setting(
             shop_id=shop_id,
             **SYSTEM_DEFAULTS
@@ -61,37 +44,26 @@ def get_settings(db: Session, shop_id: int):
 def get_factory_defaults():
     """
     Returns the hardcoded system default values for operational rates.
-    Provides the frontend with the 'Standard' reference values. Service
-    pricing is not included here since it is fully owner-defined.
-    NOTE: read-only, no Activity Log entry.
     """
     return SYSTEM_DEFAULTS
 
 def update_settings(db: Session, current_user: models.User, settings_data: schemas.SettingUpdate):
     """
     Updates the business parameters and operational rates in the database.
-    This change triggers an immediate update for the Booking Modal and Analytics.
-
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id, so this action can be attributed to whoever performed it.
     """
     shop_id = current_user.shop_id
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
     
-    # Exclude unset values to allow partial updates (e.g., only updating one rate)
     update_data = settings_data.model_dump(exclude_unset=True)
 
     if not db_settings:
-        # Create new record if it doesn't exist
         db_settings = models.Setting(shop_id=shop_id, **update_data)
         db.add(db_settings)
     else:
-        # Dynamically update existing fields
         for key, value in update_data.items():
             if hasattr(db_settings, key):
                 setattr(db_settings, key, value)
 
-    # --- ACTIVITY LOG ---
     if update_data:
         changed_fields = ", ".join(update_data.keys())
         log_activity(
@@ -109,11 +81,7 @@ def update_settings(db: Session, current_user: models.User, settings_data: schem
 def reset_to_system_defaults(db: Session, current_user: models.User):
     """
     Wipes custom operational rates and reverts the shop's DB record to
-    SYSTEM_DEFAULTS. Does NOT touch ServiceType records — service pricing
-    is reset separately (or not at all) since it's fully owner-defined.
-
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id.
+    SYSTEM_DEFAULTS.
     """
     shop_id = current_user.shop_id
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
@@ -123,7 +91,6 @@ def reset_to_system_defaults(db: Session, current_user: models.User):
             if hasattr(db_settings, key):
                 setattr(db_settings, key, value)
 
-        # --- ACTIVITY LOG ---
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
@@ -141,16 +108,7 @@ def get_pricing_for_booking(db: Session, shop_id: int):
     """
     Crucial helper for the Booking Modal.
     Builds the pricing map dynamically from whatever ServiceType records
-    the shop owner has configured. If the shop hasn't added any services
-    yet, this returns an empty pricing map.
-    NOTE: read-only, no Activity Log entry.
-
-    RENAMED: reads settings.supplies_cost_per_load now (was
-    detergent_cost_per_load). The returned dict key "detergent_fee" is
-    LEFT AS-IS for now — the Booking Modal frontend consumes this exact
-    key, and it wasn't shown to confirm it's safe to rename there too.
-    Rename it here + in the frontend together if you want full
-    consistency.
+    the shop owner has configured.
     """
     settings = get_settings(db, shop_id)
 
@@ -176,7 +134,6 @@ def get_service_types(db: Session, shop_id: int):
     """
     Returns all services (active and inactive) configured for a shop,
     for display and management on the Optimization Settings page.
-    NOTE: read-only, no Activity Log entry.
     """
     return (
         db.query(models.ServiceType)
@@ -187,18 +144,16 @@ def get_service_types(db: Session, shop_id: int):
 
 def create_service_type(db: Session, current_user: models.User, service_data: schemas.ServiceTypeBase):
     """
-    Registers a new service (name + price + duration + pricing_unit) for
-    the shop. Prevents exact duplicate names (case-insensitive) for the
-    same shop.
+    Registers a new service (name + price + duration + pricing_unit +
+    required_phases) for the shop. Prevents exact duplicate names
+    (case-insensitive) for the same shop.
 
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id. Also updated the type hint for service_data to
-    ServiceTypeBase, matching setting_routes.py's add_service_type
-    endpoint (which no longer accepts a client-supplied shop_id).
-
-    UPDATED (pricing_unit): now also saves service_data.pricing_unit
-    ("load", "kg", or "piece") — not every service in a shop is priced
-    the same way, hal. Regular Wash = per load, Wash & Fold = per kg.
+    NEW (multi-machine assignment feature): ini-save na rin ang
+    service_data.required_phases ("wash_only" | "dry_only" |
+    "full_service") — ginagamit ito ni booking_controller.
+    assign_machines_to_booking() para malaman kung washers o dryers
+    ang dapat ipakita para sa unang machine assignment ng isang
+    booking na gumagamit ng service na ito.
     """
     shop_id = current_user.shop_id
 
@@ -222,19 +177,20 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
         is_active=service_data.is_active,
         duration_minutes=service_data.duration_minutes,
         pricing_unit=service_data.pricing_unit,
+        required_phases=service_data.required_phases,  # NEW
         shop_id=shop_id
     )
     db.add(new_service)
     db.flush()  # kailangan para makuha ang new_service.name bago mag-commit
 
-    # --- ACTIVITY LOG ---
     log_activity(
         db, shop_id,
         actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=(
             f"Added a new service: {new_service.name} "
-            f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.duration_minutes} min)"
+            f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.duration_minutes} min, "
+            f"{new_service.required_phases})"
         )
     )
 
@@ -244,11 +200,14 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
 
 def update_service_type(db: Session, current_user: models.User, service_id: int, service_data: schemas.ServiceTypeUpdate):
     """
-    Edits an existing service's name, price, duration, active status, or
-    pricing_unit.
+    Edits an existing service's name, price, duration, active status,
+    pricing_unit, or required_phases.
 
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id.
+    NOTE (multi-machine assignment feature): walang binago dito —
+    automatic na kasama na ang required_phases sa generic
+    update_data.items() loop sa ibaba, dahil idinagdag na ito bilang
+    optional field sa ServiceTypeUpdate schema. Kapag ipinasa ito ng
+    client, ma-a-apply na ito nang walang dagdag na code.
     """
     shop_id = current_user.shop_id
 
@@ -283,7 +242,6 @@ def update_service_type(db: Session, current_user: models.User, service_id: int,
     for key, value in update_data.items():
         setattr(service, key, value)
 
-    # --- ACTIVITY LOG ---
     if update_data:
         changed_fields = ", ".join(update_data.keys())
         log_activity(
@@ -300,11 +258,6 @@ def update_service_type(db: Session, current_user: models.User, service_id: int,
 def delete_service_type(db: Session, current_user: models.User, service_id: int):
     """
     Removes a service from the shop's catalog.
-    Existing bookings keep their historical service_type string, so past
-    records are unaffected — only future bookings lose this as an option.
-
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id.
     """
     shop_id = current_user.shop_id
 
@@ -319,7 +272,6 @@ def delete_service_type(db: Session, current_user: models.User, service_id: int)
     service_name = service.name
     db.delete(service)
 
-    # --- ACTIVITY LOG ---
     log_activity(
         db, shop_id,
         actor_name=current_user.full_name or current_user.email,
@@ -330,12 +282,11 @@ def delete_service_type(db: Session, current_user: models.User, service_id: int)
     db.commit()
     return {"message": f"Service '{service_name}' removed successfully."}
 
-# --- ADD-ON FUNCTIONS (NEW) ---
+# --- ADD-ON FUNCTIONS ---
 
 def get_add_ons(db: Session, shop_id: int):
     """
     Returns all add-ons (active and inactive) configured for a shop.
-    NOTE: read-only, no Activity Log entry.
     """
     return (
         db.query(models.AddOn)
@@ -346,9 +297,7 @@ def get_add_ons(db: Session, shop_id: int):
 
 def create_add_on(db: Session, current_user: models.User, add_on_data: schemas.AddOnBase):
     """
-    Registers a new add-on (name + price) for the shop. Prevents exact
-    duplicate names (case-insensitive) for the same shop — same pattern
-    as create_service_type().
+    Registers a new add-on (name + price) for the shop.
     """
     shop_id = current_user.shop_id
 
@@ -436,9 +385,7 @@ def update_add_on(db: Session, current_user: models.User, add_on_id: int, add_on
 
 def delete_add_on(db: Session, current_user: models.User, add_on_id: int):
     """
-    Removes an add-on from the shop's catalog. Past bookings keep their
-    BookingAddOnUsage records (price_at_booking snapshot), so historical
-    data is unaffected — only future bookings lose this as an option.
+    Removes an add-on from the shop's catalog.
     """
     shop_id = current_user.shop_id
 
@@ -463,12 +410,11 @@ def delete_add_on(db: Session, current_user: models.User, add_on_id: int):
     db.commit()
     return {"message": f"Add-on '{add_on_name}' removed successfully."}
 
-# --- PROMO CODE FUNCTIONS (NEW) ---
+# --- PROMO CODE FUNCTIONS ---
 
 def get_promo_codes(db: Session, shop_id: int):
     """
     Returns all promo codes (active and inactive) configured for a shop.
-    NOTE: read-only, no Activity Log entry.
     """
     return (
         db.query(models.PromoCode)
@@ -480,12 +426,8 @@ def get_promo_codes(db: Session, shop_id: int):
 
 def _generate_unique_promo_code(db: Session, shop_id: int, discount_type: str, discount_value: float) -> str:
     """
-    NEW — Gumagawa ng random na promo code, halimbawa "SAVE20-X7K9"
+    Gumagawa ng random na promo code, halimbawa "SAVE20-X7K9"
     (percent discount) o "PROMO150-A3B8" (fixed amount discount).
-    Format: PREFIX + rounded discount value + "-" + 4-character random
-    alphanumeric suffix. Sinusuri kung unique sa loob ng shop bago
-    ibalik — kung sakaling mag-collide (napakabihirang mangyari), susubukan
-    ulit hanggang 10 beses bago mag-raise ng error.
     """
     prefix = "SAVE" if discount_type == "percent" else "PROMO"
     value_part = str(int(discount_value))
@@ -505,8 +447,6 @@ def _generate_unique_promo_code(db: Session, shop_id: int, discount_type: str, d
         if not existing:
             return candidate_code
 
-    # Napaka-bihira nitong mangyari (10 consecutive collisions), pero
-    # kailangan pa ring i-handle nang maayos sa halip na mag-crash.
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Could not generate a unique promo code. Please try again."
@@ -515,15 +455,7 @@ def _generate_unique_promo_code(db: Session, shop_id: int, discount_type: str, d
 
 def create_promo_code(db: Session, current_user: models.User, promo_data: schemas.PromoCodeGenerateInput):
     """
-    UPDATED — Registers a new promo code para sa shop, pero AUTO-
-    GENERATED na ngayon ang `code` (see _generate_unique_promo_code()
-    sa itaas) sa halip na kunin mula sa request body. Hindi na dapat
-    isipin ng shop owner ang code mismo — sapat na ang discount details
-    (type, value, max_uses, expiry).
-
-    Tinanggal ang duplicate-check sa dulo ng `promo_data.code` dahil
-    wala nang ganoong field sa PromoCodeGenerateInput — ang uniqueness
-    ay tinitiyak na ng _generate_unique_promo_code() mismo.
+    Registers a new promo code para sa shop, AUTO-GENERATED ang `code`.
     """
     shop_id = current_user.shop_id
 
@@ -631,21 +563,11 @@ def delete_promo_code(db: Session, current_user: models.User, promo_id: int):
     db.commit()
     return {"message": f"Promo code '{promo_code}' removed successfully."}
 
-# --- PROFILE & SECURITY FUNCTIONS ---
+# --- PROFILE FUNCTIONS ---
 
 def update_shop_profile(db: Session, current_user: models.User, profile_data: schemas.ShopProfileUpdate):
     """
     Updates the shop's contact information and business profile.
-
-    NOTE: has_delivery/delivery_fee/latitude/longitude (added to
-    ShopProfileUpdate earlier) are handled automatically here — this
-    function already loops over every field in the incoming schema and
-    uses hasattr()/setattr() to apply it to the Shop record, so no code
-    change was needed to support them; they just work the moment the
-    schema declared them.
-
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id.
     """
     shop_id = current_user.shop_id
 
@@ -658,7 +580,6 @@ def update_shop_profile(db: Session, current_user: models.User, profile_data: sc
         if hasattr(db_shop, key):
             setattr(db_shop, key, value)
 
-    # --- ACTIVITY LOG ---
     if update_data:
         changed_fields = ", ".join(update_data.keys())
         log_activity(
@@ -672,32 +593,23 @@ def update_shop_profile(db: Session, current_user: models.User, profile_data: sc
     db.refresh(db_shop)
     return db_shop
 
-def update_user_password(db: Session, user_id: int, password_data: schemas.PasswordUpdate):
-    """
-    Validates the old password and updates to a new hashed password.
+# REMOVED (Supabase Auth migration): update_user_password() — dating
+# tumatawag sa schemas.PasswordUpdate (tinanggal na) at gumagamit ng
+# pwd_context/CryptContext + db_user.hashed_password (wala nang column
+# na 'yan sa User model — tinanggal na noong ilipat natin ang password
+# storage papunta sa Supabase Auth mismo). Wala nang route na tumatawag
+# dito (tinanggal na rin natin ang PUT /settings/password sa
+# setting_routes.py), kaya dead code na ito. Ang password change ng
+# Owner/Staff ay direktang Supabase Auth SDK na ang bahala
+# (client-side supabase.auth.updateUser({ password: newPassword })).
+#
+# Kasabay nito, tinanggal na rin ang mga import na para lang dito
+# ginamit: `from passlib.context import CryptContext` at ang
+# `pwd_context = CryptContext(...)` instance.
 
-    NOTE: sinasadyang HINDI ito nilagyan ng Activity Log entry —
-    password changes ay sensitive/private na aksyon, hindi dapat
-    makikita kahit ng Manager sa shared Activity Log page. Signature
-    unchanged (user_id, hindi current_user) dahil self-only operation
-    ito, walang kailangang shop-level attribution na idagdag.
-    """
-    db_user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not db_user:
-        return {"error": "User not found"}
-    
-    # Verify old password
-    if not pwd_context.verify(password_data.old_password, db_user.hashed_password):
-        return {"error": "Incorrect old password"}
-    
-    # Update to new hashed password
-    db_user.hashed_password = pwd_context.hash(password_data.new_password)
-    db.commit()
-    return {"message": "Password updated successfully"}
 def get_shop_profile(db: Session, shop_id: int):
     """
     Retrieves the shop's own profile info (name, address, delivery
-    settings) for display before editing. NOTE: read-only, no
-    Activity Log entry.
+    settings) for display before editing.
     """
     return db.query(models.Shop).filter(models.Shop.id == shop_id).first()
