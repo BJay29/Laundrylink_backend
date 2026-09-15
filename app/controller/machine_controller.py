@@ -115,6 +115,12 @@ def update_machine(db: Session, machine_id: int, update_data: MachineUpdate, cur
     (partial update). Scoped to the requesting user's shop — a machine
     belonging to another shop returns 404, not silent success.
 
+    UPDATED (per-machine timer feature): this is now also the endpoint
+    Optimization Settings uses to save a machine's own cycle duration —
+    `configured_duration_minutes` is just another field in MachineUpdate,
+    so no new endpoint was needed. No special-casing required here since
+    the generic field loop below already applies it.
+
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id.
     """
@@ -203,6 +209,12 @@ def create_machine(db: Session, machine_data: MachineCreate, current_user: model
     """
     Registers a new hardware unit and initializes all telemetry fields to zero.
 
+    UPDATED (per-machine timer feature): initializes
+    configured_duration_minutes from machine_data (default 45, same as
+    the schema default) and cycle_started_at=None (Idle unit, no cycle
+    running yet). The shop owner can adjust the duration later from
+    Optimization Settings via update_machine() above.
+
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id.
     """
@@ -221,6 +233,8 @@ def create_machine(db: Session, machine_data: MachineCreate, current_user: model
         accumulated_water=0.0,
         accumulated_detergent=0.0,
         remaining_time=0,
+        configured_duration_minutes=machine_data.configured_duration_minutes or 45,
+        cycle_started_at=None,
         shop_id=shop_id
     )
 
@@ -245,6 +259,13 @@ def toggle_machine_maintenance(db: Session, machine_id: int, current_user: model
     Toggles the hardware state between Available and Maintenance.
     Entering maintenance clears real-time countdowns for safety.
 
+    UPDATED (per-machine timer feature): entering Maintenance now also
+    clears cycle_started_at (not just remaining_time) — otherwise the
+    live countdown timer on the frontend would keep computing against a
+    stale start time even though the machine isn't actually running.
+    configured_duration_minutes (the shop's configured cycle length) is
+    left untouched — that's a standing setting, not per-cycle state.
+
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id.
     """
@@ -266,6 +287,7 @@ def toggle_machine_maintenance(db: Session, machine_id: int, current_user: model
     else:
         machine.status = "Maintenance"
         machine.remaining_time = 0
+        machine.cycle_started_at = None
         machine.current_service_type = "None"
         machine.current_price = 0.0
         action_desc = f"Put {machine_label} into Maintenance"
@@ -287,6 +309,10 @@ def initialize_shop_machines(db: Session, current_user: models.User):
     """
     Seed function to deploy a standard 12-unit laundry grid.
     Ensures clean telemetry initialization for all units.
+
+    UPDATED (per-machine timer feature): each seeded unit gets the
+    default configured_duration_minutes=45 (shop owner can adjust each
+    one individually afterward in Optimization Settings).
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id.
@@ -313,6 +339,8 @@ def initialize_shop_machines(db: Session, current_user: models.User):
                 accumulated_water=0.0,
                 accumulated_detergent=0.0,
                 remaining_time=0,
+                configured_duration_minutes=45,
+                cycle_started_at=None,
                 shop_id=shop_id
             ))
 
@@ -334,7 +362,12 @@ def reset_all_machines(db: Session, current_user: models.User):
     """
     Emergency override: sets every machine belonging to this shop back to
     'Available' and clears active-cycle telemetry (does NOT reset lifetime
-    totals like total_cycles or net_profit_accumulated).
+    totals like total_cycles or net_profit_accumulated, and does NOT
+    touch configured_duration_minutes — that's a standing setting, not
+    per-cycle state).
+
+    UPDATED (per-machine timer feature): also clears cycle_started_at on
+    every machine, same reasoning as toggle_machine_maintenance() above.
 
     UPDATED (Activity Log): now takes current_user instead of a bare
     shop_id. This is a shop-wide destructive-ish override, so it's
@@ -353,6 +386,7 @@ def reset_all_machines(db: Session, current_user: models.User):
     for machine in machines:
         machine.status = "Available"
         machine.remaining_time = 0
+        machine.cycle_started_at = None
         machine.current_service_type = "None"
         machine.current_price = 0.0
 

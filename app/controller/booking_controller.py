@@ -21,19 +21,61 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     - If at least one machine is assigned → status = "In Progress"
 
     NOTE (multi-machine assignment feature): ang washer_id/dryer_id sa
-    BookingCreate ay LEGACY na ngayon...
+    BookingCreate ay LEGACY na ngayon — sinusuportahan pa rin dito para
+    hindi masira ang existing single-machine flow (hal. 1-load bookings
+    na direktang inaasignan ng machine sa mismong paggawa ng booking).
+    Para sa multi-load bookings (loads > 1), iniiwan MUNANG "Pending"
+    ang booking na ito (walang washer_id/dryer_id na ipapasa), tapos
+    tatawagin ang BAGONG assign_machines_to_booking() sa ibaba bilang
+    hiwalay na hakbang — doon nangyayari ang totoong N-machines-per-load
+    na assignment gamit ang BookingMachineAssignment.
 
-    NEW (Promo Code — Walk-in bookings): kung may booking_data.promo_code,
-    ii-validate at ia-apply ito gamit ang PAREHONG _apply_promo_code()
-    helper na ginagamit na ng mobile app's create_customer_booking() sa
-    ibaba ng file na ito. Ang total_price na ipinasa ng frontend
-    (BookingModal.jsx, computed via Smart Calc o Manual Override) ang
-    itinuturing na SUBTOTAL — ang discount ay ibabawas dito bago i-save
-    bilang final Booking.total_price. Kung invalid/expired/ubos na ang
-    code, agad na mag-r-raise ng HTTPException (hindi ito basta na lang
-    ini-ignore) — makikita ito ng staff bilang error sa BookingModal.
+    UPDATED (per-machine timer feature): machine.remaining_time now
+    comes from the MACHINE's own configured_duration_minutes (set per
+    physical unit in Optimization Settings), not from
+    ServiceType.duration_minutes (removed entirely — duration is no
+    longer a per-service concept, since different physical washers/
+    dryers can have different real cycle lengths regardless of which
+    service runs on them). machine.cycle_started_at is also stamped
+    here so the frontend can compute a live countdown instead of a
+    static number that never ticks down on its own.
 
-    ...(ibang docstring content, walang binago)...
+    UPDATED: PredictionService.get_overhead() now takes (db, shop_id, ...)
+    so machine cost telemetry (electricity/water/supplies) is computed
+    using THIS shop's own configured rates from Optimization Settings,
+    instead of hardcoded Naga City constants that ignored the Setting
+    table entirely (previously, changing rates in the UI had zero effect
+    on cost calculations here).
+
+    UPDATED (Activity Log): now takes current_user instead of a bare
+    shop_id, so the action can be attributed to whoever actually
+    performed it (current_user.full_name or current_user.email /
+    current_user.role) instead of just knowing which shop it happened in.
+
+    UPDATED (Payment): ini-set na rin ang payment_method galing sa
+    booking_data (default "cash", tumutugma sa Walk-in terminal flow).
+    payment_status ay laging nagsisimula sa "unpaid" (default sa model)
+    — ang pag-mark bilang "Paid" ay hiwalay at manual na action ng staff
+    (see mark_booking_as_paid() sa ibaba).
+
+    NEW (walk-in promo code support): kung may booking_data.promo_code,
+    ang booking_data.total_price ay tinuturing na PRE-DISCOUNT subtotal
+    — ang totoong discount ay kino-compute DITO SA BACKEND gamit ang
+    parehong _apply_promo_code() helper na ginagamit na ng mobile-app
+    flow (create_customer_booking() sa ibaba), hindi trust-lang sa
+    kung anong "final total" ang ipinasa ng client. Ito ang naka-save
+    bilang Booking.total_price (net na ng discount), kasama ang
+    Booking.promo_code at Booking.discount_amount para sa record-keeping
+    (makikita sa Record Sales / Booking Details). Kung invalid/expired/
+    ubos na ang code, mag-ra-raise agad ng HTTPException dito bago pa
+    man magsimula ang booking creation.
+
+    NOTE: no is_online gate here — this is a staff-created booking from
+    the Service Terminal itself, i.e. the terminal is, by definition,
+    open and connected while this runs. The is_online safety net only
+    applies to create_customer_booking() below (mobile app self-booking),
+    where the customer's device has no way to know the terminal's live
+    connection state on its own.
     """
     shop_id = current_user.shop_id
 
@@ -84,26 +126,28 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         )
         deducted_items.append((item, item_usage.quantity_used))
 
-    # --- 3.5. APPLY PROMO CODE (NEW — Walk-in bookings) ---
-    # Ang booking_data.total_price mula sa frontend ay ang SUBTOTAL
-    # (bago ang discount). Kung may promo_code, ibabawas dito ang
-    # discount bago gawing final price. Kung walang promo_code,
-    # walang epekto — final_price == subtotal, tulad ng dati.
-    promo_record = None
-    discount_amount = 0.0
-    final_price = booking_data.total_price
-    if booking_data.promo_code:
-        promo_record, discount_amount = _apply_promo_code(
-            db, shop_id, booking_data.promo_code, booking_data.total_price
-        )
-        final_price = round(booking_data.total_price - discount_amount, 2)
-
     # --- 4. DETERMINE INITIAL STATUS (legacy single-machine path) ---
     assigned_ids = [
         m_id for m_id in [booking_data.washer_id, booking_data.dryer_id]
         if m_id is not None
     ]
     initial_status = "In Progress" if assigned_ids else "Pending"
+
+    # --- 4.5 APPLY PROMO CODE (NEW — walk-in promo support) ---
+    # Mirrors the mobile-app flow's use of _apply_promo_code(): the
+    # discount is ALWAYS computed server-side from booking_data.total_price
+    # as the pre-discount subtotal, never trusting a client-computed
+    # final number. Raises HTTPException immediately if the code is
+    # invalid/expired/exhausted — same behavior as the mobile flow.
+    promo_record = None
+    discount_amount = 0.0
+    final_total_price = booking_data.total_price
+
+    if booking_data.promo_code:
+        promo_record, discount_amount = _apply_promo_code(
+            db, shop_id, booking_data.promo_code, booking_data.total_price
+        )
+        final_total_price = round(booking_data.total_price - discount_amount, 2)
 
     # --- 5. CREATE THE BOOKING RECORD ---
     new_booking = Booking(
@@ -112,7 +156,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         category=booking_data.category,
         weight=booking_data.weight,
         loads=booking_data.loads,
-        total_price=final_price,
+        total_price=final_total_price,
         booking_mode=booking_data.booking_mode,
         add_detergent=booking_data.add_detergent,
         add_delivery=booking_data.add_delivery,
@@ -123,8 +167,6 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         shop_id=shop_id,
         source="terminal",
         payment_method=booking_data.payment_method or "cash",
-        # NEW — snapshot ng promo code (kung meron) at ang nabawas na
-        # halaga, parehong pattern ng create_customer_booking() sa ibaba.
         promo_code=promo_record.code if promo_record else None,
         discount_amount=discount_amount,
         booking_timestamp=actual_booking_time,
@@ -132,7 +174,12 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     )
 
     # --- 6. UPDATE MACHINE TELEMETRY (legacy path — only if machines are
-    #    assigned inline at creation, i.e. single-load bookings) ---
+    #    assigned inline at creation, i.e. single-load bookings). Multi-
+    #    load bookings should NOT pass washer_id/dryer_id here — they
+    #    stay "Pending" and use assign_machines_to_booking() instead.
+    #    NOTE: uses final_total_price (post-discount) so machine
+    #    profitability telemetry reflects what the shop actually earned,
+    #    not the pre-discount sticker price. ---
     for m_id in assigned_ids:
         machine = db.query(Machine).filter(
             Machine.id == m_id,
@@ -153,9 +200,10 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
 
         machine.status = "Busy"
         machine.current_service_type = booking_data.service_type
-        machine.current_price = final_price
+        machine.current_price = final_total_price
         machine.total_cycles += 1
-        machine.remaining_time = service_type_record.duration_minutes
+        machine.remaining_time = machine.configured_duration_minutes or 45
+        machine.cycle_started_at = datetime.now(timezone.utc)
 
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
@@ -163,11 +211,11 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         machine.accumulated_detergent += overhead_data.get("detergent_cost", 0.0)
 
         overhead_total = overhead_data.get("total_overhead", 0.0)
-        net_profit = final_price - overhead_total
+        net_profit = final_total_price - overhead_total
         machine.net_profit_accumulated += net_profit
 
-        if final_price > 0:
-            margin = (net_profit / final_price) * 100
+        if final_total_price > 0:
+            margin = (net_profit / final_total_price) * 100
             machine.profitability_rate = max(0.0, min(100.0, margin))
         else:
             machine.profitability_rate = 0.0
@@ -183,10 +231,9 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
                 quantity_used=quantity_used
             ))
 
-        # NEW — i-increment ang times_used ng promo AFTER db.flush() (may
-        # booking.id na) pero BAGO ang commit — parehong transaction, para
-        # kung mag-fail ang commit, mag-rollback din ang increment na ito
-        # (walang "ghost usage" na naitala kahit hindi na-save ang booking).
+        # NEW (walk-in promo support) — only increment usage AFTER the
+        # booking transaction is about to be committed successfully,
+        # same ordering the mobile-app flow follows.
         if promo_record:
             promo_record.times_used += 1
 
@@ -200,7 +247,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
             actor_role=current_user.role,
             description=(
                 f"Created a booking for {booking_data.customer_name} "
-                f"- {booking_data.service_type}, ₱{final_price}{machine_note}{promo_note}"
+                f"- {booking_data.service_type}, ₱{final_total_price}{machine_note}{promo_note}"
             )
         )
 
@@ -226,6 +273,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database Transactional Error: {str(e)}"
         )
+
 
 def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", current_user: models.User):
     """
@@ -266,20 +314,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             detail="At least one machine (washer or dryer) must be provided."
         )
 
-    service_type_record = (
-        db.query(ServiceType)
-        .filter(
-            ServiceType.shop_id == shop_id,
-            ServiceType.name == booking.service_type
-        )
-        .first()
-    )
-    duration_minutes = (
-        service_type_record.duration_minutes
-        if service_type_record
-        else None
-    )
-
     assigned_machine_labels = []
 
     for m_id in assigned_ids:
@@ -312,11 +346,16 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         machine.current_price = booking.total_price
         machine.total_cycles += 1
 
+        # NEW (per-machine timer feature) — duration comes from THIS
+        # machine's own configured_duration_minutes now, not from the
+        # service. get_machine_runtime() is kept as a last-resort
+        # fallback only for machines somehow missing a configured value.
         machine.remaining_time = (
-            duration_minutes
-            if duration_minutes is not None
+            machine.configured_duration_minutes
+            if machine.configured_duration_minutes
             else PredictionService.get_machine_runtime(machine.machine_type, booking.service_type)
         )
+        machine.cycle_started_at = datetime.now(timezone.utc)
 
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
         machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
@@ -378,7 +417,7 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
 # MULTI-MACHINE ASSIGNMENT FUNCTIONS (NEW)
 # =========================================================
 
-def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service_type_name: str, total_price: float, duration_minutes: int):
+def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service_type_name: str, total_price: float):
     """
     NEW — Shared helper factored out of the per-machine telemetry block
     that used to be duplicated inline in assign_machine_to_booking() and
@@ -388,12 +427,21 @@ def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service
     phase) and move_load_to_dryer() (dryer phase) below, so both phases
     of a load get the same telemetry treatment as the legacy single-
     machine flow did.
+
+    UPDATED (per-machine timer feature): no longer takes a
+    duration_minutes param — the countdown length now always comes from
+    THIS machine's own configured_duration_minutes (set per physical
+    unit in Optimization Settings), so callers no longer need to look
+    up a service's duration at all. Also stamps cycle_started_at so the
+    frontend can compute a live, ticking countdown instead of trusting
+    a static remaining_time number.
     """
     machine.status = "Busy"
     machine.current_service_type = service_type_name
     machine.current_price = total_price
     machine.total_cycles += 1
-    machine.remaining_time = duration_minutes
+    machine.remaining_time = machine.configured_duration_minutes or 45
+    machine.cycle_started_at = datetime.now(timezone.utc)
 
     overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
     machine.accumulated_electricity += overhead_data.get("electricity_cost", 0.0)
@@ -417,10 +465,17 @@ def _release_machine(machine: Machine):
     same pattern as the release block inside update_booking_status().
     Skips machines currently in Maintenance (those stay in Maintenance
     regardless of booking lifecycle).
+
+    UPDATED (per-machine timer feature): also clears cycle_started_at —
+    otherwise a freed machine's frontend timer would keep counting down
+    (or show a stale negative time) against a cycle that no longer
+    exists. configured_duration_minutes (the standing shop setting) is
+    left untouched.
     """
     if machine.status != "Maintenance":
         machine.status = "Available"
         machine.remaining_time = 0
+        machine.cycle_started_at = None
         machine.current_service_type = "None"
         machine.current_price = 0.0
 
@@ -497,11 +552,6 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
         .first()
     )
     required_phases = service_type_record.required_phases if service_type_record else "full_service"
-    duration_minutes = (
-        service_type_record.duration_minutes
-        if service_type_record
-        else PredictionService.get_machine_runtime("Washer", booking.service_type)
-    )
 
     target_type = "Dryer" if required_phases == "dry_only" else "Washer"
     initial_phase = "drying" if required_phases == "dry_only" else "washing"
@@ -544,7 +594,7 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
                 detail=f"{machine.machine_type} #{machine.machine_number} is currently busy."
             )
 
-        _bind_machine_telemetry(db, shop_id, machine, booking.service_type, booking.total_price, duration_minutes)
+        _bind_machine_telemetry(db, shop_id, machine, booking.service_type, booking.total_price)
 
         assignment = BookingMachineAssignment(
             booking_id=booking.id,
@@ -676,19 +726,10 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
             detail=f"Dryer #{dryer.machine_number} is currently busy."
         )
 
-    service_type_record = (
-        db.query(ServiceType)
-        .filter(
-            ServiceType.shop_id == shop_id,
-            ServiceType.name == booking.service_type
-        )
-        .first()
-    )
-    duration_minutes = (
-        service_type_record.duration_minutes
-        if service_type_record
-        else PredictionService.get_machine_runtime("Dryer", booking.service_type)
-    )
+    # NEW (per-machine timer feature) — duration for the dry phase now
+    # comes from THIS dryer's own configured_duration_minutes (set in
+    # Optimization Settings), via _bind_machine_telemetry() below — no
+    # longer looked up from the service.
 
     # Release the washer this load was using.
     if assignment.washer_id:
@@ -705,7 +746,7 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
     assignment.phase = "drying"
     assignment.drying_started_at = now
 
-    _bind_machine_telemetry(db, shop_id, dryer, booking.service_type, booking.total_price, duration_minutes)
+    _bind_machine_telemetry(db, shop_id, dryer, booking.service_type, booking.total_price)
 
     try:
         log_activity(
@@ -1061,6 +1102,10 @@ def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> 
     Returns (promo_record, discount_amount) — 'yung promo_record ang
     ipapasa pabalik para ma-increment ang times_used pagkatapos
     ma-confirm na successful ang buong booking transaction.
+
+    NOTE: ginagamit na rin ito ngayon ng create_booking() (walk-in
+    promo support), hindi lang ng create_customer_booking() (mobile
+    app) — parehong function, iisang validation/computation logic.
     """
     promo = (
         db.query(PromoCode)

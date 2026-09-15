@@ -53,6 +53,12 @@ def update_machine_config(
     Updates machine details like Name, Type, or Operational Status.
     Useful for renaming units or assigning them to different service zones.
 
+    UPDATED (per-machine timer feature): this SAME generic endpoint is
+    now also how Optimization Settings saves a machine's own cycle
+    duration — pass { "configured_duration_minutes": <int> } in the
+    request body. No separate endpoint was needed since
+    MachineUpdate already supports partial updates of any field.
+
     UPDATED: machine_controller.update_machine() now takes current_user
     (not shop_id) so the resulting Activity Log entry can attribute this
     action to whoever performed it.

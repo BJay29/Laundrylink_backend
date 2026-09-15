@@ -120,6 +120,15 @@ class BookingInventoryUsage(Base):
 class ServiceType(Base):
     """
     Dynamic, per-shop service catalog.
+
+    UPDATED (per-machine timer feature): TINANGGAL ang `duration_minutes`
+    column dito — ang cycle duration ay hindi na per-service, kundi
+    PER-MACHINE na ngayon (see Machine.configured_duration_minutes sa
+    ibaba). Dati, iisang duration lang ang nakatakda sa isang service
+    kahit anong machine ang gamitin; ngayon, ang bawat physical washer/
+    dryer mismo ang may sariling naka-configure na cycle length (naka-set
+    sa Optimization Settings), dahil sa totoong buhay iba-iba ang
+    tunay na tagal ng bawat unit kahit parehong service ang tinatakbo.
     """
     __tablename__ = "service_types"
 
@@ -127,7 +136,6 @@ class ServiceType(Base):
     name = Column(String, nullable=False)
     price = Column(Float, nullable=False, default=0.0)
     is_active = Column(Boolean, default=True)
-    duration_minutes = Column(Integer, nullable=False, default=45)
 
     pricing_unit = Column(String(20), nullable=False, default="load")
 
@@ -148,7 +156,6 @@ class ServiceType(Base):
             "name": self.name,
             "price": self.price,
             "is_active": self.is_active,
-            "duration_minutes": self.duration_minutes,
             "pricing_unit": self.pricing_unit,
             "required_phases": self.required_phases,
             "shop_id": self.shop_id
@@ -308,6 +315,22 @@ class Customer(Base):
 class Machine(Base):
     """
     Hardware units (Washers/Dryers) tracking real-time status and financial performance.
+
+    UPDATED (per-machine timer feature):
+    - `configured_duration_minutes`: shop-configured cycle length for
+      THIS specific physical unit, set from Optimization Settings
+      (replaces the old ServiceType.duration_minutes as the source of
+      remaining_time — different physical machines can have different
+      real cycle lengths regardless of which service runs on them).
+    - `cycle_started_at`: UTC timestamp of when the machine's current
+      cycle actually began. Set whenever the machine goes "Busy"
+      (booking creation, machine assignment, move-to-dryer), cleared
+      whenever it's released back to "Available" or put into
+      "Maintenance". The frontend live-countdown timer is computed from
+      (configured_duration_minutes * 60) - (now - cycle_started_at),
+      NOT from remaining_time alone — remaining_time never ticks down
+      by itself in the backend, so a raw display of it would look
+      frozen/stale across polling refreshes.
     """
     __tablename__ = "machines"
 
@@ -320,6 +343,10 @@ class Machine(Base):
     current_price = Column(Float, default=0.0)
     remaining_time = Column(Integer, default=0) 
     total_cycles = Column(Integer, default=0)
+
+    # NEW (per-machine timer feature)
+    configured_duration_minutes = Column(Integer, default=45, nullable=False, server_default="45")
+    cycle_started_at = Column(DateTime(timezone=True), nullable=True)
     
     net_profit_accumulated = Column(Float, default=0.0)
     profitability_rate = Column(Float, default=0.0) 
@@ -343,6 +370,8 @@ class Machine(Base):
             "current_service_type": self.current_service_type,
             "current_price": self.current_price,
             "remaining_time": self.remaining_time,
+            "configured_duration_minutes": self.configured_duration_minutes,
+            "cycle_started_at": self.cycle_started_at.isoformat() if self.cycle_started_at else None,
             "total_cycles": self.total_cycles,
             "net_profit_accumulated": round(self.net_profit_accumulated or 0.0, 2),
             "profitability_rate": round(self.profitability_rate or 0.0, 2),

@@ -144,11 +144,20 @@ def get_service_types(db: Session, shop_id: int):
 
 def create_service_type(db: Session, current_user: models.User, service_data: schemas.ServiceTypeBase):
     """
-    Registers a new service (name + price + duration + pricing_unit +
+    Registers a new service (name + price + pricing_unit +
     required_phases) for the shop. Prevents exact duplicate names
     (case-insensitive) for the same shop.
 
-    NEW (multi-machine assignment feature): ini-save na rin ang
+    UPDATED (per-machine timer feature): TINANGGAL ang duration_minutes
+    mula dito — wala na itong field sa ServiceTypeBase schema (nalipat
+    na ang cycle duration sa Machine.configured_duration_minutes,
+    itinatakda per-machine sa halip na per-service). Ang duration ng
+    isang cycle ay depende na sa ANONG MACHINE ang gagamitin, hindi sa
+    kung anong service ang binook — see booking_controller.py
+    (create_booking, assign_machines_to_booking, move_load_to_dryer)
+    kung saan kinukuha na nila ito mula sa machine record mismo.
+
+    NEW (multi-machine assignment feature): ini-save pa rin ang
     service_data.required_phases ("wash_only" | "dry_only" |
     "full_service") — ginagamit ito ni booking_controller.
     assign_machines_to_booking() para malaman kung washers o dryers
@@ -175,9 +184,8 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
         name=service_data.name,
         price=service_data.price,
         is_active=service_data.is_active,
-        duration_minutes=service_data.duration_minutes,
         pricing_unit=service_data.pricing_unit,
-        required_phases=service_data.required_phases,  # NEW
+        required_phases=service_data.required_phases,
         shop_id=shop_id
     )
     db.add(new_service)
@@ -189,8 +197,7 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
         actor_role=current_user.role,
         description=(
             f"Added a new service: {new_service.name} "
-            f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.duration_minutes} min, "
-            f"{new_service.required_phases})"
+            f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.required_phases})"
         )
     )
 
@@ -200,14 +207,18 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
 
 def update_service_type(db: Session, current_user: models.User, service_id: int, service_data: schemas.ServiceTypeUpdate):
     """
-    Edits an existing service's name, price, duration, active status,
+    Edits an existing service's name, price, active status,
     pricing_unit, or required_phases.
 
-    NOTE (multi-machine assignment feature): walang binago dito —
-    automatic na kasama na ang required_phases sa generic
-    update_data.items() loop sa ibaba, dahil idinagdag na ito bilang
-    optional field sa ServiceTypeUpdate schema. Kapag ipinasa ito ng
-    client, ma-a-apply na ito nang walang dagdag na code.
+    NOTE (per-machine timer feature): wala nang duration_minutes field
+    dito dahil tinanggal na ito sa ServiceTypeUpdate schema — walang
+    dagdag na code na kailangan, ang generic update_data.items() loop
+    sa ibaba ay awtomatiko na lang na hindi na kasama ang duration
+    dahil wala na itong ipapasa mula sa schema.
+
+    NOTE (multi-machine assignment feature): required_phases ay
+    kasama na rin sa generic update_data.items() loop, dahil idinagdag
+    na ito bilang optional field sa ServiceTypeUpdate schema.
     """
     shop_id = current_user.shop_id
 
@@ -593,19 +604,8 @@ def update_shop_profile(db: Session, current_user: models.User, profile_data: sc
     db.refresh(db_shop)
     return db_shop
 
-# REMOVED (Supabase Auth migration): update_user_password() — dating
-# tumatawag sa schemas.PasswordUpdate (tinanggal na) at gumagamit ng
-# pwd_context/CryptContext + db_user.hashed_password (wala nang column
-# na 'yan sa User model — tinanggal na noong ilipat natin ang password
-# storage papunta sa Supabase Auth mismo). Wala nang route na tumatawag
-# dito (tinanggal na rin natin ang PUT /settings/password sa
-# setting_routes.py), kaya dead code na ito. Ang password change ng
-# Owner/Staff ay direktang Supabase Auth SDK na ang bahala
-# (client-side supabase.auth.updateUser({ password: newPassword })).
-#
-# Kasabay nito, tinanggal na rin ang mga import na para lang dito
-# ginamit: `from passlib.context import CryptContext` at ang
-# `pwd_context = CryptContext(...)` instance.
+# REMOVED (Supabase Auth migration): update_user_password() — dead code,
+# password change ay Supabase Auth SDK na ang bahala.
 
 def get_shop_profile(db: Session, shop_id: int):
     """

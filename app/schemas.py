@@ -195,7 +195,6 @@ class ServiceTypeBase(BaseModel):
     name: str
     price: float
     is_active: bool = True
-    duration_minutes: int = 45
     pricing_unit: str = "load"
 
     # NEW (multi-machine assignment feature) — sinasabi kung anong
@@ -219,13 +218,6 @@ class ServiceTypeBase(BaseModel):
     def validate_price(cls, v):
         if v < 0:
             raise ValueError("Price cannot be negative.")
-        return v
-
-    @field_validator("duration_minutes")
-    @classmethod
-    def validate_duration(cls, v):
-        if v <= 0:
-            raise ValueError("duration_minutes must be greater than 0.")
         return v
 
     @field_validator("pricing_unit")
@@ -253,7 +245,6 @@ class ServiceTypeUpdate(BaseModel):
     name: Optional[str] = None
     price: Optional[float] = None
     is_active: Optional[bool] = None
-    duration_minutes: Optional[int] = None
     pricing_unit: Optional[str] = None
     required_phases: Optional[str] = None  # NEW
 
@@ -272,13 +263,6 @@ class ServiceTypeUpdate(BaseModel):
     def validate_price(cls, v):
         if v is not None and v < 0:
             raise ValueError("Price cannot be negative.")
-        return v
-
-    @field_validator("duration_minutes")
-    @classmethod
-    def validate_duration(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError("duration_minutes must be greater than 0.")
         return v
 
     @field_validator("pricing_unit")
@@ -590,6 +574,14 @@ class MachineBase(BaseModel):
     accumulated_electricity: float = 0.0  
     accumulated_water: float = 0.0        
 
+    # NEW (per-machine timer feature) — shop-configured cycle length for
+    # THIS specific machine, set from Optimization Settings. Replaces
+    # ServiceType.duration_minutes as the source of a machine's
+    # remaining_time whenever it's assigned to a booking (different
+    # physical units can have different real cycle lengths regardless
+    # of which service is run on them).
+    configured_duration_minutes: int = 45
+
 class MachineCreate(MachineBase):
     """Used for initial hardware registration."""
     pass 
@@ -608,6 +600,18 @@ class MachineUpdate(BaseModel):
     profitability_rate: Optional[float] = None
     net_profit_accumulated: Optional[float] = None
 
+    # NEW (per-machine timer feature) — lets Optimization Settings set
+    # this machine's own cycle duration via the existing generic
+    # PATCH /machines/{id} endpoint (no new endpoint needed).
+    configured_duration_minutes: Optional[int] = None
+
+    @field_validator("configured_duration_minutes")
+    @classmethod
+    def validate_configured_duration_minutes(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("configured_duration_minutes must be greater than 0.")
+        return v
+
 class MachineResponse(MachineBase):
     """Full hardware state returned to the Machine Hub UI."""
     id: int
@@ -621,6 +625,14 @@ class MachineResponse(MachineBase):
     net_profit_accumulated: float = 0.0 
     
     metrics: Optional[Dict[str, float]] = None 
+
+    # NEW (per-machine timer feature) — when this machine's current
+    # cycle actually started (UTC). None when Idle/Available/Maintenance.
+    # The frontend computes the live countdown from
+    # (configured_duration_minutes * 60) - (now - cycle_started_at),
+    # instead of trusting a static remaining_time number that never
+    # ticks down on its own.
+    cycle_started_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -783,6 +795,12 @@ class BookingCreate(BaseModel):
 
     payment_method: Optional[str] = "cash"
 
+    # NEW (promo code for walk-in bookings) — optional code typed by
+    # staff in BookingModal. `total_price` here is treated as the
+    # PRE-DISCOUNT subtotal whenever this is set — the actual discount
+    # is always computed server-side in booking_controller.create_booking()
+    # via the existing _apply_promo_code() helper (the same one the
+    # mobile app flow already uses), never trusted from the client alone.
     promo_code: Optional[str] = None
 
     booking_timestamp: Optional[datetime] = Field(default=None)
@@ -1029,7 +1047,6 @@ class ShopServicePreview(BaseModel):
     id: int
     name: str
     price: float
-    duration_minutes: int
     pricing_unit: str
 
     model_config = ConfigDict(from_attributes=True)
