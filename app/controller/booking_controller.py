@@ -30,15 +30,14 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     hiwalay na hakbang — doon nangyayari ang totoong N-machines-per-load
     na assignment gamit ang BookingMachineAssignment.
 
-    UPDATED (per-machine timer feature): machine.remaining_time now
-    comes from the MACHINE's own configured_duration_minutes (set per
-    physical unit in Optimization Settings), not from
-    ServiceType.duration_minutes (removed entirely — duration is no
-    longer a per-service concept, since different physical washers/
-    dryers can have different real cycle lengths regardless of which
-    service runs on them). machine.cycle_started_at is also stamped
-    here so the frontend can compute a live countdown instead of a
-    static number that never ticks down on its own.
+    UPDATED (live timer feature): machine.remaining_time now comes from
+    the SERVICE's washer_duration_minutes or dryer_duration_minutes
+    (whichever matches the machine's machine_type), not a single
+    ServiceType.duration_minutes field (an earlier version tried a
+    per-MACHINE configured_duration_minutes column instead — reverted).
+    machine.cycle_started_at is also stamped here so the frontend can
+    compute a live countdown instead of a static number that never
+    ticks down on its own.
 
     UPDATED: PredictionService.get_overhead() now takes (db, shop_id, ...)
     so machine cost telemetry (electricity/water/supplies) is computed
@@ -202,7 +201,11 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         machine.current_service_type = booking_data.service_type
         machine.current_price = final_total_price
         machine.total_cycles += 1
-        machine.remaining_time = machine.configured_duration_minutes or 45
+        machine.remaining_time = (
+            service_type_record.washer_duration_minutes
+            if machine.machine_type == "Washer"
+            else service_type_record.dryer_duration_minutes
+        )
         machine.cycle_started_at = datetime.now(timezone.utc)
 
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
@@ -314,6 +317,17 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             detail="At least one machine (washer or dryer) must be provided."
         )
 
+    # NEW (duration-per-service-phase) — needed to pick the right
+    # washer/dryer duration per machine below.
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == shop_id,
+            ServiceType.name == booking.service_type
+        )
+        .first()
+    )
+
     assigned_machine_labels = []
 
     for m_id in assigned_ids:
@@ -346,15 +360,19 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         machine.current_price = booking.total_price
         machine.total_cycles += 1
 
-        # NEW (per-machine timer feature) — duration comes from THIS
-        # machine's own configured_duration_minutes now, not from the
-        # service. get_machine_runtime() is kept as a last-resort
-        # fallback only for machines somehow missing a configured value.
-        machine.remaining_time = (
-            machine.configured_duration_minutes
-            if machine.configured_duration_minutes
-            else PredictionService.get_machine_runtime(machine.machine_type, booking.service_type)
-        )
+        # NEW (duration-per-service-phase) — pick washer_duration_minutes
+        # or dryer_duration_minutes depending on THIS machine's type.
+        # get_machine_runtime() is kept as a last-resort fallback only
+        # if the service record itself is missing (e.g. deleted since
+        # the booking was made).
+        if service_type_record:
+            machine.remaining_time = (
+                service_type_record.washer_duration_minutes
+                if machine.machine_type == "Washer"
+                else service_type_record.dryer_duration_minutes
+            )
+        else:
+            machine.remaining_time = PredictionService.get_machine_runtime(machine.machine_type, booking.service_type)
         machine.cycle_started_at = datetime.now(timezone.utc)
 
         overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
@@ -417,7 +435,7 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
 # MULTI-MACHINE ASSIGNMENT FUNCTIONS (NEW)
 # =========================================================
 
-def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service_type_name: str, total_price: float):
+def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service_type_name: str, total_price: float, duration_minutes: int):
     """
     NEW — Shared helper factored out of the per-machine telemetry block
     that used to be duplicated inline in assign_machine_to_booking() and
@@ -428,19 +446,20 @@ def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service
     of a load get the same telemetry treatment as the legacy single-
     machine flow did.
 
-    UPDATED (per-machine timer feature): no longer takes a
-    duration_minutes param — the countdown length now always comes from
-    THIS machine's own configured_duration_minutes (set per physical
-    unit in Optimization Settings), so callers no longer need to look
-    up a service's duration at all. Also stamps cycle_started_at so the
-    frontend can compute a live, ticking countdown instead of trusting
-    a static remaining_time number.
+    UPDATED (duration-per-service-phase): duration_minutes is passed in
+    by the caller, who has already picked the right value —
+    ServiceType.washer_duration_minutes or dryer_duration_minutes
+    depending on which phase this machine is entering. (An earlier
+    version tried deriving it from a per-machine
+    configured_duration_minutes column instead — reverted.) Also stamps
+    cycle_started_at so the frontend can compute a live, ticking
+    countdown instead of trusting a static remaining_time number.
     """
     machine.status = "Busy"
     machine.current_service_type = service_type_name
     machine.current_price = total_price
     machine.total_cycles += 1
-    machine.remaining_time = machine.configured_duration_minutes or 45
+    machine.remaining_time = duration_minutes
     machine.cycle_started_at = datetime.now(timezone.utc)
 
     overhead_data = PredictionService.get_overhead(db, shop_id, machine.machine_type)
@@ -466,11 +485,10 @@ def _release_machine(machine: Machine):
     Skips machines currently in Maintenance (those stay in Maintenance
     regardless of booking lifecycle).
 
-    UPDATED (per-machine timer feature): also clears cycle_started_at —
+    UPDATED (live timer feature): also clears cycle_started_at —
     otherwise a freed machine's frontend timer would keep counting down
     (or show a stale negative time) against a cycle that no longer
-    exists. configured_duration_minutes (the standing shop setting) is
-    left untouched.
+    exists.
     """
     if machine.status != "Maintenance":
         machine.status = "Available"
@@ -557,6 +575,17 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
     initial_phase = "drying" if required_phases == "dry_only" else "washing"
     now = datetime.now(timezone.utc)
 
+    # NEW (duration-per-service-phase) — resolve once, before the loop,
+    # since every machine assigned here is the same target_type.
+    if service_type_record:
+        duration_minutes = (
+            service_type_record.dryer_duration_minutes
+            if target_type == "Dryer"
+            else service_type_record.washer_duration_minutes
+        )
+    else:
+        duration_minutes = PredictionService.get_machine_runtime(target_type, booking.service_type)
+
     new_assignments = []
     assigned_machine_labels = []
 
@@ -594,7 +623,7 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
                 detail=f"{machine.machine_type} #{machine.machine_number} is currently busy."
             )
 
-        _bind_machine_telemetry(db, shop_id, machine, booking.service_type, booking.total_price)
+        _bind_machine_telemetry(db, shop_id, machine, booking.service_type, booking.total_price, duration_minutes)
 
         assignment = BookingMachineAssignment(
             booking_id=booking.id,
@@ -726,10 +755,21 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
             detail=f"Dryer #{dryer.machine_number} is currently busy."
         )
 
-    # NEW (per-machine timer feature) — duration for the dry phase now
-    # comes from THIS dryer's own configured_duration_minutes (set in
-    # Optimization Settings), via _bind_machine_telemetry() below — no
-    # longer looked up from the service.
+    # NEW (duration-per-service-phase) — duration for the dry phase
+    # comes from THIS booking's ServiceType.dryer_duration_minutes.
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == shop_id,
+            ServiceType.name == booking.service_type
+        )
+        .first()
+    )
+    duration_minutes = (
+        service_type_record.dryer_duration_minutes
+        if service_type_record
+        else PredictionService.get_machine_runtime("Dryer", booking.service_type)
+    )
 
     # Release the washer this load was using.
     if assignment.washer_id:
@@ -746,7 +786,7 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
     assignment.phase = "drying"
     assignment.drying_started_at = now
 
-    _bind_machine_telemetry(db, shop_id, dryer, booking.service_type, booking.total_price)
+    _bind_machine_telemetry(db, shop_id, dryer, booking.service_type, booking.total_price, duration_minutes)
 
     try:
         log_activity(

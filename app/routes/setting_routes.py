@@ -142,9 +142,10 @@ def add_service_type(
     db: Session = Depends(get_db)
 ):
     """
-    Adds a new service (name + price + duration_minutes) to the logged-in
-    user's shop catalog. This is how a shop owner populates the Service
-    Type dropdown that appears in the Create Booking modal.
+    Adds a new service (name, price, required phases, and per-phase washer/
+    dryer durations) to the logged-in user's shop catalog. This is how a
+    shop owner populates the Service Type dropdown that appears in the
+    Create Booking modal.
 
     UPDATED: settings_controller.create_service_type() now takes
     current_user (not shop_id) for Activity Log attribution.

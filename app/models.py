@@ -121,14 +121,18 @@ class ServiceType(Base):
     """
     Dynamic, per-shop service catalog.
 
-    UPDATED (per-machine timer feature): TINANGGAL ang `duration_minutes`
-    column dito — ang cycle duration ay hindi na per-service, kundi
-    PER-MACHINE na ngayon (see Machine.configured_duration_minutes sa
-    ibaba). Dati, iisang duration lang ang nakatakda sa isang service
-    kahit anong machine ang gamitin; ngayon, ang bawat physical washer/
-    dryer mismo ang may sariling naka-configure na cycle length (naka-set
-    sa Optimization Settings), dahil sa totoong buhay iba-iba ang
-    tunay na tagal ng bawat unit kahit parehong service ang tinatakbo.
+    UPDATED (duration-per-service-phase, REVERTED from per-machine):
+    duration is per-SERVICE again (not per physical machine) — but now
+    split into `washer_duration_minutes` and `dryer_duration_minutes`,
+    since a "full_service" service has a distinct wash phase length and
+    dry phase length. Which of the two actually applies to a given
+    booking is decided by `required_phases`:
+      - "full_service" → both apply (washer phase, then dryer phase)
+      - "wash_only" → only washer_duration_minutes applies
+      - "dry_only" → only dryer_duration_minutes applies
+    (An earlier version of this feature tried making duration a
+    per-MACHINE setting instead — Machine.configured_duration_minutes —
+    but that was reverted in favor of this per-service-phase design.)
     """
     __tablename__ = "service_types"
 
@@ -147,6 +151,13 @@ class ServiceType(Base):
     # dryers mamaya sa isang booking.
     required_phases = Column(String(20), nullable=False, default="full_service")
 
+    # NEW (duration-per-service-phase) — cycle length for each phase,
+    # in minutes. Used by booking_controller to set Machine.remaining_time
+    # (paired with Machine.cycle_started_at) whenever a machine is
+    # assigned to a load in this service's washing or drying phase.
+    washer_duration_minutes = Column(Integer, nullable=False, default=45, server_default="45")
+    dryer_duration_minutes = Column(Integer, nullable=False, default=45, server_default="45")
+
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
     shop = relationship("Shop", back_populates="service_types")
 
@@ -158,6 +169,8 @@ class ServiceType(Base):
             "is_active": self.is_active,
             "pricing_unit": self.pricing_unit,
             "required_phases": self.required_phases,
+            "washer_duration_minutes": self.washer_duration_minutes,
+            "dryer_duration_minutes": self.dryer_duration_minutes,
             "shop_id": self.shop_id
         }
 
@@ -316,21 +329,20 @@ class Machine(Base):
     """
     Hardware units (Washers/Dryers) tracking real-time status and financial performance.
 
-    UPDATED (per-machine timer feature):
-    - `configured_duration_minutes`: shop-configured cycle length for
-      THIS specific physical unit, set from Optimization Settings
-      (replaces the old ServiceType.duration_minutes as the source of
-      remaining_time — different physical machines can have different
-      real cycle lengths regardless of which service runs on them).
+    UPDATED (live timer feature):
     - `cycle_started_at`: UTC timestamp of when the machine's current
       cycle actually began. Set whenever the machine goes "Busy"
       (booking creation, machine assignment, move-to-dryer), cleared
       whenever it's released back to "Available" or put into
       "Maintenance". The frontend live-countdown timer is computed from
-      (configured_duration_minutes * 60) - (now - cycle_started_at),
-      NOT from remaining_time alone — remaining_time never ticks down
-      by itself in the backend, so a raw display of it would look
-      frozen/stale across polling refreshes.
+      the relevant ServiceType.washer_duration_minutes /
+      dryer_duration_minutes (looked up via this machine's own
+      `current_service_type` + `machine_type`) minus (now -
+      cycle_started_at) — NOT from remaining_time alone, since
+      remaining_time never ticks down by itself in the backend and
+      would look frozen/stale across polling refreshes. (An earlier
+      version tried a per-machine `configured_duration_minutes` column
+      instead of per-service durations — that was reverted.)
     """
     __tablename__ = "machines"
 
@@ -344,8 +356,11 @@ class Machine(Base):
     remaining_time = Column(Integer, default=0) 
     total_cycles = Column(Integer, default=0)
 
-    # NEW (per-machine timer feature)
-    configured_duration_minutes = Column(Integer, default=45, nullable=False, server_default="45")
+    # NEW (per-machine timer feature) — kept: still needed to compute
+    # the live countdown regardless of where the duration NUMBER comes
+    # from. (configured_duration_minutes was tried and reverted — see
+    # ServiceType.washer_duration_minutes/dryer_duration_minutes below,
+    # duration is per-SERVICE again, split by phase.)
     cycle_started_at = Column(DateTime(timezone=True), nullable=True)
     
     net_profit_accumulated = Column(Float, default=0.0)
@@ -370,7 +385,6 @@ class Machine(Base):
             "current_service_type": self.current_service_type,
             "current_price": self.current_price,
             "remaining_time": self.remaining_time,
-            "configured_duration_minutes": self.configured_duration_minutes,
             "cycle_started_at": self.cycle_started_at.isoformat() if self.cycle_started_at else None,
             "total_cycles": self.total_cycles,
             "net_profit_accumulated": round(self.net_profit_accumulated or 0.0, 2),

@@ -197,6 +197,13 @@ class ServiceTypeBase(BaseModel):
     is_active: bool = True
     pricing_unit: str = "load"
 
+    # NEW (duration-per-service-phase) — cycle length for each phase, in
+    # minutes. Which one actually matters depends on required_phases
+    # below: "full_service" uses both, "wash_only" uses only
+    # washer_duration_minutes, "dry_only" uses only dryer_duration_minutes.
+    washer_duration_minutes: int = 45
+    dryer_duration_minutes: int = 45
+
     # NEW (multi-machine assignment feature) — sinasabi kung anong
     # phase(s) ang kailangan ng service na ito. Ginagamit ito ng
     # booking_controller para malaman kung washers lang, dryers lang,
@@ -236,6 +243,13 @@ class ServiceTypeBase(BaseModel):
             raise ValueError(f"required_phases must be one of: {', '.join(sorted(allowed))}")
         return v
 
+    @field_validator("washer_duration_minutes", "dryer_duration_minutes")
+    @classmethod
+    def validate_phase_duration(cls, v):
+        if v <= 0:
+            raise ValueError("Duration must be greater than 0 minutes.")
+        return v
+
 class ServiceTypeCreate(ServiceTypeBase):
     """NOTE: kept for backward compatibility / potential internal use."""
     shop_id: int
@@ -247,6 +261,8 @@ class ServiceTypeUpdate(BaseModel):
     is_active: Optional[bool] = None
     pricing_unit: Optional[str] = None
     required_phases: Optional[str] = None  # NEW
+    washer_duration_minutes: Optional[int] = None  # NEW
+    dryer_duration_minutes: Optional[int] = None  # NEW
 
     @field_validator("name")
     @classmethod
@@ -281,6 +297,13 @@ class ServiceTypeUpdate(BaseModel):
             allowed = {"wash_only", "dry_only", "full_service"}
             if v not in allowed:
                 raise ValueError(f"required_phases must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("washer_duration_minutes", "dryer_duration_minutes")
+    @classmethod
+    def validate_phase_duration(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("Duration must be greater than 0 minutes.")
         return v
 
 class ServiceTypeResponse(ServiceTypeBase):
@@ -574,14 +597,6 @@ class MachineBase(BaseModel):
     accumulated_electricity: float = 0.0  
     accumulated_water: float = 0.0        
 
-    # NEW (per-machine timer feature) — shop-configured cycle length for
-    # THIS specific machine, set from Optimization Settings. Replaces
-    # ServiceType.duration_minutes as the source of a machine's
-    # remaining_time whenever it's assigned to a booking (different
-    # physical units can have different real cycle lengths regardless
-    # of which service is run on them).
-    configured_duration_minutes: int = 45
-
 class MachineCreate(MachineBase):
     """Used for initial hardware registration."""
     pass 
@@ -600,18 +615,6 @@ class MachineUpdate(BaseModel):
     profitability_rate: Optional[float] = None
     net_profit_accumulated: Optional[float] = None
 
-    # NEW (per-machine timer feature) — lets Optimization Settings set
-    # this machine's own cycle duration via the existing generic
-    # PATCH /machines/{id} endpoint (no new endpoint needed).
-    configured_duration_minutes: Optional[int] = None
-
-    @field_validator("configured_duration_minutes")
-    @classmethod
-    def validate_configured_duration_minutes(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError("configured_duration_minutes must be greater than 0.")
-        return v
-
 class MachineResponse(MachineBase):
     """Full hardware state returned to the Machine Hub UI."""
     id: int
@@ -628,10 +631,10 @@ class MachineResponse(MachineBase):
 
     # NEW (per-machine timer feature) — when this machine's current
     # cycle actually started (UTC). None when Idle/Available/Maintenance.
-    # The frontend computes the live countdown from
-    # (configured_duration_minutes * 60) - (now - cycle_started_at),
-    # instead of trusting a static remaining_time number that never
-    # ticks down on its own.
+    # The frontend computes the live countdown from this plus the
+    # relevant service's washer_duration_minutes/dryer_duration_minutes
+    # (looked up via current_service_type), NOT a per-machine duration —
+    # that approach was tried and reverted.
     cycle_started_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)

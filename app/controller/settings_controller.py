@@ -6,12 +6,8 @@ import logging
 import random
 import string
 
-# Set up logging to track if the system is falling back to defaults
 logger = logging.getLogger(__name__)
 
-# --- SYSTEM CONSTANTS ---
-# These are strictly "Factory Defaults" used ONLY for new shop initialization
-# or manual resets of OPERATIONAL RATES.
 SYSTEM_DEFAULTS = {
     "electricity_rate": 12.0,
     "water_rate": 50.0,
@@ -23,37 +19,21 @@ SYSTEM_DEFAULTS = {
 # --- SETTINGS FUNCTIONS ---
 
 def get_settings(db: Session, shop_id: int):
-    """
-    Retrieves the optimization settings for a specific shop.
-    If no settings exist in the database, it initializes them using SYSTEM_DEFAULTS.
-    """
     settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
-    
     if not settings:
         logger.info(f"No settings found for shop_id {shop_id}. Initializing with defaults.")
-        settings = models.Setting(
-            shop_id=shop_id,
-            **SYSTEM_DEFAULTS
-        )
+        settings = models.Setting(shop_id=shop_id, **SYSTEM_DEFAULTS)
         db.add(settings)
         db.commit()
         db.refresh(settings)
-    
     return settings
 
 def get_factory_defaults():
-    """
-    Returns the hardcoded system default values for operational rates.
-    """
     return SYSTEM_DEFAULTS
 
 def update_settings(db: Session, current_user: models.User, settings_data: schemas.SettingUpdate):
-    """
-    Updates the business parameters and operational rates in the database.
-    """
     shop_id = current_user.shop_id
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
-    
     update_data = settings_data.model_dump(exclude_unset=True)
 
     if not db_settings:
@@ -79,62 +59,40 @@ def update_settings(db: Session, current_user: models.User, settings_data: schem
     return db_settings
 
 def reset_to_system_defaults(db: Session, current_user: models.User):
-    """
-    Wipes custom operational rates and reverts the shop's DB record to
-    SYSTEM_DEFAULTS.
-    """
     shop_id = current_user.shop_id
     db_settings = db.query(models.Setting).filter(models.Setting.shop_id == shop_id).first()
-    
     if db_settings:
         for key, value in SYSTEM_DEFAULTS.items():
             if hasattr(db_settings, key):
                 setattr(db_settings, key, value)
-
         log_activity(
             db, shop_id,
             actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
             description="Reset Optimization Settings back to factory defaults"
         )
-
         db.commit()
         db.refresh(db_settings)
         return db_settings
-    
     return get_settings(db, shop_id)
 
 def get_pricing_for_booking(db: Session, shop_id: int):
-    """
-    Crucial helper for the Booking Modal.
-    Builds the pricing map dynamically from whatever ServiceType records
-    the shop owner has configured.
-    """
     settings = get_settings(db, shop_id)
-
     active_services = (
         db.query(models.ServiceType)
         .filter(models.ServiceType.shop_id == shop_id, models.ServiceType.is_active == True)
         .order_by(models.ServiceType.id.asc())
         .all()
     )
-
     pricing = {service.name: float(service.price) for service in active_services}
-
     logger.info(f"Fetching Live Pricing for Shop {shop_id}: {len(pricing)} active service(s) found.")
-
     pricing["detergent_fee"] = float(settings.supplies_cost_per_load)
     pricing["minimum_weight_kg"] = float(settings.minimum_weight_kg or 6.0)
-
     return pricing
 
 # --- SERVICE TYPE FUNCTIONS ---
 
 def get_service_types(db: Session, shop_id: int):
-    """
-    Returns all services (active and inactive) configured for a shop,
-    for display and management on the Optimization Settings page.
-    """
     return (
         db.query(models.ServiceType)
         .filter(models.ServiceType.shop_id == shop_id)
@@ -144,25 +102,16 @@ def get_service_types(db: Session, shop_id: int):
 
 def create_service_type(db: Session, current_user: models.User, service_data: schemas.ServiceTypeBase):
     """
-    Registers a new service (name + price + pricing_unit +
-    required_phases) for the shop. Prevents exact duplicate names
+    Registers a new service for the shop. Prevents exact duplicate names
     (case-insensitive) for the same shop.
 
-    UPDATED (per-machine timer feature): TINANGGAL ang duration_minutes
-    mula dito — wala na itong field sa ServiceTypeBase schema (nalipat
-    na ang cycle duration sa Machine.configured_duration_minutes,
-    itinatakda per-machine sa halip na per-service). Ang duration ng
-    isang cycle ay depende na sa ANONG MACHINE ang gagamitin, hindi sa
-    kung anong service ang binook — see booking_controller.py
-    (create_booking, assign_machines_to_booking, move_load_to_dryer)
-    kung saan kinukuha na nila ito mula sa machine record mismo.
-
-    NEW (multi-machine assignment feature): ini-save pa rin ang
-    service_data.required_phases ("wash_only" | "dry_only" |
-    "full_service") — ginagamit ito ni booking_controller.
-    assign_machines_to_booking() para malaman kung washers o dryers
-    ang dapat ipakita para sa unang machine assignment ng isang
-    booking na gumagamit ng service na ito.
+    UPDATED (per-service washer/dryer duration): dating iisang
+    duration_minutes lang, ngayon dalawa (washer_duration_minutes,
+    dryer_duration_minutes) — dahil magkaiba ang tunay na tagal ng
+    washing vs drying phase. Parehong required ang dalawa sa
+    ServiceTypeBase (default 45 bawat isa), kahit "wash_only" o
+    "dry_only" ang service — ang ibang value lang ang basta hindi
+    ginagamit sa flow (see booking_controller.py).
     """
     shop_id = current_user.shop_id
 
@@ -186,10 +135,12 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
         is_active=service_data.is_active,
         pricing_unit=service_data.pricing_unit,
         required_phases=service_data.required_phases,
+        washer_duration_minutes=service_data.washer_duration_minutes,
+        dryer_duration_minutes=service_data.dryer_duration_minutes,
         shop_id=shop_id
     )
     db.add(new_service)
-    db.flush()  # kailangan para makuha ang new_service.name bago mag-commit
+    db.flush()
 
     log_activity(
         db, shop_id,
@@ -197,7 +148,8 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
         actor_role=current_user.role,
         description=(
             f"Added a new service: {new_service.name} "
-            f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.required_phases})"
+            f"(₱{new_service.price} / {new_service.pricing_unit}, {new_service.required_phases}, "
+            f"wash {new_service.washer_duration_minutes}min / dry {new_service.dryer_duration_minutes}min)"
         )
     )
 
@@ -206,20 +158,6 @@ def create_service_type(db: Session, current_user: models.User, service_data: sc
     return new_service
 
 def update_service_type(db: Session, current_user: models.User, service_id: int, service_data: schemas.ServiceTypeUpdate):
-    """
-    Edits an existing service's name, price, active status,
-    pricing_unit, or required_phases.
-
-    NOTE (per-machine timer feature): wala nang duration_minutes field
-    dito dahil tinanggal na ito sa ServiceTypeUpdate schema — walang
-    dagdag na code na kailangan, ang generic update_data.items() loop
-    sa ibaba ay awtomatiko na lang na hindi na kasama ang duration
-    dahil wala na itong ipapasa mula sa schema.
-
-    NOTE (multi-machine assignment feature): required_phases ay
-    kasama na rin sa generic update_data.items() loop, dahil idinagdag
-    na ito bilang optional field sa ServiceTypeUpdate schema.
-    """
     shop_id = current_user.shop_id
 
     service = (
@@ -248,7 +186,7 @@ def update_service_type(db: Session, current_user: models.User, service_id: int,
                 detail=f"A service named '{update_data['name']}' already exists for this shop."
             )
 
-    service_label = service.name  # kunin bago mabago, para tama sa log kahit napalitan ang pangalan
+    service_label = service.name
 
     for key, value in update_data.items():
         setattr(service, key, value)
@@ -267,11 +205,7 @@ def update_service_type(db: Session, current_user: models.User, service_id: int,
     return service
 
 def delete_service_type(db: Session, current_user: models.User, service_id: int):
-    """
-    Removes a service from the shop's catalog.
-    """
     shop_id = current_user.shop_id
-
     service = (
         db.query(models.ServiceType)
         .filter(models.ServiceType.id == service_id, models.ServiceType.shop_id == shop_id)
@@ -279,26 +213,20 @@ def delete_service_type(db: Session, current_user: models.User, service_id: int)
     )
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service type not found.")
-
     service_name = service.name
     db.delete(service)
-
     log_activity(
         db, shop_id,
         actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=f"Removed service: {service_name}"
     )
-
     db.commit()
     return {"message": f"Service '{service_name}' removed successfully."}
 
 # --- ADD-ON FUNCTIONS ---
 
 def get_add_ons(db: Session, shop_id: int):
-    """
-    Returns all add-ons (active and inactive) configured for a shop.
-    """
     return (
         db.query(models.AddOn)
         .filter(models.AddOn.shop_id == shop_id)
@@ -307,17 +235,10 @@ def get_add_ons(db: Session, shop_id: int):
     )
 
 def create_add_on(db: Session, current_user: models.User, add_on_data: schemas.AddOnBase):
-    """
-    Registers a new add-on (name + price) for the shop.
-    """
     shop_id = current_user.shop_id
-
     existing = (
         db.query(models.AddOn)
-        .filter(
-            models.AddOn.shop_id == shop_id,
-            models.AddOn.name.ilike(add_on_data.name)
-        )
+        .filter(models.AddOn.shop_id == shop_id, models.AddOn.name.ilike(add_on_data.name))
         .first()
     )
     if existing:
@@ -325,31 +246,24 @@ def create_add_on(db: Session, current_user: models.User, add_on_data: schemas.A
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"An add-on named '{add_on_data.name}' already exists for this shop."
         )
-
     new_add_on = models.AddOn(
-        name=add_on_data.name,
-        price=add_on_data.price,
-        is_active=add_on_data.is_active,
-        shop_id=shop_id
+        name=add_on_data.name, price=add_on_data.price,
+        is_active=add_on_data.is_active, shop_id=shop_id
     )
     db.add(new_add_on)
     db.flush()
-
     log_activity(
         db, shop_id,
         actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=f"Added a new add-on: {new_add_on.name} (₱{new_add_on.price})"
     )
-
     db.commit()
     db.refresh(new_add_on)
     return new_add_on
 
 def update_add_on(db: Session, current_user: models.User, add_on_id: int, add_on_data: schemas.AddOnUpdate):
-    """Edits an existing add-on's name, price, or active status."""
     shop_id = current_user.shop_id
-
     add_on = (
         db.query(models.AddOn)
         .filter(models.AddOn.id == add_on_id, models.AddOn.shop_id == shop_id)
@@ -357,9 +271,7 @@ def update_add_on(db: Session, current_user: models.User, add_on_id: int, add_on
     )
     if not add_on:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Add-on not found.")
-
     update_data = add_on_data.model_dump(exclude_unset=True)
-
     if "name" in update_data:
         duplicate = (
             db.query(models.AddOn)
@@ -375,12 +287,9 @@ def update_add_on(db: Session, current_user: models.User, add_on_id: int, add_on
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"An add-on named '{update_data['name']}' already exists for this shop."
             )
-
     add_on_label = add_on.name
-
     for key, value in update_data.items():
         setattr(add_on, key, value)
-
     if update_data:
         changed_fields = ", ".join(update_data.keys())
         log_activity(
@@ -389,17 +298,12 @@ def update_add_on(db: Session, current_user: models.User, add_on_id: int, add_on
             actor_role=current_user.role,
             description=f"Updated add-on: {add_on_label} ({changed_fields})"
         )
-
     db.commit()
     db.refresh(add_on)
     return add_on
 
 def delete_add_on(db: Session, current_user: models.User, add_on_id: int):
-    """
-    Removes an add-on from the shop's catalog.
-    """
     shop_id = current_user.shop_id
-
     add_on = (
         db.query(models.AddOn)
         .filter(models.AddOn.id == add_on_id, models.AddOn.shop_id == shop_id)
@@ -407,26 +311,20 @@ def delete_add_on(db: Session, current_user: models.User, add_on_id: int):
     )
     if not add_on:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Add-on not found.")
-
     add_on_name = add_on.name
     db.delete(add_on)
-
     log_activity(
         db, shop_id,
         actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=f"Removed add-on: {add_on_name}"
     )
-
     db.commit()
     return {"message": f"Add-on '{add_on_name}' removed successfully."}
 
 # --- PROMO CODE FUNCTIONS ---
 
 def get_promo_codes(db: Session, shop_id: int):
-    """
-    Returns all promo codes (active and inactive) configured for a shop.
-    """
     return (
         db.query(models.PromoCode)
         .filter(models.PromoCode.shop_id == shop_id)
@@ -434,58 +332,34 @@ def get_promo_codes(db: Session, shop_id: int):
         .all()
     )
 
-
 def _generate_unique_promo_code(db: Session, shop_id: int, discount_type: str, discount_value: float) -> str:
-    """
-    Gumagawa ng random na promo code, halimbawa "SAVE20-X7K9"
-    (percent discount) o "PROMO150-A3B8" (fixed amount discount).
-    """
     prefix = "SAVE" if discount_type == "percent" else "PROMO"
     value_part = str(int(discount_value))
-
     for _ in range(10):
         suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
         candidate_code = f"{prefix}{value_part}-{suffix}"
-
         existing = (
             db.query(models.PromoCode)
-            .filter(
-                models.PromoCode.shop_id == shop_id,
-                models.PromoCode.code == candidate_code
-            )
+            .filter(models.PromoCode.shop_id == shop_id, models.PromoCode.code == candidate_code)
             .first()
         )
         if not existing:
             return candidate_code
-
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Could not generate a unique promo code. Please try again."
     )
 
-
 def create_promo_code(db: Session, current_user: models.User, promo_data: schemas.PromoCodeGenerateInput):
-    """
-    Registers a new promo code para sa shop, AUTO-GENERATED ang `code`.
-    """
     shop_id = current_user.shop_id
-
-    generated_code = _generate_unique_promo_code(
-        db, shop_id, promo_data.discount_type, promo_data.discount_value
-    )
-
+    generated_code = _generate_unique_promo_code(db, shop_id, promo_data.discount_type, promo_data.discount_value)
     new_promo = models.PromoCode(
-        code=generated_code,
-        discount_type=promo_data.discount_type,
-        discount_value=promo_data.discount_value,
-        is_active=promo_data.is_active,
-        max_uses=promo_data.max_uses,
-        expires_at=promo_data.expires_at,
-        shop_id=shop_id
+        code=generated_code, discount_type=promo_data.discount_type,
+        discount_value=promo_data.discount_value, is_active=promo_data.is_active,
+        max_uses=promo_data.max_uses, expires_at=promo_data.expires_at, shop_id=shop_id
     )
     db.add(new_promo)
     db.flush()
-
     log_activity(
         db, shop_id,
         actor_name=current_user.full_name or current_user.email,
@@ -495,16 +369,12 @@ def create_promo_code(db: Session, current_user: models.User, promo_data: schema
             f"({new_promo.discount_value}{'%' if new_promo.discount_type == 'percent' else '₱'} off)"
         )
     )
-
     db.commit()
     db.refresh(new_promo)
     return new_promo
 
-
 def update_promo_code(db: Session, current_user: models.User, promo_id: int, promo_data: schemas.PromoCodeUpdate):
-    """Edits an existing promo code's details."""
     shop_id = current_user.shop_id
-
     promo = (
         db.query(models.PromoCode)
         .filter(models.PromoCode.id == promo_id, models.PromoCode.shop_id == shop_id)
@@ -512,9 +382,7 @@ def update_promo_code(db: Session, current_user: models.User, promo_id: int, pro
     )
     if not promo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo code not found.")
-
     update_data = promo_data.model_dump(exclude_unset=True)
-
     if "code" in update_data:
         duplicate = (
             db.query(models.PromoCode)
@@ -530,12 +398,9 @@ def update_promo_code(db: Session, current_user: models.User, promo_id: int, pro
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"A promo code '{update_data['code']}' already exists for this shop."
             )
-
     promo_label = promo.code
-
     for key, value in update_data.items():
         setattr(promo, key, value)
-
     if update_data:
         changed_fields = ", ".join(update_data.keys())
         log_activity(
@@ -544,15 +409,12 @@ def update_promo_code(db: Session, current_user: models.User, promo_id: int, pro
             actor_role=current_user.role,
             description=f"Updated promo code: {promo_label} ({changed_fields})"
         )
-
     db.commit()
     db.refresh(promo)
     return promo
 
 def delete_promo_code(db: Session, current_user: models.User, promo_id: int):
-    """Removes a promo code from the shop's catalog."""
     shop_id = current_user.shop_id
-
     promo = (
         db.query(models.PromoCode)
         .filter(models.PromoCode.id == promo_id, models.PromoCode.shop_id == shop_id)
@@ -560,37 +422,28 @@ def delete_promo_code(db: Session, current_user: models.User, promo_id: int):
     )
     if not promo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo code not found.")
-
     promo_code = promo.code
     db.delete(promo)
-
     log_activity(
         db, shop_id,
         actor_name=current_user.full_name or current_user.email,
         actor_role=current_user.role,
         description=f"Removed promo code: {promo_code}"
     )
-
     db.commit()
     return {"message": f"Promo code '{promo_code}' removed successfully."}
 
 # --- PROFILE FUNCTIONS ---
 
 def update_shop_profile(db: Session, current_user: models.User, profile_data: schemas.ShopProfileUpdate):
-    """
-    Updates the shop's contact information and business profile.
-    """
     shop_id = current_user.shop_id
-
     db_shop = db.query(models.Shop).filter(models.Shop.id == shop_id).first()
     if not db_shop:
         return None
-    
     update_data = profile_data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         if hasattr(db_shop, key):
             setattr(db_shop, key, value)
-
     if update_data:
         changed_fields = ", ".join(update_data.keys())
         log_activity(
@@ -599,17 +452,9 @@ def update_shop_profile(db: Session, current_user: models.User, profile_data: sc
             actor_role=current_user.role,
             description=f"Updated shop profile ({changed_fields})"
         )
-
     db.commit()
     db.refresh(db_shop)
     return db_shop
 
-# REMOVED (Supabase Auth migration): update_user_password() — dead code,
-# password change ay Supabase Auth SDK na ang bahala.
-
 def get_shop_profile(db: Session, shop_id: int):
-    """
-    Retrieves the shop's own profile info (name, address, delivery
-    settings) for display before editing.
-    """
     return db.query(models.Shop).filter(models.Shop.id == shop_id).first()
