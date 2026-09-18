@@ -3,6 +3,25 @@ from fastapi import WebSocket
 from app.database import SessionLocal
 from app import models
 
+# NEW — well-known broadcast event type constants ("type" field of the
+# dict passed to manager.broadcast()), so callers across the codebase
+# (booking_controller.py) don't hardcode magic strings scattered in
+# several places. Add new event types here as the system grows.
+EVENT_NEW_BOOKING_REQUEST = "new_booking_request"
+EVENT_BOOKING_CANCELLED_BY_CUSTOMER = "booking_cancelled_by_customer"
+# NEW (Weighing / Finalize Pricing feature) — fired by
+# booking_controller.finalize_booking_pricing() after staff finalizes
+# the actual weight/price of a mobile booking. This is SHOP-scoped only
+# (see ConnectionManager docstring below) — it refreshes the Service
+# Terminal's own "Awaiting Weighing" panel in real time. It does NOT by
+# itself notify the customer's mobile app; that side of the
+# notification uses the Notification table (notification_controller.
+# create_notification()), since this ConnectionManager only tracks
+# Service Terminal connections, not individual customer devices/sessions.
+# A true customer-side push (WebSocket or FCM) would need a separate
+# customer-scoped channel, which does not exist yet in this codebase.
+EVENT_BOOKING_PRICE_FINALIZED = "booking_price_finalized"
+
 
 class ConnectionManager:
     """
@@ -18,6 +37,21 @@ class ConnectionManager:
     True); kapag naubos na ang lahat ng connections, "offline" (False).
     Ginagamit ito ng mobile app para i-disable ang "Book Now" kung walang
     tumatanggap ng booking sa kasalukuyan.
+
+    NOTE (Weighing / Finalize Pricing feature — reconciliation): ang
+    klase na ito ay eksklusibong SHOP-scoped — bawat entry sa
+    active_connections ay isang SHOP (maraming Service Terminal devices
+    ng shop na iyon), HINDI indibidwal na customer. Kaya ang
+    EVENT_BOOKING_PRICE_FINALIZED na broadcast (see finalize_
+    booking_pricing() sa booking_controller.py) ay dumarating lang sa
+    Service Terminal, hindi sa mobile app ng customer. Para sa
+    "totoong" real-time push papunta sa customer (gaya ng inilarawan sa
+    orihinal na Admin Dashboard spec bilang FCM/WebSocket listener),
+    kailangan ng bagong, hiwalay na customer-scoped connection registry
+    — wala pa nito ang codebase na ito. Sa ngayon, ang customer-facing
+    "real-time"-ish update ay sa pamamagitan ng Notification table
+    (notification_controller.create_notification()), na pino-poll ng
+    mobile app sa GET /notifications at GET /bookings/mine.
 
     Gumagamit ng SessionLocal() direkta (hindi Depends(get_db)) dahil
     walang request-scoped dependency injection sa loob ng WebSocket
@@ -57,9 +91,13 @@ class ConnectionManager:
         Ipinapadala ang message sa LAHAT ng naka-connect na Service
         Terminal instance ng shop na ito. Kung walang naka-connect
         (walang bukas na Service Terminal tab), tahimik lang itong
-        walang epekto — hindi error, dahil GET /bookings/awaiting-approval
-        pa rin ang sisiguradong makikita ang booking sa susunod na page
-        load/refresh.
+        walang epekto — hindi error, dahil GET /bookings/awaiting-approval,
+        GET /bookings/awaiting-weighing, atbp. pa rin ang sisiguradong
+        makikita ang booking sa susunod na page load/refresh.
+
+        `message["type"]` ay dapat isa sa EVENT_* constants sa itaas
+        (o katumbas na string) — see doon para sa listahan ng kasalukuyang
+        event types at kung sino ang dapat makinig sa bawat isa.
         """
         connections = self.active_connections.get(shop_id, [])
         dead_connections = []

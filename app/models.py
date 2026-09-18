@@ -24,6 +24,22 @@ class Shop(Base):
 
     is_online = Column(Boolean, default=False, nullable=False, server_default="false")
 
+    # (Online Payment feature) — public URLs (Supabase Storage, bucket
+    # "payment-qr-codes") ng QR code ng shop para sa GCash at PayMaya.
+    # Ang binary na larawan mismo ay NASA Supabase Storage, hindi dito —
+    # dito lang naka-save ang LINK papunta doon, gaya ng ginawa na rin
+    # sa proof_of_payment_url ng Booking sa ibaba.
+    #
+    # NOTE (reconciliation na may ibang spec draft): may bagong spec na
+    # dumaan na gustong gumamit ng iisang generic `qr_code_url` (National
+    # QR Ph) sa halip na hiwalay na GCash/PayMaya. Sinadyang HINDI ito
+    # sinunod — pinanatili ang dalawang hiwalay na field, dahil mas
+    # granular ito para sa Record Sales reporting (alam pa rin kung saan
+    # talaga pumunta ang bayad) at gumagana na ito sa
+    # OptimizationSettings.jsx / PaymentVerificationModal.jsx.
+    gcash_qr_url = Column(String, nullable=True)
+    paymaya_qr_url = Column(String, nullable=True)
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
@@ -47,6 +63,8 @@ class Shop(Base):
             "has_delivery": self.has_delivery,
             "delivery_fee": self.delivery_fee,
             "is_online": self.is_online,
+            "gcash_qr_url": self.gcash_qr_url,
+            "paymaya_qr_url": self.paymaya_qr_url,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
@@ -133,6 +151,15 @@ class ServiceType(Base):
     (An earlier version of this feature tried making duration a
     per-MACHINE setting instead — Machine.configured_duration_minutes —
     but that was reverted in favor of this per-service-phase design.)
+
+    NOTE (reconciliation — Weighing/Finalize Pricing feature): may
+    bagong spec na gustong magdagdag ng hiwalay na "Shop Rate per kg"
+    setting para sa staff weighing modal (Module B). SINADYANG HINDI
+    gumawa ng bagong column dito — ang `price` (kasabay ng
+    `pricing_unit`) NA MISMO dito ang ginagamit bilang "rate" — kapareho
+    ito ng ginagamit na ng buong booking flow (create_booking,
+    create_customer_booking) para sa pricing computation, kaya isang
+    pinagmumulan lang ng presyo sa buong sistema.
     """
     __tablename__ = "service_types"
 
@@ -176,7 +203,14 @@ class ServiceType(Base):
 
 class AddOn(Base):
     """
-    Per-shop na listahan ng optional add-ons.
+    Per-shop na listahan ng optional add-ons (pre-configured, hal.
+    "Fabric Softener" — ₱20). Ginagamit ito sa MOBILE CHECKOUT (customer
+    pipili mula rito bago pa man ma-timbang).
+
+    NOTE: hindi ito ang parehong bagay sa `Booking.weighing_addon_charges`
+    (see Booking sa ibaba) — yung isa ay ad-hoc, hindi naka-catalog na
+    extra charge na itina-type ng staff mismo habang tinitimbang ang
+    laundry (hal. "sobrang dumi, extra ₱15"), hindi kinukuha rito.
     """
     __tablename__ = "add_ons"
 
@@ -356,11 +390,6 @@ class Machine(Base):
     remaining_time = Column(Integer, default=0) 
     total_cycles = Column(Integer, default=0)
 
-    # NEW (per-machine timer feature) — kept: still needed to compute
-    # the live countdown regardless of where the duration NUMBER comes
-    # from. (configured_duration_minutes was tried and reverted — see
-    # ServiceType.washer_duration_minutes/dryer_duration_minutes below,
-    # duration is per-SERVICE again, split by phase.)
     cycle_started_at = Column(DateTime(timezone=True), nullable=True)
     
     net_profit_accumulated = Column(Float, default=0.0)
@@ -406,6 +435,57 @@ class Booking(Base):
     at paid_at para masubaybayan kung bayad na o hindi ang isang booking
     (Walk-in cash o Mobile COD/Online) — ginagamit ito sa Record Sales
     page (filter/column) at sa "Mark as Paid" action ng staff.
+
+    UPDATED (Online Payment feature — GCash/PayMaya QR + Proof of
+    Payment): ang payment_status ay hindi na lang "unpaid"/"paid" —
+    dalawa pang bagong value: "pending_verification" (customer nag-
+    upload na ng proof of payment sa Supabase Storage, hinihintay pa
+    lang i-verify/i-approve ng shop staff) at "rejected" (tinanggihan
+    ng staff ang proof, may kasamang payment_rejection_reason). Walang
+    DB-level enum/check constraint dito — plain String column pa rin,
+    kaya ang bagong values ay hindi nangangailangan ng schema migration
+    para sa column mismo, values lang ang bago.
+
+    NEW (Weighing / Finalize Pricing feature — reconciled mula sa bagong
+    Admin Dashboard spec): dating iisang `weight`/`total_price` lang ang
+    meron, ipinapasok na FINAL agad sa paggawa ng booking. Ngayon,
+    hinahati na ito sa ESTIMATED (ibinigay ng customer sa mobile
+    checkout, hula lang) at FINAL (itinakda ng staff PAGKATAPOS ng
+    aktwal na pagtimbang — see booking_controller.finalize_booking_
+    pricing(), hindi pa ginagawa, susunod na hakbang). `weight` at
+    `total_price` sa itaas ay NANATILING ang AUTHORITATIVE/current
+    values na ginagamit ng buong existing system (Record Sales, machine
+    telemetry, Activity Log, atbp) — sine-sync na lang sila papunta sa
+    `final_weight`/`final_price` sa sandaling ma-finalize ng staff, para
+    hindi masira ang kahit anong existing code na umaasa pa sa
+    `weight`/`total_price`.
+      - estimated_weight / estimated_price: mula sa customer mismo sa
+        checkout (mobile app lang — laging null para sa walk-in/terminal
+        bookings, dahil doon aktwal na ang binibigay agad).
+      - final_weight / final_price: itinakda ng staff sa
+        PaymentPricingModal/weighing step. Kapag naitakda na ito,
+        pinapantayan din ang `weight`/`total_price`.
+      - weighing_addon_charges: ad-hoc na extra na charge (₱) na
+        itina-type ng staff HABANG tinitimbang (hal. "sobrang dumi"),
+        HIWALAY sa naka-catalog na `AddOn`/`add_ons_used` (na pinipili
+        ng customer mismo sa checkout).
+      - weighed_at: kailan aktwal na na-finalize ng staff ang presyo.
+
+    NEW STATUS VALUES (Weighing feature) — `status` ay plain String pa
+    rin, walang bagong column/migration ang kinakailangan, values lang
+    ang bago:
+      - "Awaiting Weighing": mobile booking na na-ACCEPT na ng shop
+        (dating dumaan sa "Awaiting Approval" → Accept, gaya ng dati),
+        pero hinihintay pa ng staff timbangin at i-finalize ang presyo
+        (kapalit ng deretsong pagpunta sa "Pending").
+      - "Awaiting Payment": na-finalize na ng staff ang presyo, AT
+        online (gcash/paymaya) ang payment_method — hinihintay pa ang
+        customer magbayad/mag-upload ng proof (payment_status pa rin
+        ang humahawak ng verification state, hindi ito).
+      Para sa cash/cod na payment_method, deretso na sa "Pending"
+      (existing value) mula sa "Awaiting Weighing" — walang
+      "Awaiting Payment" na kailangan, dahil bayad/babayaran nang
+      harapan.
 
     NOTE (multi-machine assignment feature): ang `washer_id`/`dryer_id`
     columns dito ay LEGACY na ngayon — dating iisang washer + iisang
@@ -459,9 +539,43 @@ class Booking(Base):
     # --- Payment tracking (Paid/Unpaid feature) ---
     # payment_method: "cash" (walk-in/dropoff), "cod" (delivery), "gcash", "paymaya"
     payment_method = Column(String, nullable=True, default="cash")
-    # payment_status: "unpaid", "pending_verification" (online, di pa na-verify), "paid"
+    # payment_status: "unpaid", "pending_verification" (online, di pa
+    # na-verify), "paid", "rejected" (online, tinanggihan ng staff —
+    # see payment_rejection_reason sa ibaba)
     payment_status = Column(String, nullable=False, default="unpaid", server_default="unpaid")
     paid_at = Column(DateTime(timezone=True), nullable=True)
+
+    # (Online Payment feature) — public URL (Supabase Storage, bucket
+    # "payment-proofs") ng resibo/screenshot na in-upload ng customer
+    # bilang proof of GCash/PayMaya payment. Tulad ng QR URLs sa Shop,
+    # LINK lang ang naka-save dito — ang binary image mismo ay nasa
+    # Supabase Storage.
+    proof_of_payment_url = Column(String, nullable=True)
+
+    # (Online Payment feature) — dahilan kung bakit tinanggihan ng
+    # staff ang isang online payment proof (reject_payment() sa
+    # booking_controller.py). Parehong pattern ng decline_reason sa itaas.
+    payment_rejection_reason = Column(String, nullable=True)
+
+    # --- NEW (Weighing / Finalize Pricing feature) ---
+    # Estimate mula sa customer sa mobile checkout — hula lang, laging
+    # null para sa walk-in/terminal bookings.
+    estimated_weight = Column(Float, nullable=True)
+    estimated_price = Column(Float, nullable=True)
+
+    # Itinakda ng staff PAGKATAPOS ng aktwal na pagtimbang. Kapag
+    # naitakda na ito, pinapantayan din ang `weight`/`total_price` sa
+    # itaas (see docstring ng klase para sa buong paliwanag).
+    final_weight = Column(Float, nullable=True)
+    final_price = Column(Float, nullable=True)
+
+    # Ad-hoc na extra charge (₱) na itina-type ng staff habang
+    # tinitimbang — HIWALAY sa naka-catalog na add_ons_used sa ibaba.
+    weighing_addon_charges = Column(Float, nullable=True, default=0.0)
+
+    # Kailan aktwal na na-finalize ng staff ang presyo (null hanggang
+    # matawag ang finalize-pricing action).
+    weighed_at = Column(DateTime(timezone=True), nullable=True)
 
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -531,11 +645,19 @@ class Booking(Base):
             "payment_method": self.payment_method,
             "payment_status": self.payment_status,
             "paid_at": self.paid_at.isoformat() if self.paid_at else None,
+            "proof_of_payment_url": self.proof_of_payment_url,
+            "payment_rejection_reason": self.payment_rejection_reason,
+            # NEW (Weighing / Finalize Pricing feature)
+            "estimated_weight": self.estimated_weight,
+            "estimated_price": self.estimated_price,
+            "final_weight": self.final_weight,
+            "final_price": self.final_price,
+            "weighing_addon_charges": self.weighing_addon_charges,
+            "weighed_at": self.weighed_at.isoformat() if self.weighed_at else None,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,
             "dryer_number": self.dryer.machine_number if self.dryer else None,
-            # NEW — per-load machine assignments, sorted by load_number.
             "machine_assignments": [a.to_dict() for a in self.machine_assignments],
             "shop_id": self.shop_id,
             "booking_timestamp": self.booking_timestamp.isoformat() if self.booking_timestamp else None,
@@ -568,13 +690,6 @@ class BookingMachineAssignment(Base):
     washer = relationship("Machine", foreign_keys=[washer_id])
     dryer = relationship("Machine", foreign_keys=[dryer_id])
 
-    # NEW — read-only convenience properties, HINDI mga DB column.
-    # Kailangan ito para makuha ni Pydantic ang washer_number/
-    # dryer_number bilang plain attribute (see MachineAssignmentResponse
-    # sa schemas.py, na gumagamit ng ConfigDict(from_attributes=True)) —
-    # kung wala ito, mag-r-raise ng AttributeError si Pydantic dahil
-    # walang totoong column na ganito, laman lang ito ng to_dict() sa
-    # ibaba. Parehong pattern gaya ng Booking.shop_name sa itaas.
     @property
     def washer_number(self):
         return self.washer.machine_number if self.washer else None

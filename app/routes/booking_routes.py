@@ -5,7 +5,8 @@ from app.database import get_db
 from app.schemas import (
     BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine,
     CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest,
-    PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput
+    PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput,
+    PaymentRejectRequest, BookingFinalizePricingRequest
 )
 from app.controller import booking_controller
 from app import models
@@ -38,7 +39,12 @@ def get_active_bookings(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Returns all non-finalized bookings (Pending + In Progress) for the Service Terminal."""
+    """
+    Returns all non-finalized bookings for the Service Terminal
+    (excludes Claimed/Cancelled/Awaiting Approval/Declined, AND —
+    Weighing feature — Awaiting Weighing/Awaiting Payment, which have
+    their own panels/modals instead).
+    """
     return booking_controller.get_active_bookings(db, current_user.shop_id)
 
 
@@ -119,9 +125,85 @@ def mark_paid(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Staff-triggered 'Mark as Paid' for cash/COD bookings. Manual trigger, no fixed timing."""
+    """
+    Staff-triggered 'Mark as Paid' for cash/COD bookings, and the
+    "Approve" action for GCash/PayMaya bookings sitting at
+    'pending_verification'. Manual trigger, no fixed timing.
+
+    UPDATED (Weighing feature): if the booking is currently 'Awaiting
+    Payment', marking it paid also auto-routes it to 'Pending', making
+    it visible in the Service Terminal for machine assignment.
+    """
     return booking_controller.mark_booking_as_paid(
         db, booking_id, payment_data, current_user
+    )
+
+
+@router.patch("/{booking_id}/reject-payment", response_model=BookingResponse)
+def reject_payment(
+    booking_id: int,
+    reject_data: PaymentRejectRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (Online Payment feature) — Staff-triggered "Reject" action for a
+    GCash/PayMaya payment proof sitting at 'pending_verification'.
+    Reverts payment_status to 'unpaid' and saves the rejection reason.
+    """
+    return booking_controller.reject_payment(
+        db, booking_id, reject_data.reason, current_user
+    )
+
+
+@router.get("/pending-verification", response_model=List[BookingResponse])
+def get_pending_verification_bookings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (Online Payment feature) — Returns bookings for this shop whose
+    payment_status is 'pending_verification'. Backs the "Pending Payment
+    Verification" panel in the Service Terminal.
+    """
+    return booking_controller.get_pending_verification_bookings(db, current_user.shop_id)
+
+
+# =========================================================
+# WEIGHING / FINALIZE PRICING ENDPOINTS (NEW — Admin Dashboard spec,
+# Module B: "Mobile Booking Notification & Pricing Modal")
+# =========================================================
+
+@router.get("/awaiting-weighing", response_model=List[BookingResponse])
+def get_awaiting_weighing_bookings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Returns accepted mobile bookings for this shop that are
+    'Awaiting Weighing' — i.e. not yet weighed/priced by staff. Backs
+    the new pricing-modal notification panel in the Service Terminal.
+    """
+    return booking_controller.get_awaiting_weighing_bookings(db, current_user.shop_id)
+
+
+@router.patch("/{booking_id}/finalize-pricing", response_model=BookingResponse)
+async def finalize_pricing(
+    booking_id: int,
+    pricing_data: BookingFinalizePricingRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Staff submits the actual weighed quantity (+ optional ad-hoc
+    add-on charges) for a booking that is 'Awaiting Weighing'. Computes
+    and saves the final price, then routes the booking to 'Pending'
+    (cash/cod) or 'Awaiting Payment' (gcash/paymaya). Notifies the
+    customer and broadcasts a 'booking_price_finalized' event to the
+    shop's connected Service Terminal instance(s).
+    """
+    return await booking_controller.finalize_booking_pricing(
+        db, booking_id, pricing_data, current_user
     )
 
 
@@ -166,7 +248,12 @@ def accept_customer_booking(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Accepts a customer-submitted booking — moves 'Awaiting Approval' to 'Pending'."""
+    """
+    Accepts a customer-submitted booking — moves 'Awaiting Approval' to
+    'Awaiting Weighing' (Weighing feature: no longer straight to
+    'Pending' — staff must finalize the actual weight/price first via
+    PATCH /{id}/finalize-pricing).
+    """
     return booking_controller.accept_customer_booking(db, booking_id, current_user)
 
 

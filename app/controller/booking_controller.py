@@ -1,10 +1,16 @@
 from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage, BookingMachineAssignment
 from app.schemas import (
     BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
-    MachineAssignmentInput, MoveLoadToDryerInput
+    MachineAssignmentInput, MoveLoadToDryerInput, PaymentRejectRequest,
+    BookingFinalizePricingRequest
 )
 from app.services.prediction_service import PredictionService
-from app.services.ws_manager import manager
+from app.services.ws_manager import (
+    manager,
+    EVENT_NEW_BOOKING_REQUEST,
+    EVENT_BOOKING_CANCELLED_BY_CUSTOMER,
+    EVENT_BOOKING_PRICE_FINALIZED,
+)
 from app.controller import inventory_controller
 from app.controller import notification_controller
 from app.controller.activity_controller import log_activity
@@ -57,6 +63,15 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     — ang pag-mark bilang "Paid" ay hiwalay at manual na action ng staff
     (see mark_booking_as_paid() sa ibaba).
 
+    UPDATED (Online Payment feature — GCash/PayMaya QR + Proof of
+    Payment): kung ang payment_method ay "gcash" o "paymaya" AT may
+    ibinigay na booking_data.proof_of_payment_url, ang INITIAL
+    payment_status ay "pending_verification" sa halip na "unpaid" —
+    ibig sabihin nag-upload na ang staff/customer ng resibo, hinihintay
+    na lang i-verify ng shop (see get_pending_verification_bookings()
+    at reject_payment() sa ibaba). Para sa "cash"/"cod", walang binago
+    — "unpaid" pa rin ang default.
+
     NEW (walk-in promo code support): kung may booking_data.promo_code,
     ang booking_data.total_price ay tinuturing na PRE-DISCOUNT subtotal
     — ang totoong discount ay kino-compute DITO SA BACKEND gamit ang
@@ -68,6 +83,16 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     (makikita sa Record Sales / Booking Details). Kung invalid/expired/
     ubos na ang code, mag-ra-raise agad ng HTTPException dito bago pa
     man magsimula ang booking creation.
+
+    NOTE (Weighing / Finalize Pricing feature): WALANG binago dito —
+    ang staff, sa Service Terminal, ay direktang naglalagay na ng
+    ACTUAL na weight/presyo sa mismong paggawa ng booking (harapan,
+    walang "estimate" na hiwalay). Kaya walang estimated_weight/
+    estimated_price/final_weight/final_price na naise-set dito —
+    ang buong konseptong iyon ay para lang sa MOBILE APP self-booking
+    flow (create_customer_booking() + finalize_booking_pricing() sa
+    ibaba), kung saan malayo ang customer sa shop kapag gumawa ng
+    booking, kaya hula lang muna ang unang presyo.
 
     NOTE: no is_online gate here — this is a staff-created booking from
     the Service Terminal itself, i.e. the terminal is, by definition,
@@ -132,6 +157,15 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     ]
     initial_status = "In Progress" if assigned_ids else "Pending"
 
+    # --- 4.1 DETERMINE INITIAL PAYMENT STATUS (NEW — Online Payment feature) ---
+    # "gcash"/"paymaya" + may proof of payment na naka-upload na →
+    # "pending_verification" (naghihintay ng staff approval). Lahat ng
+    # iba pa (cash/cod, o online pero walang proof pa) → "unpaid",
+    # gaya ng dating default.
+    initial_payment_status = "unpaid"
+    if booking_data.payment_method in ("gcash", "paymaya") and booking_data.proof_of_payment_url:
+        initial_payment_status = "pending_verification"
+
     # --- 4.5 APPLY PROMO CODE (NEW — walk-in promo support) ---
     # Mirrors the mobile-app flow's use of _apply_promo_code(): the
     # discount is ALWAYS computed server-side from booking_data.total_price
@@ -166,6 +200,9 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         shop_id=shop_id,
         source="terminal",
         payment_method=booking_data.payment_method or "cash",
+        # NEW (Online Payment feature)
+        payment_status=initial_payment_status,
+        proof_of_payment_url=booking_data.proof_of_payment_url,
         promo_code=promo_record.code if promo_record else None,
         discount_amount=discount_amount,
         booking_timestamp=actual_booking_time,
@@ -830,6 +867,21 @@ def get_active_bookings(db: Session, shop_id: int):
     An "Awaiting Approval" booking only appears here once it has been
     Accepted (status becomes "Pending", same as any manual booking).
 
+    UPDATED (Weighing / Finalize Pricing feature): idinagdag din sa
+    exclusion list ang "Awaiting Weighing" at "Awaiting Payment" — mga
+    mobile booking na naka-accept na pero HINDI pa dapat pumasok sa
+    machine-assignment queue:
+      - "Awaiting Weighing": wala pang aktwal na weight/presyo, kaya
+        walang kahit anong ma-a-assign na machine pa dito. Ipinapakita
+        ito sa hiwalay na panel (see get_awaiting_weighing_bookings()
+        sa ibaba), gamit ang finalize_booking_pricing() para tuluyan
+        itong pumasok dito.
+      - "Awaiting Payment": na-finalize na ang presyo pero online ang
+        payment method at hindi pa nababayaran — sadyang hinahawakan
+        muna bago pumasok sa operational queue (see mark_booking_as_paid()
+        sa ibaba, doon nangyayari ang awtomatikong paglipat papuntang
+        "Pending" kapag na-verify na ang bayad).
+
     NOTE: hindi ito ginagalaw ng Activity Log — read-only na operation
     ito (walang binabago), kaya walang kailangang i-log dito. Pinanatili
     ang shop_id-only signature (hindi current_user) dahil hindi ito
@@ -846,7 +898,11 @@ def get_active_bookings(db: Session, shop_id: int):
         )
         .filter(
             Booking.shop_id == shop_id,
-            Booking.status.notin_(["Claimed", "Cancelled", "Awaiting Approval", "Declined"])
+            Booking.status.notin_([
+                "Claimed", "Cancelled", "Awaiting Approval", "Declined",
+                # NEW (Weighing / Finalize Pricing feature)
+                "Awaiting Weighing", "Awaiting Payment",
+            ])
         )
         .order_by(Booking.booking_timestamp.desc())
         .all()
@@ -1030,14 +1086,33 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
     """
     Manual na "Mark as Paid" action ng staff. Ginagamit ito sa parehong
     Walk-in (cash, dropoff) at Mobile COD bookings, kung saan ang staff
-    mismo ang nagko-confirm na natanggap na ang bayad — walang automated
-    payment gateway verification pa dito (ang GCash/PayMaya QR +
-    proof-upload na flow ay hiwalay na future phase).
+    mismo ang nagko-confirm na natanggap na ang bayad. Ginagamit din ito
+    ngayon (Online Payment feature) para sa GCash/PayMaya bookings na
+    "pending_verification" — ang "Approve" action sa
+    PaymentVerificationModal ay tumatawag din dito (parehong "Mark as
+    Paid" endpoint, walang bagong function na kinakailangan).
+
+    payment_method ay OPTIONAL — kung walang ibinigay (None), hindi na
+    ito ginagalaw, panatilihin ang existing value ng booking. Ito ang
+    nagpoprotekta sa "Approve" action: kapag nag-a-approve ng
+    gcash/paymaya booking, hindi na kailangang mag-alala na baka
+    ma-reset ang payment_method pabalik sa "cash".
 
     Staff mismo ang nagde-decide kung KAILAN i-mark bilang paid — walang
     naka-bind na fixed na timing (hal. pwede itong gawin bago pa man
     simulan ang laundry, o pagkatapos ng buong service, depende sa
     proseso ng bawat shop).
+
+    UPDATED (Weighing / Finalize Pricing feature): kung ang booking na
+    ito ay kasalukuyang nasa status na "Awaiting Payment" (ibig sabihin,
+    na-finalize na ang presyo ng staff sa weighing step, online ang
+    payment method, at hinihintay lang ang pagbabayad), ang pagmamarka
+    dito bilang "paid" ay AWTOMATIKONG magpapalipat din sa
+    Booking.status papuntang "Pending" — ito ang "auto-route to Service
+    Terminal" na hiningi ng Module B/C ng Admin Dashboard spec: sa
+    sandaling mabayaran, dapat na itong pumasok sa normal na machine-
+    assignment queue (get_active_bookings() nang walang karagdagang
+    hakbang).
 
     Naka-scope sa parehong shop_id ng staff (current_user.shop_id) —
     hindi pwedeng i-mark ng isang shop ang booking ng ibang shop.
@@ -1061,9 +1136,18 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
             detail="This booking is already marked as paid."
         )
 
-    booking.payment_method = payment_data.payment_method
+    if payment_data.payment_method is not None:
+        booking.payment_method = payment_data.payment_method
     booking.payment_status = "paid"
     booking.paid_at = datetime.now(timezone.utc)
+
+    # NEW (Weighing / Finalize Pricing feature) — auto-route sa "Pending"
+    # kapag "Awaiting Payment" ang kasalukuyang status. Wala itong
+    # epekto sa mga booking na hindi dumaan sa weighing flow (hal.
+    # walk-in cash bookings), dahil "Pending"/"In Progress" na agad ang
+    # status ng mga iyon mula sa simula.
+    if booking.status == "Awaiting Payment":
+        booking.status = "Pending"
 
     try:
         log_activity(
@@ -1072,7 +1156,7 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
             actor_role=current_user.role,
             description=(
                 f"Marked booking for {booking.customer_name} as PAID "
-                f"(via {payment_data.payment_method})"
+                f"(via {booking.payment_method})"
             )
         )
 
@@ -1111,6 +1195,351 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
         )
 
 
+def reject_payment(db: Session, booking_id: int, reason: str, current_user: models.User):
+    """
+    NEW (Online Payment feature) — Kabaligtaran ng mark_booking_as_paid().
+    Ginagamit ito sa "Reject" action ng PaymentVerificationModal kapag
+    napansin ng staff na mali/hindi valid ang na-upload na proof of
+    payment (hal. maling amount, unclear na larawan, hindi tugma ang
+    reference number).
+
+    Itinatakda pabalik ang payment_status sa "unpaid" (hindi
+    pinapanatili bilang "pending_verification" — kailangan ulit
+    mag-upload/mag-ayos ang customer), isinasave ang
+    payment_rejection_reason, at gumagawa ng customer notification
+    (type "payment_rejected") kung may customer_id ang booking.
+
+    NOTE (Weighing / Finalize Pricing feature): sinasadyang HINDI
+    ginagalaw ang Booking.status dito — kung "Awaiting Payment" ang
+    booking bago ma-reject, mananatili itong "Awaiting Payment" (hindi
+    ito lilipat sa "Pending" o kahit saan), dahil kailangan pang
+    mag-resubmit ng bagong proof of payment ang customer bago ito
+    tuluyang makapasok sa operational queue.
+
+    Naka-scope sa parehong shop_id ng staff, gaya ng mark_booking_as_paid().
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.payment_status != "pending_verification":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot reject a payment with status '{booking.payment_status}'. "
+                "Only payments awaiting verification can be rejected."
+            )
+        )
+
+    booking.payment_status = "unpaid"
+    booking.payment_rejection_reason = reason
+
+    try:
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Rejected online payment proof for {booking.customer_name}'s booking "
+                f"(Reason: {reason})"
+            )
+        )
+
+        if booking.customer_id:
+            notification_controller.create_notification(
+                db,
+                customer_id=booking.customer_id,
+                notif_type="payment_rejected",
+                title="Payment Rejected",
+                message=(
+                    f"Your payment proof for the {booking.service_type} booking at "
+                    f"{booking.shop_name or 'the shop'} was rejected. Reason: {reason}. "
+                    "Please upload a new proof of payment."
+                ),
+                booking_id=booking.id
+            )
+
+        db.commit()
+        db.refresh(booking)
+        return (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Payment Rejection Error: {str(e)}"
+        )
+
+
+def get_pending_verification_bookings(db: Session, shop_id: int):
+    """
+    NEW (Online Payment feature) — Retrieves bookings ng shop na
+    payment_status == "pending_verification", i.e. mga GCash/PayMaya
+    booking na naka-upload na ng proof of payment pero hindi pa
+    na-verify/na-approve/na-reject ng staff. Backs ang "Pending Payment
+    Verification" panel/tab sa Service Terminal (PaymentVerificationModal).
+
+    NOTE: hindi ito naka-scope sa Booking.status (Pending/In Progress/
+    atbp.) — sinasadya, dahil ang payment verification ay HIWALAY na
+    proseso mula sa booking lifecycle mismo (puwedeng "Awaiting Payment"
+    o "Pending" pa rin ang booking status habang "pending_verification"
+    ang payment). Read-only, walang Activity Log entry.
+    """
+    return (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.washer),
+            joinedload(Booking.dryer),
+            joinedload(Booking.inventory_usages),
+            joinedload(Booking.add_ons_used),
+            joinedload(Booking.machine_assignments),
+        )
+        .filter(
+            Booking.shop_id == shop_id,
+            Booking.payment_status == "pending_verification"
+        )
+        .order_by(Booking.booking_timestamp.desc())
+        .all()
+    )
+
+
+# =========================================================
+# WEIGHING / FINALIZE PRICING FUNCTIONS (NEW — reconciled mula sa
+# Admin Dashboard spec, Module B: "Mobile Booking Notification &
+# Pricing Modal")
+# =========================================================
+
+def get_awaiting_weighing_bookings(db: Session, shop_id: int):
+    """
+    NEW — Retrieves mobile bookings ng shop na status == "Awaiting
+    Weighing", i.e. na-accept na ng shop (dating "Awaiting Approval")
+    pero hindi pa na-timbang/na-finalize ang presyo. Backs ang bagong
+    notification panel/modal (Module B) sa Service Terminal, kung saan
+    ipapasok ng staff ang aktwal na weight + add-on charges bago
+    tawagin ang finalize_booking_pricing() sa ibaba.
+
+    Read-only, walang Activity Log entry — parehong pattern ng
+    get_awaiting_approval_bookings() at get_pending_verification_bookings().
+    """
+    return (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.inventory_usages),
+            joinedload(Booking.add_ons_used),
+        )
+        .filter(
+            Booking.shop_id == shop_id,
+            Booking.status == "Awaiting Weighing"
+        )
+        .order_by(Booking.booking_timestamp.desc())
+        .all()
+    )
+
+
+async def finalize_booking_pricing(
+    db: Session,
+    booking_id: int,
+    pricing_data: BookingFinalizePricingRequest,
+    current_user: models.User,
+):
+    """
+    NEW — Ito ang core ng Module B ("Mobile Booking Notification &
+    Pricing Modal"). Tinatawag ito kapag na-timbang na ng staff ang
+    aktwal na laundry ng isang mobile booking na "Awaiting Weighing",
+    at ini-finalize na ang presyo bago ito pumasok sa normal na
+    operational queue.
+
+    COMPUTATION:
+        final_price = (final_weight × ServiceType.price) + addon_charges
+
+    kung saan ang ServiceType.price/pricing_unit ay ang PAREHONG "Shop
+    Rate" na ginagamit sa buong ibang bahagi ng sistema (walang
+    hiwalay/bagong rate field na idinagdag — see ServiceTypeBase
+    docstring sa schemas.py).
+
+    Pagkatapos ma-compute:
+      1. Isinasave ang final_weight, weighing_addon_charges, final_price,
+         weighed_at.
+      2. SINI-SYNC ang weight/loads/total_price (ang "authoritative"
+         fields na ginagamit ng ibang existing code — Record Sales,
+         machine telemetry, atbp.) papunta sa bagong values na ito,
+         gamit ang PAREHONG _map_quantity_to_booking_fields() helper na
+         ginagamit ng create_customer_booking() para tama ang pagmapa
+         sa weight/loads depende sa pricing_unit ng service.
+      3. Itinatakda ang susunod na status:
+         - "gcash"/"paymaya" → "Awaiting Payment" (hinihintay pa ang
+           customer magbayad/mag-upload ng proof; makikita ito sa
+           get_active_bookings() ng Service Terminal LAMANG kapag
+           na-mark na paid via mark_booking_as_paid(), na siyang
+           awtomatikong lilipat papuntang "Pending").
+         - "cash"/"cod" → "Pending" — direktang pumapasok agad sa
+           Service Terminal machine-assignment queue (ito ang
+           "auto-route to Service Terminal" para sa COD/Cash na
+           hiningi ng spec).
+      4. Gumagawa ng customer notification (type "price_finalized")
+         — ito ang available na "push"-like mechanism ng kasalukuyang
+         sistema (walang hiwalay na customer-side WebSocket/FCM channel
+         na naka-configure; ang mobile app ay umaasa sa Notification
+         table + polling ng GET /bookings/mine, parehong pattern ng
+         lahat ng ibang status-change notification sa buong file na
+         ito).
+      5. Nagba-broadcast ng "booking_price_finalized" event papunta sa
+         SHOP's connected Service Terminal instance(s) — kapaki-pakinabang
+         ito para agad ma-refresh ng terminal ang Awaiting Weighing panel
+         nang hindi na kailangang mag-poll.
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.status != "Awaiting Weighing":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot finalize pricing for a booking with status '{booking.status}'. "
+                "Only bookings that are Awaiting Weighing can be finalized."
+            )
+        )
+
+    service_type_record = (
+        db.query(ServiceType)
+        .filter(
+            ServiceType.shop_id == shop_id,
+            ServiceType.name == booking.service_type
+        )
+        .first()
+    )
+    if not service_type_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Service type '{booking.service_type}' is no longer configured for this shop. "
+                "Please check Optimization Settings."
+            )
+        )
+
+    computed_price = round(
+        (pricing_data.final_weight * service_type_record.price) + pricing_data.addon_charges,
+        2
+    )
+
+    # Sync the authoritative weight/loads fields the same way the mobile
+    # checkout flow does, so downstream code (Record Sales, machine
+    # telemetry) sees a value consistent with the service's pricing_unit.
+    mapped_fields = _map_quantity_to_booking_fields(
+        service_type_record.pricing_unit, pricing_data.final_weight
+    )
+
+    booking.final_weight = pricing_data.final_weight
+    booking.weighing_addon_charges = pricing_data.addon_charges
+    booking.final_price = computed_price
+    booking.weighed_at = datetime.now(timezone.utc)
+
+    booking.weight = mapped_fields["weight"]
+    booking.loads = mapped_fields["loads"]
+    booking.total_price = computed_price
+
+    is_online_payment = booking.payment_method in ("gcash", "paymaya")
+    booking.status = "Awaiting Payment" if is_online_payment else "Pending"
+
+    try:
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Finalized pricing for {booking.customer_name}'s booking "
+                f"- {pricing_data.final_weight} weighed, ₱{computed_price} "
+                f"(addons: ₱{pricing_data.addon_charges})"
+            )
+        )
+
+        if booking.customer_id:
+            if is_online_payment:
+                notif_title = "Ready for Payment!"
+                notif_message = (
+                    f"Your {booking.service_type} laundry at {booking.shop_name or 'the shop'} "
+                    f"has been weighed ({pricing_data.final_weight}). Final total is "
+                    f"₱{computed_price}. Please settle your payment."
+                )
+            else:
+                notif_title = "Weighed — Now In Progress"
+                notif_message = (
+                    f"Your {booking.service_type} laundry at {booking.shop_name or 'the shop'} "
+                    f"has been weighed ({pricing_data.final_weight}). Final total is "
+                    f"₱{computed_price}."
+                )
+            notification_controller.create_notification(
+                db,
+                customer_id=booking.customer_id,
+                notif_type="price_finalized",
+                title=notif_title,
+                message=notif_message,
+                booking_id=booking.id
+            )
+
+        db.commit()
+        db.refresh(booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+
+        await manager.broadcast(shop_id, {
+            "type": EVENT_BOOKING_PRICE_FINALIZED,
+            "booking_id": reloaded.id,
+            "customer_name": reloaded.customer_name,
+            "final_weight": reloaded.final_weight,
+            "final_price": reloaded.final_price,
+            "status": reloaded.status,
+        })
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Finalize Pricing Error: {str(e)}"
+        )
+
+
 # =========================================================
 # CUSTOMER (MOBILE APP) BOOKING FUNCTIONS
 # =========================================================
@@ -1124,6 +1553,12 @@ def _map_quantity_to_booking_fields(pricing_unit: str, quantity: float) -> dict:
       - "kg"    → weight = quantity, loads = 1
       - "load"  → loads = quantity, weight = 0.0 (hindi applicable)
       - "piece" → loads = quantity, weight = 0.0 (hindi applicable)
+
+    NOTE (Weighing / Finalize Pricing feature): ginagamit na rin ito
+    ngayon ng finalize_booking_pricing() sa itaas, hindi lang ng
+    create_customer_booking() sa ibaba — parehong pattern ng pag-map,
+    kaya iisa lang ang lohika ng "quantity → weight/loads" sa buong
+    sistema.
     """
     if pricing_unit == "kg":
         return {"weight": quantity, "loads": 1}
@@ -1204,15 +1639,38 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
     UPDATED (Payment): ini-set na rin ang payment_method galing sa
     customer's checkout choice (booking_data.payment_method — "cash"
     para sa dropoff, "cod" para sa delivery, o "gcash"/"paymaya" kapag
-    ini-enable na ang online payment sa future phase). payment_status
-    ay laging nagsisimula bilang "unpaid" — ang pag-verify/pag-mark ay
-    hiwalay pa ring action ng staff (see mark_booking_as_paid()).
+    ini-enable na ang online payment). payment_status ay depende sa
+    parehong logic ng create_booking() (see below) — hiwalay pa ring
+    action ng staff ang pag-verify/pag-reject (see mark_booking_as_paid()
+    at reject_payment()).
+
+    UPDATED (Online Payment feature — GCash/PayMaya QR + Proof of
+    Payment): kung ang payment_method ay "gcash" o "paymaya" AT may
+    ibinigay na booking_data.proof_of_payment_url (na-upload na ng
+    customer papunta sa Supabase Storage bago tinawag ang endpoint na
+    ito), ang INITIAL payment_status ay "pending_verification" sa
+    halip na "unpaid" — parehong logic ng create_booking() sa itaas.
+
+    UPDATED (Weighing / Finalize Pricing feature): ang total_price na
+    kino-compute dito ay HINDI na ang FINAL na presyo — ito na ngayon
+    ang ESTIMATE lang ng customer (naka-base sa quantity na kanilang
+    ibinigay sa checkout, bago pa man timbangin nang aktwal). Ise-save
+    ito RIN sa bagong Booking.estimated_weight/estimated_price
+    (kasabay pa rin ng weight/loads/total_price, para hindi masira ang
+    kahit anong existing display na umaasa doon habang wala pa itong
+    na-fifinalize — see BookingResponse/Booking.to_dict()). Ang totoong
+    FINAL na presyo ay itatakda na lang ng staff sa
+    finalize_booking_pricing() sa itaas, PAGKATAPOS ma-accept ang
+    booking na ito (see accept_customer_booking() sa ibaba, na
+    naglilipat na ngayon papuntang "Awaiting Weighing" sa halip na
+    deretsong "Pending").
 
     NOTE (multi-machine assignment feature): hindi pa rin dito nagaganap
     ang machine assignment — nananatiling "Awaiting Approval" muna, tapos
-    "Pending" (via accept_customer_booking()), at doon pa lang ito
-    aassignan ng machine gamit ang assign_machines_to_booking(), gaya rin
-    ng manual bookings.
+    "Awaiting Weighing" (via accept_customer_booking()), tapos "Pending"
+    o "Awaiting Payment" (via finalize_booking_pricing()), at doon pa
+    lang ito aassignan ng machine gamit ang assign_machines_to_booking(),
+    gaya rin ng manual bookings.
 
     NEW (safety net): bago pa man tingnan ang service catalog, sinusuri
     muna kung shop.is_online — ibig sabihin, may naka-buk as na Service
@@ -1310,6 +1768,11 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
 
     total_price = round(subtotal - discount_amount, 2)
 
+    # NEW (Online Payment feature) — same logic as create_booking().
+    initial_payment_status = "unpaid"
+    if booking_data.payment_method in ("gcash", "paymaya") and booking_data.proof_of_payment_url:
+        initial_payment_status = "pending_verification"
+
     new_booking = Booking(
         customer_name=customer.full_name,
         service_type=booking_data.service_type,
@@ -1329,6 +1792,14 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         promo_code=promo_record.code if promo_record else None,
         discount_amount=discount_amount,
         payment_method=booking_data.payment_method or "cash",
+        # NEW (Online Payment feature)
+        payment_status=initial_payment_status,
+        proof_of_payment_url=booking_data.proof_of_payment_url,
+        # NEW (Weighing / Finalize Pricing feature) — ang customer's
+        # sariling estimate, hiwalay sa weight/total_price sa itaas
+        # (na magiging "current" na rin habang wala pang na-finalize).
+        estimated_weight=booking_data.quantity,
+        estimated_price=total_price,
         booking_timestamp=datetime.now(timezone.utc),
         created_at=datetime.now(timezone.utc)
     )
@@ -1364,7 +1835,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         )
 
         await manager.broadcast(booking_data.shop_id, {
-            "type": "new_booking_request",
+            "type": EVENT_NEW_BOOKING_REQUEST,
             "booking_id": reloaded.id,
             "customer_name": reloaded.customer_name,
             "service_type": reloaded.service_type,
@@ -1435,15 +1906,27 @@ def get_customer_bookings(db: Session, customer_id: int):
 
 def accept_customer_booking(db: Session, booking_id: int, current_user: models.User):
     """
-    Accepts a customer-submitted booking — moves it from "Awaiting
-    Approval" to "Pending", at which point it behaves exactly like any
-    manually-created booking (appears in the Service Terminal, can be
-    assigned machine(s) via assign_machines_to_booking()).
+    Accepts a customer-submitted booking.
+
+    UPDATED (Weighing / Finalize Pricing feature): dating deretsong
+    "Pending" ang tinutuluyan nito — ngayon papunta muna ito sa BAGONG
+    "Awaiting Weighing" status. Dahilan: ang presyo/weight na dala ng
+    mobile booking na ito ay ESTIMATE pa lang ng customer (walang
+    aktwal na pagtimbang), kaya kailangan munang dumaan sa staff
+    weighing/finalize-pricing step (finalize_booking_pricing() sa
+    itaas) bago ito tuluyang maging isang normal na "Pending" booking
+    na puwedeng bigyan ng machine.
+
+    Kapag na-finalize na ang presyo, doon pa lang ito lilipat papuntang
+    "Pending" (cash/cod) o "Awaiting Payment" (gcash/paymaya), at doon
+    pa lang ito puwedeng bigyan ng machine gamit ang
+    assign_machines_to_booking(), gaya rin ng manual bookings.
 
     NEW (Notification): gumagawa rin ito ngayon ng "booking_accepted"
     notification para sa customer, para malaman nila agad (sa
     Notification Page + bell badge) na tinanggap na ng shop ang
-    kanilang request.
+    kanilang request — na-update ang mensahe para banggitin na
+    hihintayin pa nila ang staff na kumpirmahin ang aktwal na timbang.
     """
     shop_id = current_user.shop_id
 
@@ -1459,7 +1942,9 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
             detail="Booking request not found or already handled."
         )
 
-    booking.status = "Pending"
+    # UPDATED (Weighing / Finalize Pricing feature) — "Awaiting Weighing"
+    # sa halip na deretsong "Pending".
+    booking.status = "Awaiting Weighing"
 
     try:
         log_activity(
@@ -1477,7 +1962,8 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
                 title="Booking Accepted",
                 message=(
                     f"Good news! Your {booking.service_type} booking at "
-                    f"{booking.shop_name or 'the shop'} has been accepted and is now being processed."
+                    f"{booking.shop_name or 'the shop'} has been accepted. The shop will "
+                    "confirm the actual weight and final price shortly."
                 ),
                 booking_id=booking.id
             )
@@ -1589,6 +2075,13 @@ async def cancel_customer_booking(db: Session, booking_id: int, customer: models
     kailangan nang direktang kausapin ang shop, dahil may naikuha nang
     hardware resource ang shop para dito.
 
+    NOTE (Weighing / Finalize Pricing feature): sinasadyang HINDI pa
+    isinama ang "Awaiting Weighing"/"Awaiting Payment" sa
+    cancellable_statuses sa ibaba — hindi pa ito hiningi ng kasalukuyang
+    spec, at nangangailangan ng dagdag na pag-iisip (hal. dapat bang
+    puwedeng kanselahin ang isang naka-finalize nang presyo?) bago ito
+    idagdag. Idudulog na lang ito bilang susunod na item kung kakailanganin.
+
     Naka-scope sa Booking.customer_id == customer.id (hindi lang
     booking_id) para hindi makakansela ang isang customer ng booking ng
     ibang tao sa pamamagitan lang ng pag-guess ng ID.
@@ -1670,7 +2163,7 @@ async def cancel_customer_booking(db: Session, booking_id: int, customer: models
         )
 
         await manager.broadcast(booking.shop_id, {
-            "type": "booking_cancelled_by_customer",
+            "type": EVENT_BOOKING_CANCELLED_BY_CUSTOMER,
             "booking_id": reloaded.id,
             "customer_name": reloaded.customer_name,
             "service_type": reloaded.service_type,

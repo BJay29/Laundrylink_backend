@@ -191,25 +191,24 @@ class AddressResponse(AddressBase):
 # --- SERVICE TYPE SCHEMAS ---
 
 class ServiceTypeBase(BaseModel):
-    """Base schema for a shop-defined service."""
+    """
+    Base schema for a shop-defined service.
+
+    NOTE (reconciliation — Weighing/Finalize Pricing feature): `price`
+    (kasabay ng `pricing_unit`) ANG GINAGAMIT na bilang "Shop Rate" sa
+    staff weighing modal (Module B ng bagong spec) — walang bagong
+    hiwalay na rate field ang idinagdag, dahil ito na mismo ang parehong
+    pinagmumulan ng presyo na ginagamit sa buong existing booking flow
+    (walk-in at mobile).
+    """
     name: str
     price: float
     is_active: bool = True
     pricing_unit: str = "load"
 
-    # NEW (duration-per-service-phase) — cycle length for each phase, in
-    # minutes. Which one actually matters depends on required_phases
-    # below: "full_service" uses both, "wash_only" uses only
-    # washer_duration_minutes, "dry_only" uses only dryer_duration_minutes.
     washer_duration_minutes: int = 45
     dryer_duration_minutes: int = 45
 
-    # NEW (multi-machine assignment feature) — sinasabi kung anong
-    # phase(s) ang kailangan ng service na ito. Ginagamit ito ng
-    # booking_controller para malaman kung washers lang, dryers lang,
-    # o pareho (washers muna, dryers mamaya) ang ipapakita sa
-    # AssignMachineModal para sa isang booking na gumagamit ng
-    # service na ito.
     required_phases: str = "full_service"  # "wash_only" | "dry_only" | "full_service"
 
     @field_validator("name")
@@ -260,9 +259,9 @@ class ServiceTypeUpdate(BaseModel):
     price: Optional[float] = None
     is_active: Optional[bool] = None
     pricing_unit: Optional[str] = None
-    required_phases: Optional[str] = None  # NEW
-    washer_duration_minutes: Optional[int] = None  # NEW
-    dryer_duration_minutes: Optional[int] = None  # NEW
+    required_phases: Optional[str] = None
+    washer_duration_minutes: Optional[int] = None
+    dryer_duration_minutes: Optional[int] = None
 
     @field_validator("name")
     @classmethod
@@ -315,7 +314,12 @@ class ServiceTypeResponse(ServiceTypeBase):
 # --- ADD-ON SCHEMAS ---
 
 class AddOnBase(BaseModel):
-    """Base schema for a shop-defined add-on."""
+    """
+    Base schema for a shop-defined add-on (pre-configured catalog,
+    pinipili ng customer sa mobile checkout — hiwalay sa ad-hoc
+    weighing_addon_charges ng Booking, see BookingFinalizePricingRequest
+    sa ibaba).
+    """
     name: str
     price: float
     is_active: bool = True
@@ -629,12 +633,6 @@ class MachineResponse(MachineBase):
     
     metrics: Optional[Dict[str, float]] = None 
 
-    # NEW (per-machine timer feature) — when this machine's current
-    # cycle actually started (UTC). None when Idle/Available/Maintenance.
-    # The frontend computes the live countdown from this plus the
-    # relevant service's washer_duration_minutes/dryer_duration_minutes
-    # (looked up via current_service_type), NOT a per-machine duration —
-    # that approach was tried and reverted.
     cycle_started_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -649,7 +647,7 @@ class MachineNested(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- MACHINE ASSIGNMENT SCHEMAS (NEW — multi-machine assignment feature) ---
+# --- MACHINE ASSIGNMENT SCHEMAS (multi-machine assignment feature) ---
 
 class MachineAssignmentInput(BaseModel):
     """
@@ -749,23 +747,35 @@ class BookingAddOnUsageResponse(BaseModel):
 class PaymentStatusUpdate(BaseModel):
     """
     Schema para sa "Mark as Paid" action ng staff (Record Sales /
-    Booking Details).
+    Booking Details) AT ng "Approve" action sa PaymentVerificationModal.
+
+    payment_method ay OPTIONAL na ngayon (dating may default na "cash").
+    Dahilan: kapag "Approve" ang tinatawag para sa isang GCash/PayMaya
+    booking na "pending_verification", walang dapat baguhin sa
+    payment_method nito — dapat manatili itong "gcash"/"paymaya", hindi
+    ma-overwrite pabalik sa "cash" default. Kaya None ang ibig sabihin
+    "huwag galawin, panatilihin ang existing value ng booking".
     """
-    payment_method: str = "cash"  # "cash", "cod", "gcash", "paymaya"
+    payment_method: Optional[str] = None  # "cash", "cod", "gcash", "paymaya", o None (keep existing)
 
     @field_validator("payment_method")
     @classmethod
     def validate_payment_method(cls, v):
-        allowed = {"cash", "cod", "gcash", "paymaya"}
-        if v not in allowed:
-            raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
+        if v is not None:
+            allowed = {"cash", "cod", "gcash", "paymaya"}
+            if v not in allowed:
+                raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
         return v
-
 
 class PaymentStatusResponse(BaseModel):
     """
     Minimal na response kapag na-query lang ang payment info ng isang
     booking.
+
+    UPDATED (Online Payment feature): ang payment_status field na ito
+    ay maaari na ring maging "pending_verification" o "rejected"
+    ngayon, hindi lang "unpaid"/"paid" — plain `str` type pa rin
+    (walang enum), kaya walang binago sa field definition mismo.
     """
     booking_id: int
     payment_method: Optional[str] = None
@@ -773,6 +783,63 @@ class PaymentStatusResponse(BaseModel):
     paid_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# NEW (Online Payment feature) — Schema para sa "Reject" action ng
+# staff sa isang online payment proof (PaymentVerificationModal).
+# Parehong validation pattern ng BookingDeclineRequest sa ibaba.
+class PaymentRejectRequest(BaseModel):
+    """Schema for rejecting a customer-submitted GCash/PayMaya payment proof."""
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("A rejection reason is required.")
+        if len(cleaned) > 300:
+            raise ValueError("Rejection reason must be 300 characters or fewer.")
+        return cleaned
+
+
+# --- WEIGHING / FINALIZE PRICING SCHEMAS (NEW — reconciled mula sa
+#     Admin Dashboard spec, Module B: "Mobile Booking Notification &
+#     Pricing Modal") ---
+
+class BookingFinalizePricingRequest(BaseModel):
+    """
+    Schema para sa staff weighing/pricing modal — tinatawag kapag
+    tini-timbang ng staff ang aktwal na dami ng laundry ng isang mobile
+    booking na "Awaiting Weighing", tapos i-finalize ang presyo bago ito
+    pumunta sa "Pending" (cash/cod) o "Awaiting Payment" (gcash/paymaya).
+
+    Ang computation (ginagawa sa backend, HINDI dito — booking_controller.
+    finalize_booking_pricing(), susunod na hakbang):
+        final_price = (final_weight × ServiceType.price) + addon_charges
+
+    NOTE: `final_weight` dito ay laging ipinapalagay na "quantity" sa
+    kahulugan ng ServiceType.pricing_unit ng booking (kg, load, o piece)
+    — parehong pattern ng CustomerBookingCreate.quantity sa ibaba,
+    "weight" lang ang pangalan dahil ito ang pinakakaraniwang unit sa
+    laundry weighing.
+    """
+    final_weight: float
+    addon_charges: float = 0.0
+
+    @field_validator("final_weight")
+    @classmethod
+    def validate_final_weight(cls, v):
+        if v <= 0:
+            raise ValueError("Actual weight must be greater than 0.")
+        return v
+
+    @field_validator("addon_charges")
+    @classmethod
+    def validate_addon_charges(cls, v):
+        if v < 0:
+            raise ValueError("Add-ons/extra charges cannot be negative.")
+        return v
 
 
 # --- BOOKING SCHEMAS ---
@@ -798,12 +865,8 @@ class BookingCreate(BaseModel):
 
     payment_method: Optional[str] = "cash"
 
-    # NEW (promo code for walk-in bookings) — optional code typed by
-    # staff in BookingModal. `total_price` here is treated as the
-    # PRE-DISCOUNT subtotal whenever this is set — the actual discount
-    # is always computed server-side in booking_controller.create_booking()
-    # via the existing _apply_promo_code() helper (the same one the
-    # mobile app flow already uses), never trusted from the client alone.
+    proof_of_payment_url: Optional[str] = None
+
     promo_code: Optional[str] = None
 
     booking_timestamp: Optional[datetime] = Field(default=None)
@@ -836,7 +899,14 @@ class BookingAssignMachine(BaseModel):
 
 
 class BookingStatusUpdate(BaseModel):
-    """Transitions a booking through lifecycle states."""
+    """
+    Transitions a booking through lifecycle states.
+
+    NOTE (Weighing feature): kasama na rin dito ang mga bagong VALUES na
+    "Awaiting Weighing" at "Awaiting Payment" — plain `str` pa rin,
+    walang bagong validation dinagdag (parehong existing "loose string"
+    pattern ng field na ito).
+    """
     status: str
 
 
@@ -892,6 +962,17 @@ class BookingResponse(BaseModel):
     payment_status: str = "unpaid"
     paid_at: Optional[datetime] = None
 
+    proof_of_payment_url: Optional[str] = None
+    payment_rejection_reason: Optional[str] = None
+
+    # NEW (Weighing / Finalize Pricing feature)
+    estimated_weight: Optional[float] = None
+    estimated_price: Optional[float] = None
+    final_weight: Optional[float] = None
+    final_price: Optional[float] = None
+    weighing_addon_charges: Optional[float] = 0.0
+    weighed_at: Optional[datetime] = None
+
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     add_ons_used: List[BookingAddOnUsageResponse] = []
     
@@ -901,9 +982,6 @@ class BookingResponse(BaseModel):
     washer_number: Optional[int] = None
     dryer_number: Optional[int] = None
 
-    # NEW (multi-machine assignment feature) — per-load na machine
-    # assignments, sorted by load_number (see Booking.machine_assignments
-    # sa models.py).
     machine_assignments: List[MachineAssignmentResponse] = []
 
     @field_validator("washer_number", mode="before")
@@ -925,7 +1003,22 @@ class BookingResponse(BaseModel):
 # --- CUSTOMER (MOBILE APP) BOOKING SCHEMAS ---
 
 class CustomerBookingCreate(BaseModel):
-    """Schema para sa booking na ginawa mismo ng customer sa mobile app."""
+    """
+    Schema para sa booking na ginawa mismo ng customer sa mobile app.
+
+    NOTE (Weighing feature): ang `quantity` dito ay ang ESTIMATE ng
+    customer (slider/counter sa checkout) — hindi pa ito ang final.
+    Sa booking_controller.create_customer_booking() (susunod na
+    hakbang), ise-save ito bilang Booking.estimated_weight at
+    Booking.estimated_price (kasabay ng dating logic na nagko-compute
+    ng total_price bilang paunang estimate), at ang bagong booking ay
+    magsisimula sa status na "Awaiting Weighing" sa halip na deretsong
+    "Awaiting Approval" kung saan-saan man iyon dating dinaraanan —
+    tinatanggal ang manual Accept/Decline gate para sa flow na ito,
+    dahil ang weighing/finalize-pricing step mismo ang bagong
+    "confirmation point" ng shop (booking_controller wiring, hindi pa
+    ginagawa dito).
+    """
     shop_id: int
     service_type: str
     quantity: float
@@ -936,6 +1029,8 @@ class CustomerBookingCreate(BaseModel):
     promo_code: Optional[str] = None
 
     payment_method: str = "cash"
+
+    proof_of_payment_url: Optional[str] = None
 
     @field_validator("quantity")
     @classmethod
@@ -1081,6 +1176,10 @@ class ShopDetailResponse(BaseModel):
     has_delivery: bool = False
     delivery_fee: float = 0.0
     is_online: bool = False
+
+    gcash_qr_url: Optional[str] = None
+    paymaya_qr_url: Optional[str] = None
+
     services: List[ShopServicePreview] = []
     add_ons: List[AddOnPreview] = []
 
@@ -1097,6 +1196,9 @@ class ShopProfileUpdate(BaseModel):
     delivery_fee: Optional[float] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+
+    gcash_qr_url: Optional[str] = None
+    paymaya_qr_url: Optional[str] = None
 
     @field_validator("delivery_fee")
     @classmethod
@@ -1129,6 +1231,9 @@ class ShopProfileResponse(BaseModel):
     delivery_fee: float = 0.0
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+
+    gcash_qr_url: Optional[str] = None
+    paymaya_qr_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
