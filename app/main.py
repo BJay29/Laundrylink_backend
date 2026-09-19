@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
 from apscheduler.schedulers.background import BackgroundScheduler
 from app.services.prediction_service import PredictionService
+from app.routes import upload_routes
+
 
 # --- DATABASE SEEDING & DATA INTEGRITY LOGIC ---
 
@@ -178,6 +180,7 @@ app.include_router(shop_routes.router)
 app.include_router(websocket_routes.router)
 app.include_router(addon_routes.router)
 app.include_router(promo_routes.router)
+app.include_router(upload_routes.router)
 # NEW — notification bell/page endpoints (GET /notifications/mine,
 # GET /notifications/unread-count, PATCH /notifications/{id}/read,
 # PATCH /notifications/mark-all-read).

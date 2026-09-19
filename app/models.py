@@ -452,13 +452,12 @@ class Booking(Base):
     hinahati na ito sa ESTIMATED (ibinigay ng customer sa mobile
     checkout, hula lang) at FINAL (itinakda ng staff PAGKATAPOS ng
     aktwal na pagtimbang — see booking_controller.finalize_booking_
-    pricing(), hindi pa ginagawa, susunod na hakbang). `weight` at
-    `total_price` sa itaas ay NANATILING ang AUTHORITATIVE/current
-    values na ginagamit ng buong existing system (Record Sales, machine
-    telemetry, Activity Log, atbp) — sine-sync na lang sila papunta sa
-    `final_weight`/`final_price` sa sandaling ma-finalize ng staff, para
-    hindi masira ang kahit anong existing code na umaasa pa sa
-    `weight`/`total_price`.
+    pricing()). `weight` at `total_price` sa itaas ay NANATILING ang
+    AUTHORITATIVE/current values na ginagamit ng buong existing system
+    (Record Sales, machine telemetry, Activity Log, atbp) — sine-sync
+    na lang sila papunta sa `final_weight`/`final_price` sa sandaling
+    ma-finalize ng staff, para hindi masira ang kahit anong existing
+    code na umaasa pa sa `weight`/`total_price`.
       - estimated_weight / estimated_price: mula sa customer mismo sa
         checkout (mobile app lang — laging null para sa walk-in/terminal
         bookings, dahil doon aktwal na ang binibigay agad).
@@ -496,6 +495,18 @@ class Booking(Base):
     Iniwan muna ang `washer_id`/`dryer_id` para hindi masira ang mga
     lumang query/response na umaasa pa rito habang tinatapos natin ang
     migration sa buong booking_controller.py flow.
+
+    NEW (Order Tracking / Live Stepper feature): idinagdag ang
+    `started_at`, `ready_at`, `completed_at` — tatlong timestamp na
+    kumukuha ng "kailan" nangyari ang bawat pangunahing lifecycle
+    transition (In Progress, Ready, Claimed), para magkaroon ng aktwal
+    na history sa halip na basahin lang ang kasalukuyang `status` nang
+    walang alam kung kailan ito nagbago. Ginagamit ito ng mobile app's
+    vertical timeline/stepper tracker (kasama ang `created_at` para sa
+    "Received" step at `weighed_at` para sa "Price Ready" step). Naka-
+    stamp ito sa booking_controller.py sa create_booking(),
+    assign_machine_to_booking(), assign_machines_to_booking(), at
+    update_booking_status().
     """
     __tablename__ = "bookings"
 
@@ -577,6 +588,21 @@ class Booking(Base):
     # matawag ang finalize-pricing action).
     weighed_at = Column(DateTime(timezone=True), nullable=True)
 
+    # --- NEW (Order Tracking / Live Stepper feature) ---
+    # Timestamps para sa bawat pangunahing lifecycle transition, para
+    # magkaroon ng aktwal na "kailan" ang stepper ng mobile app
+    # (Received → Weighed → Washing → Ready → Completed), sa halip na
+    # basahin lang ang kasalukuyang status nang walang history.
+    #   started_at:   kailan naging "In Progress" (naka-assign na ng
+    #                 unang machine — see booking_controller.py:
+    #                 create_booking(), assign_machine_to_booking(),
+    #                 assign_machines_to_booking())
+    #   ready_at:     kailan naging "Ready" (see update_booking_status())
+    #   completed_at: kailan naging "Claimed" (see update_booking_status())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ready_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -654,6 +680,10 @@ class Booking(Base):
             "final_price": self.final_price,
             "weighing_addon_charges": self.weighing_addon_charges,
             "weighed_at": self.weighed_at.isoformat() if self.weighed_at else None,
+            # NEW (Order Tracking / Live Stepper feature)
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "ready_at": self.ready_at.isoformat() if self.ready_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,

@@ -94,6 +94,13 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     ibaba), kung saan malayo ang customer sa shop kapag gumawa ng
     booking, kaya hula lang muna ang unang presyo.
 
+    NEW (Order Tracking / Live Stepper feature): kung naka-assign na ng
+    machine inline dito (assigned_ids non-empty, i.e. status ay agad na
+    "In Progress"), sini-stamp na rin ang Booking.started_at sa parehong
+    sandali — para tama agad ang "Washing In Progress" na timestamp sa
+    stepper ng mobile app kahit sa mismong paggawa pa lang ng booking na-
+    assign na agad ang machine.
+
     NOTE: no is_online gate here — this is a staff-created booking from
     the Service Terminal itself, i.e. the terminal is, by definition,
     open and connected while this runs. The is_online safety net only
@@ -157,6 +164,10 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     ]
     initial_status = "In Progress" if assigned_ids else "Pending"
 
+    # NEW (Order Tracking / Live Stepper feature) — stamp started_at at
+    # creation time itself if a machine is already assigned inline.
+    initial_started_at = datetime.now(timezone.utc) if assigned_ids else None
+
     # --- 4.1 DETERMINE INITIAL PAYMENT STATUS (NEW — Online Payment feature) ---
     # "gcash"/"paymaya" + may proof of payment na naka-upload na →
     # "pending_verification" (naghihintay ng staff approval). Lahat ng
@@ -195,6 +206,8 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         add_delivery=booking_data.add_delivery,
         is_rush=booking_data.is_rush,
         status=initial_status,
+        # NEW (Order Tracking / Live Stepper feature)
+        started_at=initial_started_at,
         washer_id=booking_data.washer_id,
         dryer_id=booking_data.dryer_id,
         shop_id=shop_id,
@@ -323,6 +336,11 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     frontend papunta sa bagong assign_machines_to_booking() /
     move_load_to_dryer() sa ibaba. Para sa BAGONG bookings, gamitin na
     ang bagong dalawang function na iyon sa halip nito.
+
+    NEW (Order Tracking / Live Stepper feature): sini-stamp na rin ang
+    Booking.started_at sa sandaling ito naging "In Progress" — parehong
+    sandali ng transition, kaya inilalagay ito dito sa halip na sa
+    isang generic na "on status change" helper.
     """
     shop_id = current_user.shop_id
 
@@ -435,6 +453,8 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         booking.dryer_id = assign_data.dryer_id
 
     booking.status = "In Progress"
+    # NEW (Order Tracking / Live Stepper feature)
+    booking.started_at = datetime.now(timezone.utc)
 
     try:
         log_activity(
@@ -560,6 +580,10 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
     default, at PredictionService.get_machine_runtime() bilang fallback
     duration — parehong fallback pattern gaya ng legacy
     assign_machine_to_booking() sa itaas.
+
+    NEW (Order Tracking / Live Stepper feature): sini-stamp na rin ang
+    Booking.started_at sa parehong sandali na naging "In Progress" ang
+    booking.
     """
     shop_id = current_user.shop_id
 
@@ -675,6 +699,8 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
         assigned_machine_labels.append(f"Load {load_number}: {machine.machine_type} #{machine.machine_number}")
 
     booking.status = "In Progress"
+    # NEW (Order Tracking / Live Stepper feature)
+    booking.started_at = now
 
     try:
         for assignment in new_assignments:
@@ -728,6 +754,13 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
     Hindi ito applicable sa mga load na "dry_only" ang required_phases
     (nagsisimula na sila agad sa "drying" mula sa assign_machines_to_
     booking(), walang "washing" phase na dadaanan).
+
+    NOTE (Order Tracking / Live Stepper feature): hindi ito nagbabago ng
+    Booking.status (nananatiling "In Progress" ang buong booking habang
+    may loads na washing/drying pa) — kaya walang binabagong Booking-
+    level timestamp dito, per-load lang ang mga timestamp
+    (washing_completed_at, drying_started_at) na naka-tira na sa
+    BookingMachineAssignment.
     """
     shop_id = current_user.shop_id
 
@@ -973,6 +1006,19 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
     _get_status_notification_content() sa itaas). Wala itong ginagawang
     notification kung terminal-only ang booking (walang customer_id) o
     kung ang bagong status ay wala sa content_map (hal. "Pending").
+
+    NEW (Order Tracking / Live Stepper feature): sini-stamp ang
+    Booking.started_at / ready_at / completed_at depende sa kung anong
+    status ang pinasok — ito ang nagbibigay sa mobile app's vertical
+    timeline/stepper ng aktwal na "kailan" para sa bawat hakbang, sa
+    halip na basahin lang ang kasalukuyang status nang walang history.
+    Ang started_at ay ginagalaw lang kung wala pa itong laman (`not
+    booking.started_at`) — nangyayari na ito nang mas maaga kapag
+    naka-assign na ng machine ang booking bago pa man tumawag dito
+    (see create_booking(), assign_machine_to_booking(),
+    assign_machines_to_booking()), kaya hindi na ito dapat ma-overwrite
+    ulit dito kung sakaling manual pa ring tinawag ang "In Progress"
+    status update.
     """
     shop_id = current_user.shop_id
 
@@ -989,6 +1035,16 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
 
     old_status = booking.status
     booking.status = new_status
+
+    # NEW (Order Tracking / Live Stepper feature) — stamp the timestamp
+    # matching whichever step this transition just entered.
+    stepper_now = datetime.now(timezone.utc)
+    if new_status == "In Progress" and not booking.started_at:
+        booking.started_at = stepper_now
+    elif new_status == "Ready":
+        booking.ready_at = stepper_now
+    elif new_status == "Claimed":
+        booking.completed_at = stepper_now
 
     if new_status in ["Ready", "Claimed", "Cancelled"]:
         # --- Legacy single-machine release (washer_id/dryer_id) ---
@@ -1406,6 +1462,11 @@ async def finalize_booking_pricing(
          SHOP's connected Service Terminal instance(s) — kapaki-pakinabang
          ito para agad ma-refresh ng terminal ang Awaiting Weighing panel
          nang hindi na kailangang mag-poll.
+
+    NOTE (Order Tracking / Live Stepper feature): hindi ito nagba-bago
+    ng started_at/ready_at/completed_at — ang weighed_at (nasa itaas na)
+    ang siyang ginagamit ng mobile app stepper bilang timestamp ng
+    "Weighed / Price Ready" step.
     """
     shop_id = current_user.shop_id
 

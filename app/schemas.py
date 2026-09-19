@@ -815,7 +815,7 @@ class BookingFinalizePricingRequest(BaseModel):
     pumunta sa "Pending" (cash/cod) o "Awaiting Payment" (gcash/paymaya).
 
     Ang computation (ginagawa sa backend, HINDI dito — booking_controller.
-    finalize_booking_pricing(), susunod na hakbang):
+    finalize_booking_pricing()):
         final_price = (final_weight × ServiceType.price) + addon_charges
 
     NOTE: `final_weight` dito ay laging ipinapalagay na "quantity" sa
@@ -840,6 +840,19 @@ class BookingFinalizePricingRequest(BaseModel):
         if v < 0:
             raise ValueError("Add-ons/extra charges cannot be negative.")
         return v
+
+
+# --- UPLOAD SCHEMAS (Supabase Storage) ---
+
+class UploadResponse(BaseModel):
+    """
+    Simple response para sa /uploads/* endpoints (payment proof at shop
+    QR code uploads via Supabase Storage) — public URL lang ang laman,
+    na siyang ipapasa ng frontend papunta sa ibang endpoint na
+    kailangan ng URL string (proof_of_payment_url, gcash_qr_url, atbp.)
+    sa halip na raw file.
+    """
+    url: str
 
 
 # --- BOOKING SCHEMAS ---
@@ -973,6 +986,13 @@ class BookingResponse(BaseModel):
     weighing_addon_charges: Optional[float] = 0.0
     weighed_at: Optional[datetime] = None
 
+    # NEW (Order Tracking / Live Stepper feature) — backs the mobile
+    # app's vertical timeline/stepper (kasama ang created_at at
+    # weighed_at sa itaas para sa "Received" at "Weighed" steps).
+    started_at: Optional[datetime] = None
+    ready_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     add_ons_used: List[BookingAddOnUsageResponse] = []
     
@@ -1008,16 +1028,14 @@ class CustomerBookingCreate(BaseModel):
 
     NOTE (Weighing feature): ang `quantity` dito ay ang ESTIMATE ng
     customer (slider/counter sa checkout) — hindi pa ito ang final.
-    Sa booking_controller.create_customer_booking() (susunod na
-    hakbang), ise-save ito bilang Booking.estimated_weight at
-    Booking.estimated_price (kasabay ng dating logic na nagko-compute
-    ng total_price bilang paunang estimate), at ang bagong booking ay
-    magsisimula sa status na "Awaiting Weighing" sa halip na deretsong
-    "Awaiting Approval" kung saan-saan man iyon dating dinaraanan —
-    tinatanggal ang manual Accept/Decline gate para sa flow na ito,
-    dahil ang weighing/finalize-pricing step mismo ang bagong
-    "confirmation point" ng shop (booking_controller wiring, hindi pa
-    ginagawa dito).
+    Sa booking_controller.create_customer_booking(), ise-save ito
+    bilang Booking.estimated_weight at Booking.estimated_price (kasabay
+    ng dating logic na nagko-compute ng total_price bilang paunang
+    estimate), at ang bagong booking ay magsisimula sa status na
+    "Awaiting Weighing" sa halip na deretsong "Awaiting Approval" kung
+    saan-saan man iyon dating dinaraanan — tinatanggal ang manual
+    Accept/Decline gate para sa flow na ito, dahil ang weighing/
+    finalize-pricing step mismo ang bagong "confirmation point" ng shop.
     """
     shop_id: int
     service_type: str
