@@ -199,13 +199,25 @@ def get_shop_profile(
     Fetch the logged-in user's own shop profile, including delivery
     settings.
 
-    FIXED: the Shop model has no `email` column — the login email
-    belongs to the User (Owner/Staff) record, not the Shop. Previously
-    this endpoint returned the raw `shop` ORM object directly, which
-    made FastAPI/Pydantic try to read `.email` off of it and fail with
-    a 500 ("Field required: email") since Shop simply doesn't have that
-    attribute. We now build the ShopProfileResponse explicitly and pull
-    email from current_user instead.
+    FIXED (email): the Shop model has no `email` column — the login
+    email belongs to the User (Owner/Staff) record, not the Shop.
+    Previously this endpoint returned the raw `shop` ORM object
+    directly, which made FastAPI/Pydantic try to read `.email` off of
+    it and fail with a 500 ("Field required: email") since Shop simply
+    doesn't have that attribute. We now build the ShopProfileResponse
+    explicitly and pull email from current_user instead.
+
+    FIXED (Online Payment feature — QR codes disappearing on refresh):
+    that same manual ShopProfileResponse construction was ALSO silently
+    dropping gcash_qr_url and paymaya_qr_url, since they were never
+    listed as arguments here — even though the Shop record itself, and
+    the value returned right after an upload, were both correct. Every
+    GET /settings/profile call (e.g. on page refresh or navigating back
+    to Optimization Settings) was returning these two fields as their
+    Pydantic default (None), which is why the uploaded QR preview
+    always vanished on refresh even though it was saved in the DB the
+    whole time. Now explicitly included below, same as any other Shop
+    field this response needs.
     """
     shop = settings_controller.get_shop_profile(db, current_user.shop_id)
     if not shop:
@@ -218,6 +230,8 @@ def get_shop_profile(
         delivery_fee=shop.delivery_fee,
         latitude=shop.latitude,
         longitude=shop.longitude,
+        gcash_qr_url=shop.gcash_qr_url,
+        paymaya_qr_url=shop.paymaya_qr_url,
     )
 
 
@@ -228,13 +242,19 @@ def update_shop_profile(
     db: Session = Depends(get_db)
 ):
     """
-    Update the logged-in user's own shop name, address, and delivery
-    settings.
+    Update the logged-in user's own shop name, address, delivery
+    settings, and payment QR codes.
 
     NOTE: email is intentionally NOT part of this update — it's the
     User's own login email, not a Shop field, and is not editable from
     here (see ShopProfileUpdate in schemas.py). The response still
     includes current_user.email so the frontend has it to display.
+
+    FIXED (Online Payment feature): gcash_qr_url and paymaya_qr_url are
+    now included in the returned response, same fix as GET /profile
+    above — the controller was already saving these correctly to the
+    Shop record, but this endpoint's manually-built response object was
+    dropping them before they ever reached the frontend.
 
     UPDATED: settings_controller.update_shop_profile() now takes
     current_user (not shop_id) for Activity Log attribution.
@@ -250,6 +270,8 @@ def update_shop_profile(
         delivery_fee=updated_shop.delivery_fee,
         latitude=updated_shop.latitude,
         longitude=updated_shop.longitude,
+        gcash_qr_url=updated_shop.gcash_qr_url,
+        paymaya_qr_url=updated_shop.paymaya_qr_url,
     )
 
 
