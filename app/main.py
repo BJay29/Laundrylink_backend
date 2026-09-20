@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 import os
+import re
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -140,9 +141,19 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5000",
 ]
 
+# NEW — regex na tumutugma sa KAHIT ANONG port sa localhost/127.0.0.1.
+# Kailangan ito dahil ang Flutter web (flutter run -d chrome) ay
+# gumagamit ng RANDOM PORT bawat run (hal. localhost:55095, iba ulit
+# sa susunod) — imposibleng i-hardcode lahat sa ALLOWED_ORIGINS list
+# sa itaas. Dev/testing convenience lang ito — hindi ito nagbibigay-daan
+# sa mga production domain maliban sa eksaktong nakalista sa
+# ALLOWED_ORIGINS.
+LOCALHOST_ORIGIN_REGEX = r"^http://(localhost|127\.0\.0\.1):\d+$"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=LOCALHOST_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -152,10 +163,23 @@ app.add_middleware(
 # --- GLOBAL EXCEPTION HANDLER ---
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    """
+    UPDATED: ang dating "if origin in ALLOWED_ORIGINS" check ay hindi
+    kasama ang random Chrome dev ports (hal. localhost:55095) — kaya
+    kahit successful na ang CORSMiddleware sa normal na requests,
+    kapag may 500 error na naman (papasok dito ang handler na ito),
+    mawawala ulit ang Access-Control-Allow-Origin header, at babalik
+    ang parehong CORS error sa browser console kahit hindi na talaga
+    tungkol sa CORS ang totoong problema. Ngayon, gumagamit na rin ito
+    ng parehong LOCALHOST_ORIGIN_REGEX para tumugma sa localhost origin
+    ORIGIN CHECK, kaparehong lohika ng CORSMiddleware mismo.
+    """
     origin = request.headers.get("origin", "")
     headers = {}
 
-    if origin in ALLOWED_ORIGINS:
+    is_allowed = origin in ALLOWED_ORIGINS or bool(re.match(LOCALHOST_ORIGIN_REGEX, origin))
+
+    if is_allowed:
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
 
