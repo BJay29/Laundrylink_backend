@@ -762,7 +762,7 @@ class PaymentStatusUpdate(BaseModel):
     @classmethod
     def validate_payment_method(cls, v):
         if v is not None:
-            allowed = {"cash", "cod", "gcash", "paymaya"}
+            allowed = {"cash", "cod", "gcash", "online_qr"}
             if v not in allowed:
                 raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
         return v
@@ -1010,6 +1010,7 @@ class BookingResponse(BaseModel):
     started_at: Optional[datetime] = None
     ready_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    estimated_completion_time: Optional[datetime] = None
 
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     add_ons_used: List[BookingAddOnUsageResponse] = []
@@ -1093,7 +1094,7 @@ class CustomerBookingCreate(BaseModel):
     @field_validator("payment_method")
     @classmethod
     def validate_payment_method(cls, v):
-        allowed = {"cash", "cod", "gcash", "paymaya"}
+        allowed = {"cash", "cod", "gcash", "online_qr"}
         if v not in allowed:
             raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
         return v
@@ -1215,6 +1216,7 @@ class ShopDetailResponse(BaseModel):
 
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None
+    qr_code_url: Optional[srt] = None
 
     services: List[ShopServicePreview] = []
     add_ons: List[AddOnPreview] = []
@@ -1235,6 +1237,7 @@ class ShopProfileUpdate(BaseModel):
 
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None
+    qr_code_url: Optional[str] = None 
 
     @field_validator("delivery_fee")
     @classmethod

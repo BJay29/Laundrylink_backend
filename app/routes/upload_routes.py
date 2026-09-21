@@ -53,36 +53,36 @@ async def _read_and_validate_image(file: UploadFile) -> bytes:
 
 
 # =========================================================
-# SHOP-SIDE UPLOAD (Owner/Staff) — Payment QR codes
+# SHOP-SIDE UPLOAD (Owner/Staff) — Payment QR code
 # =========================================================
 
 @router.post("/payment-qr", response_model=schemas.UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_payment_qr(
-    provider: str = Form(..., description="'gcash' or 'paymaya'"),
     file: UploadFile = File(...),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Uploads a shop's GCash or PayMaya QR code image to the
-    "payment-qr-codes" Supabase Storage bucket and returns its public
-    URL. The caller (Optimization Settings on the web app) is
-    responsible for then saving that URL onto the Shop record via
-    PUT /settings/profile ({ gcash_qr_url: <url> } or
-    { paymaya_qr_url: <url> }) — this endpoint only handles the file
-    itself, same separation of concerns as the existing
-    apiService.uploadPaymentQR() + apiService.updateShopProfile() pair
-    on the frontend.
+    Uploads the shop's SINGLE generic online-payment QR code image
+    (National QR Ph style — accepts GCash, PayMaya, and other e-wallets/
+    banks through one QR) to the "payment-qr-codes" Supabase Storage
+    bucket and returns its public URL. The caller (Optimization
+    Settings on the web app) is responsible for then saving that URL
+    onto the Shop record via PUT /settings/profile
+    ({ qr_code_url: <url> }) — this endpoint only handles the file
+    itself.
+
+    UPDATED (online_qr consolidation): the 'provider' form field
+    ("gcash" | "paymaya") has been REMOVED — a shop used to need two
+    separate QR uploads (one per provider), but the new payment_method
+    model has a single "online_qr" option, so only one QR per shop is
+    needed now. If you still have old frontend code sending a
+    `provider` field, it will simply be ignored (FastAPI drops unknown
+    form fields silently for endpoints that don't declare them).
 
     Scoped to current_user.shop_id — a staff/owner can only ever upload
     a QR for their own shop, never anyone else's.
     """
-    if provider not in ("gcash", "paymaya"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="provider must be 'gcash' or 'paymaya'."
-        )
-
     if not current_user.shop_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -91,7 +91,7 @@ async def upload_payment_qr(
 
     contents = await _read_and_validate_image(file)
     extension = extension_for_content_type(file.content_type)
-    path = build_storage_path("shop", current_user.shop_id, provider, extension=extension)
+    path = build_storage_path("shop", current_user.shop_id, "qr", extension=extension)
 
     public_url = upload_image_to_bucket(
         bucket="payment-qr-codes",

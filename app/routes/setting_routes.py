@@ -232,6 +232,7 @@ def get_shop_profile(
         longitude=shop.longitude,
         gcash_qr_url=shop.gcash_qr_url,
         paymaya_qr_url=shop.paymaya_qr_url,
+        
     )
 
 

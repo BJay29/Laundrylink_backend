@@ -175,7 +175,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
     # iba pa (cash/cod, o online pero walang proof pa) → "unpaid",
     # gaya ng dating default.
     initial_payment_status = "unpaid"
-    if booking_data.payment_method in ("gcash", "paymaya") and booking_data.proof_of_payment_url:
+    if booking_data.payment_method == "online_qr" and booking_data.proof_of_payment_url:
         initial_payment_status = "pending_verification"
 
     # --- 4.5 APPLY PROMO CODE (NEW — walk-in promo support) ---
@@ -1565,7 +1565,7 @@ async def finalize_booking_pricing(
     booking.loads = mapped_fields["loads"]
     booking.total_price = computed_price
 
-    is_online_payment = booking.payment_method in ("gcash", "paymaya")
+    is_online_payment = booking.payment_method == "online_qr"
     booking.status = "Awaiting Payment" if is_online_payment else "Pending"
 
     try:
@@ -1877,7 +1877,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
 
     # NEW (Online Payment feature) — same logic as create_booking().
     initial_payment_status = "unpaid"
-    if booking_data.payment_method in ("gcash", "paymaya") and booking_data.proof_of_payment_url:
+    if booking_data.payment_method == "online_qr" and booking_data.proof_of_payment_url:
         initial_payment_status = "pending_verification"
 
     new_booking = Booking(

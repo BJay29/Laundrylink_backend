@@ -1,7 +1,7 @@
 from app.database import Base
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 class Shop(Base):
     """
@@ -39,6 +39,7 @@ class Shop(Base):
     # OptimizationSettings.jsx / PaymentVerificationModal.jsx.
     gcash_qr_url = Column(String, nullable=True)
     paymaya_qr_url = Column(String, nullable=True)
+    qr_code_url = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -65,6 +66,7 @@ class Shop(Base):
             "is_online": self.is_online,
             "gcash_qr_url": self.gcash_qr_url,
             "paymaya_qr_url": self.paymaya_qr_url,
+            "qr_code_url": self.qr_code_url,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
@@ -640,6 +642,53 @@ class Booking(Base):
     def shop_name(self):
         return self.shop.shop_name if self.shop else None
 
+    @property
+    def estimated_completion_time(self):
+        """
+        NEW (Smart Countdown Timer feature) — computed lang, WALANG
+        bagong column/migration. Ginagamit ang Machine.cycle_started_at
+        + Machine.remaining_time (parehong naka-stamp na sa
+        _bind_machine_telemetry() sa booking_controller.py bawat
+        pag-assign ng machine) — parehong laman ng dalawang fields na
+        ito ay NASA loob na ng washer/dryer/machine_assignments
+        relationships (lazy="joined" na, walang extra DB query dito).
+
+        Kinukuha ang PINAKAHULING (max) estimated finish time sa lahat
+        ng kasalukuyang aktibong machine ng booking na ito — kung
+        maraming load pa (multi-machine), ang "estimated completion"
+        ng buong booking ay kapag natapos na ang PINAKAMATAGAL na load.
+
+        Nagbabalik ng None kung hindi "In Progress" ang booking, o kung
+        walang aktibong machine na may cycle_started_at (hal. bago pa
+        lang gawin, o tapos na).
+        """
+        if self.status != "In Progress":
+            return None
+
+        candidates = []
+
+        # Legacy single-machine path
+        if self.washer and self.washer.cycle_started_at and self.washer.remaining_time:
+            candidates.append(
+                self.washer.cycle_started_at + timedelta(minutes=self.washer.remaining_time)
+            )
+        if self.dryer and self.dryer.cycle_started_at and self.dryer.remaining_time:
+            candidates.append(
+                self.dryer.cycle_started_at + timedelta(minutes=self.dryer.remaining_time)
+            )
+
+        # Multi-machine path (BookingMachineAssignment rows)
+        for assignment in self.machine_assignments:
+            if assignment.phase == "done":
+                continue
+            machine = assignment.dryer if assignment.dryer_id else assignment.washer
+            if machine and machine.cycle_started_at and machine.remaining_time:
+                candidates.append(
+                    machine.cycle_started_at + timedelta(minutes=machine.remaining_time)
+                )
+
+        return max(candidates) if candidates else None
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -684,6 +733,7 @@ class Booking(Base):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "ready_at": self.ready_at.isoformat() if self.ready_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "estimated_completion_time": self.estimated_completion_time.isoformat() if self.estimated_completion_time else None,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,
