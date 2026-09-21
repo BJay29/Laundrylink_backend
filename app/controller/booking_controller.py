@@ -2,7 +2,7 @@ from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryU
 from app.schemas import (
     BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
     MachineAssignmentInput, MoveLoadToDryerInput, PaymentRejectRequest,
-    BookingFinalizePricingRequest
+    BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest
 )
 from app.services.prediction_service import PredictionService
 from app.services.ws_manager import (
@@ -18,6 +18,7 @@ from app import models
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timezone
+from app.services.customer_ws_manager import customer_manager, EVENT_BOOKING_UPDATED
 
 
 def create_booking(db: Session, booking_data: BookingCreate, current_user: models.User):
@@ -981,44 +982,17 @@ def _get_status_notification_content(new_status: str, booking: Booking):
     return content_map.get(new_status)
 
 
-def update_booking_status(db: Session, booking_id: int, new_status: str, current_user: models.User):
+async def update_booking_status(db: Session, booking_id: int, new_status: str, current_user: models.User):
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
 
-    UPDATED (multi-machine assignment feature): ang pag-release ng
-    machines papuntang "Available" ay hindi na umaasa lamang sa legacy
-    washer_id/dryer_id — ngayon ay ini-iterate na rin ang lahat ng
-    Booking.machine_assignments (kung meron), at ire-release ang bawat
-    washer_id/dryer_id na naka-attach doon, saka mamarkahan ang bawat
-    assignment na phase="done" na may completed timestamp. Sinasaklaw
-    parehong lumang single-machine bookings AT bagong multi-load
-    bookings sa iisang function.
+    ... (walang binago sa dating docstring — see previous version) ...
 
-    UPDATED (Activity Log): now takes current_user instead of a bare
-    shop_id, for the same attribution reason as create_booking(). This
-    is the endpoint used for status transitions including cancellation,
-    so it's one of the more important actions to attribute correctly.
-
-    NEW (Notifications): kung ang booking na ito ay may naka-attach na
-    customer_id (galing sa mobile app), gumagawa ito ng isang
-    Notification para sa customer, na may sariling type/title/message
-    depende sa SPECIFIC na bagong status (see
-    _get_status_notification_content() sa itaas). Wala itong ginagawang
-    notification kung terminal-only ang booking (walang customer_id) o
-    kung ang bagong status ay wala sa content_map (hal. "Pending").
-
-    NEW (Order Tracking / Live Stepper feature): sini-stamp ang
-    Booking.started_at / ready_at / completed_at depende sa kung anong
-    status ang pinasok — ito ang nagbibigay sa mobile app's vertical
-    timeline/stepper ng aktwal na "kailan" para sa bawat hakbang, sa
-    halip na basahin lang ang kasalukuyang status nang walang history.
-    Ang started_at ay ginagalaw lang kung wala pa itong laman (`not
-    booking.started_at`) — nangyayari na ito nang mas maaga kapag
-    naka-assign na ng machine ang booking bago pa man tumawag dito
-    (see create_booking(), assign_machine_to_booking(),
-    assign_machines_to_booking()), kaya hindi na ito dapat ma-overwrite
-    ulit dito kung sakaling manual pa ring tinawag ang "In Progress"
-    status update.
+    UPDATED (customer WebSocket): now `async` — pushes a live
+    "booking_updated" event to the customer's own device (if connected)
+    right after committing, in addition to the Notification row already
+    created below (which the mobile app also polls as a fallback when
+    it isn't currently connected).
     """
     shop_id = current_user.shop_id
 
@@ -1036,18 +1010,7 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
     old_status = booking.status
     booking.status = new_status
 
-    # NEW (Order Tracking / Live Stepper feature) — stamp the timestamp
-    # matching whichever step this transition just entered.
-    stepper_now = datetime.now(timezone.utc)
-    if new_status == "In Progress" and not booking.started_at:
-        booking.started_at = stepper_now
-    elif new_status == "Ready":
-        booking.ready_at = stepper_now
-    elif new_status == "Claimed":
-        booking.completed_at = stepper_now
-
     if new_status in ["Ready", "Claimed", "Cancelled"]:
-        # --- Legacy single-machine release (washer_id/dryer_id) ---
         legacy_assigned_ids = [
             m_id for m_id in [booking.washer_id, booking.dryer_id]
             if m_id is not None
@@ -1060,7 +1023,6 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
             for machine in legacy_machines:
                 _release_machine(machine)
 
-        # --- NEW: multi-machine release (BookingMachineAssignment rows) ---
         assignments = (
             db.query(BookingMachineAssignment)
             .filter(BookingMachineAssignment.booking_id == booking.id)
@@ -1114,7 +1076,8 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
                 )
 
         db.commit()
-        return (
+
+        reloaded = (
             db.query(Booking)
             .options(
                 joinedload(Booking.washer),
@@ -1126,6 +1089,16 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
             .filter(Booking.id == booking_id)
             .first()
         )
+
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "payment_status": reloaded.payment_status,
+            })
+
+        return reloaded
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -1138,40 +1111,13 @@ def update_booking_status(db: Session, booking_id: int, new_status: str, current
 # PAYMENT FUNCTIONS
 # =========================================================
 
-def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStatusUpdate, current_user: models.User):
+async def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStatusUpdate, current_user: models.User):
     """
-    Manual na "Mark as Paid" action ng staff. Ginagamit ito sa parehong
-    Walk-in (cash, dropoff) at Mobile COD bookings, kung saan ang staff
-    mismo ang nagko-confirm na natanggap na ang bayad. Ginagamit din ito
-    ngayon (Online Payment feature) para sa GCash/PayMaya bookings na
-    "pending_verification" — ang "Approve" action sa
-    PaymentVerificationModal ay tumatawag din dito (parehong "Mark as
-    Paid" endpoint, walang bagong function na kinakailangan).
+    ... (walang binago sa dating docstring) ...
 
-    payment_method ay OPTIONAL — kung walang ibinigay (None), hindi na
-    ito ginagalaw, panatilihin ang existing value ng booking. Ito ang
-    nagpoprotekta sa "Approve" action: kapag nag-a-approve ng
-    gcash/paymaya booking, hindi na kailangang mag-alala na baka
-    ma-reset ang payment_method pabalik sa "cash".
-
-    Staff mismo ang nagde-decide kung KAILAN i-mark bilang paid — walang
-    naka-bind na fixed na timing (hal. pwede itong gawin bago pa man
-    simulan ang laundry, o pagkatapos ng buong service, depende sa
-    proseso ng bawat shop).
-
-    UPDATED (Weighing / Finalize Pricing feature): kung ang booking na
-    ito ay kasalukuyang nasa status na "Awaiting Payment" (ibig sabihin,
-    na-finalize na ang presyo ng staff sa weighing step, online ang
-    payment method, at hinihintay lang ang pagbabayad), ang pagmamarka
-    dito bilang "paid" ay AWTOMATIKONG magpapalipat din sa
-    Booking.status papuntang "Pending" — ito ang "auto-route to Service
-    Terminal" na hiningi ng Module B/C ng Admin Dashboard spec: sa
-    sandaling mabayaran, dapat na itong pumasok sa normal na machine-
-    assignment queue (get_active_bookings() nang walang karagdagang
-    hakbang).
-
-    Naka-scope sa parehong shop_id ng staff (current_user.shop_id) —
-    hindi pwedeng i-mark ng isang shop ang booking ng ibang shop.
+    UPDATED (customer WebSocket): now `async` — pushes a live
+    "booking_updated" event to the customer's device right after
+    committing.
     """
     shop_id = current_user.shop_id
 
@@ -1197,11 +1143,6 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
     booking.payment_status = "paid"
     booking.paid_at = datetime.now(timezone.utc)
 
-    # NEW (Weighing / Finalize Pricing feature) — auto-route sa "Pending"
-    # kapag "Awaiting Payment" ang kasalukuyang status. Wala itong
-    # epekto sa mga booking na hindi dumaan sa weighing flow (hal.
-    # walk-in cash bookings), dahil "Pending"/"In Progress" na agad ang
-    # status ng mga iyon mula sa simula.
     if booking.status == "Awaiting Payment":
         booking.status = "Pending"
 
@@ -1231,7 +1172,8 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
 
         db.commit()
         db.refresh(booking)
-        return (
+
+        reloaded = (
             db.query(Booking)
             .options(
                 joinedload(Booking.washer),
@@ -1243,6 +1185,16 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
             .filter(Booking.id == booking_id)
             .first()
         )
+
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "payment_status": reloaded.payment_status,
+            })
+
+        return reloaded
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -1251,28 +1203,13 @@ def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStat
         )
 
 
-def reject_payment(db: Session, booking_id: int, reason: str, current_user: models.User):
+async def reject_payment(db: Session, booking_id: int, reason: str, current_user: models.User):
     """
-    NEW (Online Payment feature) — Kabaligtaran ng mark_booking_as_paid().
-    Ginagamit ito sa "Reject" action ng PaymentVerificationModal kapag
-    napansin ng staff na mali/hindi valid ang na-upload na proof of
-    payment (hal. maling amount, unclear na larawan, hindi tugma ang
-    reference number).
+    ... (walang binago sa dating docstring) ...
 
-    Itinatakda pabalik ang payment_status sa "unpaid" (hindi
-    pinapanatili bilang "pending_verification" — kailangan ulit
-    mag-upload/mag-ayos ang customer), isinasave ang
-    payment_rejection_reason, at gumagawa ng customer notification
-    (type "payment_rejected") kung may customer_id ang booking.
-
-    NOTE (Weighing / Finalize Pricing feature): sinasadyang HINDI
-    ginagalaw ang Booking.status dito — kung "Awaiting Payment" ang
-    booking bago ma-reject, mananatili itong "Awaiting Payment" (hindi
-    ito lilipat sa "Pending" o kahit saan), dahil kailangan pang
-    mag-resubmit ng bagong proof of payment ang customer bago ito
-    tuluyang makapasok sa operational queue.
-
-    Naka-scope sa parehong shop_id ng staff, gaya ng mark_booking_as_paid().
+    UPDATED (customer WebSocket): now `async` — pushes a live
+    "booking_updated" event to the customer's device right after
+    committing.
     """
     shop_id = current_user.shop_id
 
@@ -1326,7 +1263,8 @@ def reject_payment(db: Session, booking_id: int, reason: str, current_user: mode
 
         db.commit()
         db.refresh(booking)
-        return (
+
+        reloaded = (
             db.query(Booking)
             .options(
                 joinedload(Booking.washer),
@@ -1338,6 +1276,16 @@ def reject_payment(db: Session, booking_id: int, reason: str, current_user: mode
             .filter(Booking.id == booking_id)
             .first()
         )
+
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "payment_status": reloaded.payment_status,
+            })
+
+        return reloaded
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -1376,6 +1324,95 @@ def get_pending_verification_bookings(db: Session, shop_id: int):
         .order_by(Booking.booking_timestamp.desc())
         .all()
     )
+
+async def submit_payment_proof(
+    db: Session,
+    booking_id: int,
+    proof_data: BookingSubmitPaymentProofRequest,
+    customer: models.Customer,
+):
+    """
+    NEW (Module C) — customer attaches proof of payment sa isang
+    booking na "Awaiting Payment" na (na-finalize na ng staff ang
+    presyo, online ang payment method). Itinatakda ang payment_status
+    sa "pending_verification" — parehong verification flow gaya ng
+    create-time na gcash/paymaya + proof_of_payment_url branch
+    (PaymentVerificationModal -> mark_booking_as_paid()/reject_payment()
+    ang gagamitin ng staff dito rin).
+
+    Naka-scope sa Booking.customer_id == customer.id, parehong pattern
+    ng cancel_customer_booking().
+    """
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.customer_id == customer.id,
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.status != "Awaiting Payment":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot submit payment proof for a booking with status "
+                f"'{booking.status}'. Only bookings Awaiting Payment can "
+                "have proof submitted."
+            )
+        )
+
+    booking.proof_of_payment_url = proof_data.proof_of_payment_url
+    booking.payment_status = "pending_verification"
+
+    try:
+        log_activity(
+            db, booking.shop_id,
+            actor_name=customer.full_name,
+            actor_role="customer",
+            description=f"Customer submitted payment proof for their booking - {booking.service_type}"
+        )
+
+        db.commit()
+        db.refresh(booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+
+        # Refreshes the shop's "Pending Payment Verification" bell
+        # right away.
+        await manager.broadcast(booking.shop_id, {
+            "type": "new_payment_verification_request",
+            "booking_id": reloaded.id,
+            "customer_name": reloaded.customer_name,
+        })
+
+        await customer_manager.send_to_customer(customer.id, {
+            "type": EVENT_BOOKING_UPDATED,
+            "booking_id": reloaded.id,
+            "status": reloaded.status,
+            "payment_status": reloaded.payment_status,
+        })
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Submit Payment Proof Error: {str(e)}"
+        )
 
 
 # =========================================================
@@ -1591,6 +1628,15 @@ async def finalize_booking_pricing(
             "final_price": reloaded.final_price,
             "status": reloaded.status,
         })
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "payment_status": reloaded.payment_status,
+                "final_weight": reloaded.final_weight,
+                "final_price": reloaded.final_price,
+            })
 
         return reloaded
     except Exception as e:

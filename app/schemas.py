@@ -802,6 +802,24 @@ class PaymentRejectRequest(BaseModel):
             raise ValueError("Rejection reason must be 300 characters or fewer.")
         return cleaned
 
+class BookingSubmitPaymentProofRequest(BaseModel):
+    """
+    Schema para sa Module C ng mobile app — pag-attach ng proof of
+    payment sa isang EXISTING booking na "Awaiting Payment" na (na-
+    finalize na ng staff ang presyo, online ang payment method). Ang
+    larawan mismo ay hiwalay na na-upload via POST /uploads/payment-proof
+    — yung resulting public URL na lang ang ipinapasa dito.
+    """
+    proof_of_payment_url: str
+
+    @field_validator("proof_of_payment_url")
+    @classmethod
+    def validate_url(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("proof_of_payment_url cannot be empty.")
+        return cleaned
+
 
 # --- WEIGHING / FINALIZE PRICING SCHEMAS (NEW — reconciled mula sa
 #     Admin Dashboard spec, Module B: "Mobile Booking Notification &

@@ -6,7 +6,7 @@ from app.schemas import (
     BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine,
     CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest,
     PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput,
-    PaymentRejectRequest, BookingFinalizePricingRequest
+    PaymentRejectRequest, BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest
 )
 from app.controller import booking_controller
 from app import models
@@ -49,7 +49,7 @@ def get_active_bookings(
 
 
 @router.patch("/{booking_id}/status", response_model=BookingResponse)
-def update_status(
+async def update_status(
     booking_id: int,
     status_data: BookingStatusUpdate,
     current_user: models.User = Depends(get_current_user),
@@ -59,8 +59,14 @@ def update_status(
     Moves a booking through its lifecycle. Releases machines (legacy
     washer_id/dryer_id AND new per-load BookingMachineAssignment rows)
     back to Available on Ready / Claimed / Cancelled.
+
+    FIXED: booking_controller.update_booking_status() is now `async`
+    (it pushes a live WebSocket event to the customer's device) — this
+    route must be `async def` and `await` it, or FastAPI would try to
+    serialize an unawaited coroutine instead of the actual
+    BookingResponse.
     """
-    return booking_controller.update_booking_status(
+    return await booking_controller.update_booking_status(
         db, booking_id, status_data.status, current_user
     )
 
@@ -119,7 +125,7 @@ def move_load_to_dryer(
 
 
 @router.patch("/{booking_id}/mark-paid", response_model=BookingResponse)
-def mark_paid(
+async def mark_paid(
     booking_id: int,
     payment_data: PaymentStatusUpdate,
     current_user: models.User = Depends(get_current_user),
@@ -133,14 +139,17 @@ def mark_paid(
     UPDATED (Weighing feature): if the booking is currently 'Awaiting
     Payment', marking it paid also auto-routes it to 'Pending', making
     it visible in the Service Terminal for machine assignment.
+
+    FIXED: booking_controller.mark_booking_as_paid() is now `async`
+    (customer WebSocket push) — route updated to match.
     """
-    return booking_controller.mark_booking_as_paid(
+    return await booking_controller.mark_booking_as_paid(
         db, booking_id, payment_data, current_user
     )
 
 
 @router.patch("/{booking_id}/reject-payment", response_model=BookingResponse)
-def reject_payment(
+async def reject_payment(
     booking_id: int,
     reject_data: PaymentRejectRequest,
     current_user: models.User = Depends(get_current_user),
@@ -150,8 +159,11 @@ def reject_payment(
     NEW (Online Payment feature) — Staff-triggered "Reject" action for a
     GCash/PayMaya payment proof sitting at 'pending_verification'.
     Reverts payment_status to 'unpaid' and saves the rejection reason.
+
+    FIXED: booking_controller.reject_payment() is now `async` (customer
+    WebSocket push) — route updated to match.
     """
-    return booking_controller.reject_payment(
+    return await booking_controller.reject_payment(
         db, booking_id, reject_data.reason, current_user
     )
 
@@ -199,8 +211,9 @@ async def finalize_pricing(
     add-on charges) for a booking that is 'Awaiting Weighing'. Computes
     and saves the final price, then routes the booking to 'Pending'
     (cash/cod) or 'Awaiting Payment' (gcash/paymaya). Notifies the
-    customer and broadcasts a 'booking_price_finalized' event to the
-    shop's connected Service Terminal instance(s).
+    customer, broadcasts a 'booking_price_finalized' event to the
+    shop's connected Service Terminal instance(s), AND pushes a
+    'booking_updated' event straight to the customer's own device.
     """
     return await booking_controller.finalize_booking_pricing(
         db, booking_id, pricing_data, current_user
@@ -286,3 +299,21 @@ async def cancel_customer_booking(
 ):
     """Customer cancels their own booking. Only while 'Awaiting Approval' or 'Pending'."""
     return await booking_controller.cancel_customer_booking(db, booking_id, current_customer)
+
+
+@router.patch("/{booking_id}/submit-payment-proof", response_model=BookingResponse)
+async def submit_payment_proof(
+    booking_id: int,
+    proof_data: BookingSubmitPaymentProofRequest,
+    current_customer: models.Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (Module C) — mobile app customer attaches proof of payment to
+    an already-"Awaiting Payment" booking. Sets payment_status to
+    "pending_verification", notifies the shop's Service Terminal, and
+    pushes a confirmation back to the customer's own device.
+    """
+    return await booking_controller.submit_payment_proof(
+        db, booking_id, proof_data, current_customer
+    )
