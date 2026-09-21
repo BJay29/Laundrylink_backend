@@ -13,6 +13,47 @@ router = APIRouter(
 )
 
 
+def _build_shop_profile_response(shop: models.Shop, user: models.User) -> schemas.ShopProfileResponse:
+    """
+    SINGLE SOURCE OF TRUTH for building a ShopProfileResponse.
+
+    Ginagamit ng PAREHONG GET /settings/profile at PUT /settings/profile.
+
+    BAKIT MAY HELPER: dati, hiwalay na ginagawa ang response sa bawat
+    endpoint, at paulit-ulit na nakakalimutan ang mga bagong field.
+    Una, ang gcash_qr_url/paymaya_qr_url (nawawala ang QR preview pag
+    nag-refresh). Ngayon naman, ang accepts_cash / accepts_cod /
+    accepts_online — kaya nagre-revert sa OFF ang "Online Payment"
+    toggle pag nag-refresh o nag-navigate: na-save naman ito sa DB, pero
+    hindi ito kasama sa response, kaya ang frontend ay laging nakakakuha
+    ng default (`accepts_online ?? false`) galing sa GET /profile.
+
+    Kapag may bagong Shop field na kailangan ng frontend, dito na lang
+    idagdag — isang lugar lang.
+
+    NOTE: email ay galing sa User (Owner/Staff), hindi sa Shop — walang
+    `email` column ang Shop model.
+
+    NOTE (null-safety): ang mga lumang Shop row (bago idinagdag ang
+    payment columns) ay maaaring NULL ang accepts_*. Ang cash ay
+    default na True; ang cod/online ay default na False.
+    """
+    return schemas.ShopProfileResponse(
+        shop_name=shop.shop_name,
+        address=shop.address or "",
+        email=user.email,
+        has_delivery=shop.has_delivery,
+        delivery_fee=shop.delivery_fee,
+        latitude=shop.latitude,
+        longitude=shop.longitude,
+        gcash_qr_url=shop.gcash_qr_url,
+        paymaya_qr_url=shop.paymaya_qr_url,
+        accepts_cash=True if shop.accepts_cash is None else bool(shop.accepts_cash),
+        accepts_cod=bool(shop.accepts_cod),
+        accepts_online=bool(shop.accepts_online),
+    )
+
+
 @router.get("/defaults", response_model=dict)
 def get_system_defaults():
     """
@@ -197,43 +238,23 @@ def get_shop_profile(
 ):
     """
     Fetch the logged-in user's own shop profile, including delivery
-    settings.
+    settings, payment-method flags, and payment QR codes.
 
-    FIXED (email): the Shop model has no `email` column — the login
-    email belongs to the User (Owner/Staff) record, not the Shop.
-    Previously this endpoint returned the raw `shop` ORM object
-    directly, which made FastAPI/Pydantic try to read `.email` off of
-    it and fail with a 500 ("Field required: email") since Shop simply
-    doesn't have that attribute. We now build the ShopProfileResponse
-    explicitly and pull email from current_user instead.
-
-    FIXED (Online Payment feature — QR codes disappearing on refresh):
-    that same manual ShopProfileResponse construction was ALSO silently
-    dropping gcash_qr_url and paymaya_qr_url, since they were never
-    listed as arguments here — even though the Shop record itself, and
-    the value returned right after an upload, were both correct. Every
-    GET /settings/profile call (e.g. on page refresh or navigating back
-    to Optimization Settings) was returning these two fields as their
-    Pydantic default (None), which is why the uploaded QR preview
-    always vanished on refresh even though it was saved in the DB the
-    whole time. Now explicitly included below, same as any other Shop
-    field this response needs.
+    HISTORY OF FIXES (lahat ay iisang klase ng bug — nawawalang field sa
+    manual-built response):
+      - email: walang `email` column ang Shop; galing ito sa
+        current_user.
+      - gcash_qr_url / paymaya_qr_url: dating hindi kasama, kaya
+        nawawala ang QR preview pag nag-refresh.
+      - accepts_cash / accepts_cod / accepts_online: dating hindi
+        kasama, kaya nagre-revert sa OFF ang toggle sa Optimization
+        Settings pagkatapos mag-refresh o mag-navigate.
+    Lahat ito ay hawak na ng _build_shop_profile_response() sa itaas.
     """
     shop = settings_controller.get_shop_profile(db, current_user.shop_id)
     if not shop:
         raise HTTPException(status_code=404, detail="Shop not found")
-    return schemas.ShopProfileResponse(
-        shop_name=shop.shop_name,
-        address=shop.address or "",
-        email=current_user.email,
-        has_delivery=shop.has_delivery,
-        delivery_fee=shop.delivery_fee,
-        latitude=shop.latitude,
-        longitude=shop.longitude,
-        gcash_qr_url=shop.gcash_qr_url,
-        paymaya_qr_url=shop.paymaya_qr_url,
-        
-    )
+    return _build_shop_profile_response(shop, current_user)
 
 
 @router.put("/profile", response_model=schemas.ShopProfileResponse)
@@ -244,18 +265,15 @@ def update_shop_profile(
 ):
     """
     Update the logged-in user's own shop name, address, delivery
-    settings, and payment QR codes.
+    settings, payment-method flags, and payment QR codes.
 
     NOTE: email is intentionally NOT part of this update — it's the
     User's own login email, not a Shop field, and is not editable from
     here (see ShopProfileUpdate in schemas.py). The response still
     includes current_user.email so the frontend has it to display.
 
-    FIXED (Online Payment feature): gcash_qr_url and paymaya_qr_url are
-    now included in the returned response, same fix as GET /profile
-    above — the controller was already saving these correctly to the
-    Shop record, but this endpoint's manually-built response object was
-    dropping them before they ever reached the frontend.
+    Ang response ay ginagawa ng parehong _build_shop_profile_response()
+    na ginagamit ng GET, para laging pareho ang hugis ng data.
 
     UPDATED: settings_controller.update_shop_profile() now takes
     current_user (not shop_id) for Activity Log attribution.
@@ -263,17 +281,7 @@ def update_shop_profile(
     updated_shop = settings_controller.update_shop_profile(db, current_user, profile_update)
     if not updated_shop:
         raise HTTPException(status_code=404, detail="Shop not found")
-    return schemas.ShopProfileResponse(
-        shop_name=updated_shop.shop_name,
-        address=updated_shop.address or "",
-        email=current_user.email,
-        has_delivery=updated_shop.has_delivery,
-        delivery_fee=updated_shop.delivery_fee,
-        latitude=updated_shop.latitude,
-        longitude=updated_shop.longitude,
-        gcash_qr_url=updated_shop.gcash_qr_url,
-        paymaya_qr_url=updated_shop.paymaya_qr_url,
-    )
+    return _build_shop_profile_response(updated_shop, current_user)
 
 
 # REMOVED (Supabase Auth migration): PUT /settings/password — dating
