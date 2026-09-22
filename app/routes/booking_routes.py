@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
@@ -10,7 +10,8 @@ from app.schemas import (
 )
 from app.controller import booking_controller
 from app import models
-from app.security import get_current_user, get_current_customer
+from app.security import get_current_user, get_current_customer, decode_supabase_token
+from app.services.customer_ws_manager import customer_manager
 
 # Booking router — handles all laundry transaction lifecycle endpoints
 router = APIRouter(
@@ -317,3 +318,58 @@ async def submit_payment_proof(
     return await booking_controller.submit_payment_proof(
         db, booking_id, proof_data, current_customer
     )
+
+
+# =========================================================
+# CUSTOMER WEBSOCKET (NEW — live "booking_updated" push channel)
+# =========================================================
+
+@router.websocket("/ws/customer")
+async def customer_websocket(
+    websocket: WebSocket,
+    token: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Mobile app WebSocket connection — kailangan ipasa ang Supabase JWT
+    bilang query param (?token=...) dahil hindi native na sumusuporta
+    ang WebSocket protocol sa Authorization headers gaya ng REST.
+
+    Ginagamit ito ng order_tracking_page.dart (o katumbas) bilang
+    live-update channel — sa sandaling magbago ang booking status,
+    ma-finalize ang presyo, o ma-verify/i-reject ang payment mula sa
+    shop, agad na matatanggap ng customer ang "booking_updated" event
+    dito (see customer_manager.send_to_customer() calls sa
+    booking_controller.py).
+
+    Gumagamit ng normal na Depends(get_db) dito (hindi SessionLocal()
+    direkta) dahil available naman ang request-scoped dependency
+    injection sa WebSocket route functions sa FastAPI, hindi tulad ng
+    ConnectionManager sa ws_manager.py na walang access doon sa
+    konteksto kung saan ito ginagamit.
+    """
+    try:
+        claims = decode_supabase_token(token)
+    except Exception:
+        await websocket.close(code=4401)
+        return
+
+    supabase_uid = claims.get("sub")
+    customer = db.query(models.Customer).filter(
+        models.Customer.supabase_uid == supabase_uid
+    ).first()
+
+    if not customer or not customer.is_active:
+        await websocket.close(code=4401)
+        return
+
+    await customer_manager.connect(customer.id, websocket)
+
+    try:
+        while True:
+            # Keep the connection alive; the client doesn't need to
+            # send anything meaningful — this just waits for a
+            # disconnect signal.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        customer_manager.disconnect(customer.id, websocket)

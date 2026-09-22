@@ -1216,7 +1216,9 @@ class ShopDetailResponse(BaseModel):
 
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None
-    qr_code_url: Optional[srt] = None
+    # FIXED: dating `Optional[srt]` (typo) — NameError sa pag-import ng
+    # schemas.py na pumipigil sa pagsisimula ng buong backend.
+    qr_code_url: Optional[str] = None
 
     services: List[ShopServicePreview] = []
     add_ons: List[AddOnPreview] = []
@@ -1238,6 +1240,15 @@ class ShopProfileUpdate(BaseModel):
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None
     qr_code_url: Optional[str] = None 
+
+    # FIXED (Payment Methods feature): dati WALA ang tatlong field na
+    # ito, kaya tahimik na inaalis ng Pydantic ang accepts_* na
+    # ipinapadala ng Optimization Settings — hindi na-se-save ang
+    # "Payment Methods" toggles. Partial update (lahat Optional, None
+    # ang ibig sabihin "huwag galawin").
+    accepts_cash: Optional[bool] = None
+    accepts_cod: Optional[bool] = None
+    accepts_online: Optional[bool] = None
 
     @field_validator("delivery_fee")
     @classmethod
@@ -1273,6 +1284,14 @@ class ShopProfileResponse(BaseModel):
 
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None
+
+    # FIXED (Payment Methods feature): dati WALA ang tatlong field na
+    # ito, kaya hindi bumabalik sa frontend ang naka-save na payment
+    # method flags — laging nagre-revert sa OFF ang "Online Payment"
+    # toggle pagkatapos ng refresh/navigation.
+    accepts_cash: bool = True
+    accepts_cod: bool = False
+    accepts_online: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

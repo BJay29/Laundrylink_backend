@@ -41,6 +41,23 @@ class Shop(Base):
     paymaya_qr_url = Column(String, nullable=True)
     qr_code_url = Column(String, nullable=True)
 
+    # (Payment Methods feature) — anong payment methods ang tinatanggap
+    # ng shop. Kinokontrol ng "Payment Methods" section sa Optimization
+    # Settings (accepts_cash / accepts_cod / accepts_online).
+    #
+    # FIXED: dati WALANG mga column na ito sa model, kaya kahit
+    # ipinapadala ng frontend ang accepts_* sa PUT /settings/profile,
+    # tahimik itong hindi nase-save (hasattr(db_shop, key) ay False sa
+    # settings_controller.update_shop_profile()) at laging nagre-revert
+    # sa OFF ang "Online Payment" toggle pag nag-refresh.
+    #
+    # PAALALA: kailangang may katumbas na columns din sa aktwal na
+    # database table (Supabase) — see ALTER TABLE statements sa
+    # documentation ng fix na ito.
+    accepts_cash = Column(Boolean, default=True, nullable=False, server_default="true")
+    accepts_cod = Column(Boolean, default=False, nullable=False, server_default="false")
+    accepts_online = Column(Boolean, default=False, nullable=False, server_default="false")
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     users = relationship("User", back_populates="shop", cascade="all, delete-orphan")
@@ -67,6 +84,9 @@ class Shop(Base):
             "gcash_qr_url": self.gcash_qr_url,
             "paymaya_qr_url": self.paymaya_qr_url,
             "qr_code_url": self.qr_code_url,
+            "accepts_cash": self.accepts_cash,
+            "accepts_cod": self.accepts_cod,
+            "accepts_online": self.accepts_online,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
