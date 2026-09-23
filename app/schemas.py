@@ -873,6 +873,40 @@ class UploadResponse(BaseModel):
     url: str
 
 
+# --- RIDER ASSIGNMENT SCHEMAS (NEW — Pickup & Delivery feature) ---
+#
+# Manual-entry lang, walang Rider table/model. Dalawang HIWALAY na
+# schema instance ang ginagamit (isa para sa pickup leg, isa para sa
+# delivery leg — see assign_pickup_rider()/assign_delivery_rider() sa
+# booking_controller.py) pero magkapareho ang shape, kaya isang schema
+# lang ang kailangan.
+
+class RiderAssignmentInput(BaseModel):
+    """
+    Schema para sa pag-assign ng rider (pickup o delivery leg) sa
+    Service Terminal — staff mismo ang nagta-type ng pangalan at
+    contact number, walang naka-catalog na listahan ng riders.
+    """
+    rider_name: str
+    rider_contact: str
+
+    @field_validator("rider_name")
+    @classmethod
+    def validate_rider_name(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Rider name cannot be empty.")
+        return cleaned
+
+    @field_validator("rider_contact")
+    @classmethod
+    def validate_rider_contact(cls, v):
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Rider contact number cannot be empty.")
+        return cleaned
+
+
 # --- BOOKING SCHEMAS ---
 
 class BookingCreate(BaseModel):
@@ -1012,6 +1046,26 @@ class BookingResponse(BaseModel):
     completed_at: Optional[datetime] = None
     estimated_completion_time: Optional[datetime] = None
 
+    # NEW (Rider Assignment feature — Pickup & Delivery). Laging null
+    # para sa "dropoff" bookings — applicable lang kapag
+    # fulfillment_mode == "delivery". Ginagamit ng mobile app stepper
+    # para ipakita ang "Rider on the way" step kasama ang pangalan at
+    # contact number ng naka-assign na rider.
+    pickup_rider_name: Optional[str] = None
+    pickup_rider_contact: Optional[str] = None
+    pickup_rider_assigned_at: Optional[datetime] = None
+    delivery_rider_name: Optional[str] = None
+    delivery_rider_contact: Optional[str] = None
+    delivery_rider_assigned_at: Optional[datetime] = None
+
+    # NEW (Delivery Address feature) — snapshot ng saved address na
+    # pinili ng customer sa checkout (see Booking docstring sa models.py
+    # para sa buong paliwanag). Laging null para sa "dropoff" bookings.
+    delivery_address_id: Optional[int] = None
+    delivery_address_line: Optional[str] = None
+    delivery_latitude: Optional[float] = None
+    delivery_longitude: Optional[float] = None
+
     inventory_items_used: List[BookingInventoryUsageResponse] = []
     add_ons_used: List[BookingAddOnUsageResponse] = []
     
@@ -1065,6 +1119,13 @@ class CustomerBookingCreate(BaseModel):
     add_on_ids: List[int] = []
     promo_code: Optional[str] = None
 
+    # NEW (Delivery Address feature) — dapat isa sa mga saved Address ng
+    # customer (validated sa booking_controller.create_customer_booking()
+    # na parehong customer_id at kabilang doon). Required kapag
+    # fulfillment_mode == "delivery" (see validator sa ibaba); ignored
+    # kapag "dropoff".
+    address_id: Optional[int] = None
+
     payment_method: str = "cash"
 
     proof_of_payment_url: Optional[str] = None
@@ -1089,6 +1150,13 @@ class CustomerBookingCreate(BaseModel):
     def validate_pickup_required_for_delivery(cls, v, info):
         if info.data.get("fulfillment_mode") == "delivery" and v is None:
             raise ValueError("pickup_datetime is required when fulfillment_mode is 'delivery'.")
+        return v
+
+    @field_validator("address_id")
+    @classmethod
+    def validate_address_required_for_delivery(cls, v, info):
+        if info.data.get("fulfillment_mode") == "delivery" and v is None:
+            raise ValueError("address_id is required when fulfillment_mode is 'delivery'.")
         return v
 
     @field_validator("payment_method")

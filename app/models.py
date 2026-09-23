@@ -529,6 +529,57 @@ class Booking(Base):
     stamp ito sa booking_controller.py sa create_booking(),
     assign_machine_to_booking(), assign_machines_to_booking(), at
     update_booking_status().
+
+    NEW (Rider Assignment feature — Pickup & Delivery): idinagdag ang
+    apat na manual-entry na rider fields sa ibaba. SINADYANG walang
+    bagong Rider table/model — staff ang direktang naglalagay ng
+    pangalan at contact number ng rider sa Service Terminal (hindi ito
+    isang naka-login na account, hindi rin ito naka-link sa isang
+    "riders" catalog), dahil simpleng text-entry lang ang hiniling na
+    disenyo, hindi buong rider-management system.
+
+    Dalawang HIWALAY na pares ang meron — isa para sa PICKUP leg
+    (rider na kukuha ng maruming damit sa bahay ng customer papunta sa
+    shop), isa para sa DELIVERY leg (rider na maghahatid ng malinis na
+    damit pabalik) — dahil magkaiba ang oras ng pangyayari ng dalawa
+    (pickup: bago pa man matimbang; delivery: pagkatapos maging
+    "Ready"), at kadalasan iba ring rider ang gumagawa sa bawat leg.
+
+    Applicable lang ang mga field na ito kapag `fulfillment_mode ==
+    "delivery"` — laging null para sa "dropoff" bookings (walang rider
+    na kasangkot doon, sa shop mismo pumupunta/kumukuha ang customer).
+
+      - pickup_rider_name / pickup_rider_contact: itinatakda ng staff
+        sa sandaling tatanggapin/aaprubahan nila ang delivery booking
+        (see booking_controller.assign_pickup_rider() at
+        accept_customer_booking()) — bago pa man matimbang ang laundry,
+        dahil ang rider pa lang ang kukuha nito sa customer.
+      - pickup_rider_assigned_at: kailan itinakda ang pickup rider.
+      - delivery_rider_name / delivery_rider_contact: itinatakda ng
+        staff sa sandaling maging "Ready" na ang laundry (see
+        booking_controller.assign_delivery_rider()) — ito na ang
+        maghahatid pabalik sa customer.
+      - delivery_rider_assigned_at: kailan itinakda ang delivery rider.
+
+    NEW (Delivery Address feature): idinagdag ang tatlong SNAPSHOT
+    fields sa ibaba — `delivery_address_id`, `delivery_address_line`,
+    `delivery_latitude`, `delivery_longitude`. Kailangan lang ang mga
+    ito kapag `fulfillment_mode == "delivery"`; laging null para sa
+    "dropoff".
+
+    SINADYANG "snapshot" ito (kinopya ang address_line/lat/long papunta
+    sa Booking mismo sa create_customer_booking()), HINDI basta
+    live-lookup papunta sa Address table gamit lang ang
+    delivery_address_id — parehong pattern ng ibang "capture value at
+    time of booking" fields sa file na ito (hal.
+    BookingAddOnUsage.price_at_booking). Dahilan: puwedeng i-edit o
+    i-delete ng customer ang isang saved address nila pagkatapos
+    mag-book (Saved Addresses page sa Profile) — kung live-lookup lang
+    ang gagamitin, mawawala o magbabago ang address na makikita ng
+    rider/staff sa isang LUMANG booking. Ang `delivery_address_id`
+    mismo ay pinapanatili pa rin (nullable, SET NULL on delete) bilang
+    REFERENCE lang papunta sa orihinal na saved address record —
+    hindi ito ang pinagkukunan ng aktwal na address na ipinapakita.
     """
     __tablename__ = "bookings"
 
@@ -624,6 +675,28 @@ class Booking(Base):
     started_at = Column(DateTime(timezone=True), nullable=True)
     ready_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # --- NEW (Rider Assignment feature — Pickup & Delivery) ---
+    # Manual-entry lang, walang Rider table (see docstring ng klase sa
+    # itaas para sa buong paliwanag). Applicable lang kapag
+    # fulfillment_mode == "delivery".
+    pickup_rider_name = Column(String, nullable=True)
+    pickup_rider_contact = Column(String, nullable=True)
+    pickup_rider_assigned_at = Column(DateTime(timezone=True), nullable=True)
+
+    delivery_rider_name = Column(String, nullable=True)
+    delivery_rider_contact = Column(String, nullable=True)
+    delivery_rider_assigned_at = Column(DateTime(timezone=True), nullable=True)
+
+    # --- NEW (Delivery Address feature) ---
+    # Snapshot ng saved address na pinili ng customer sa checkout — see
+    # docstring ng klase sa itaas para sa buong paliwanag kung bakit
+    # snapshot at hindi live-lookup. Applicable lang kapag
+    # fulfillment_mode == "delivery".
+    delivery_address_id = Column(Integer, ForeignKey("addresses.id", ondelete="SET NULL"), nullable=True)
+    delivery_address_line = Column(String, nullable=True)
+    delivery_latitude = Column(Float, nullable=True)
+    delivery_longitude = Column(Float, nullable=True)
 
     booking_timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -754,6 +827,18 @@ class Booking(Base):
             "ready_at": self.ready_at.isoformat() if self.ready_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "estimated_completion_time": self.estimated_completion_time.isoformat() if self.estimated_completion_time else None,
+            # NEW (Rider Assignment feature — Pickup & Delivery)
+            "pickup_rider_name": self.pickup_rider_name,
+            "pickup_rider_contact": self.pickup_rider_contact,
+            "pickup_rider_assigned_at": self.pickup_rider_assigned_at.isoformat() if self.pickup_rider_assigned_at else None,
+            "delivery_rider_name": self.delivery_rider_name,
+            "delivery_rider_contact": self.delivery_rider_contact,
+            "delivery_rider_assigned_at": self.delivery_rider_assigned_at.isoformat() if self.delivery_rider_assigned_at else None,
+            # NEW (Delivery Address feature)
+            "delivery_address_id": self.delivery_address_id,
+            "delivery_address_line": self.delivery_address_line,
+            "delivery_latitude": self.delivery_latitude,
+            "delivery_longitude": self.delivery_longitude,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,

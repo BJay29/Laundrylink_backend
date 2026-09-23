@@ -1,8 +1,9 @@
-from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage, BookingMachineAssignment
+from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage, BookingMachineAssignment, Address
 from app.schemas import (
     BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
     MachineAssignmentInput, MoveLoadToDryerInput, PaymentRejectRequest,
-    BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest
+    BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
+    RiderAssignmentInput,
 )
 from app.services.prediction_service import PredictionService
 from app.services.ws_manager import (
@@ -1648,6 +1649,249 @@ async def finalize_booking_pricing(
 
 
 # =========================================================
+# RIDER ASSIGNMENT FUNCTIONS (NEW — Pickup & Delivery feature)
+# =========================================================
+#
+# Manual-entry lang, walang Rider table/model (see Booking docstring sa
+# models.py para sa buong reasoning). Dalawang HIWALAY na function ang
+# meron dahil magkaiba ang oras at konteksto ng pickup leg vs delivery
+# leg:
+#   - assign_pickup_rider(): tinatawag ng staff PAGKATAPOS ma-accept
+#     ang isang delivery booking (o kahit kailan habang wala pang
+#     laman ang "Ready"/"Claimed" status) — ito ang rider na kukuha ng
+#     maruming damit sa bahay ng customer papunta sa shop.
+#   - assign_delivery_rider(): tinatawag ng staff kapag naging "Ready"
+#     na ang laundry — ito ang rider na maghahatid ng malinis na damit
+#     pabalik sa customer.
+#
+# Pareho silang naka-scope kay fulfillment_mode == "delivery" —
+# walang silbi ang rider assignment sa isang "dropoff" booking, dahil
+# ang shop mismo ang pinupuntahan/kinukunan ng customer doon.
+
+def assign_pickup_rider(
+    db: Session,
+    booking_id: int,
+    rider_data: RiderAssignmentInput,
+    current_user: models.User,
+):
+    """
+    NEW — Itinatakda ng staff ang pangalan at contact number ng rider
+    na kukuha ng maruming damit sa bahay ng customer, para sa isang
+    "delivery" booking. Manual text-entry lang sa Service Terminal —
+    walang naka-catalog na listahan ng riders, walang naka-login na
+    rider account.
+
+    Pinapayagan habang ANG BOOKING AY HINDI PA "Claimed"/"Cancelled"/
+    "Declined"/"Awaiting Approval" — sinasadyang malawak ang saklaw
+    (hindi lang "Awaiting Weighing") dahil maaaring gustong i-set agad
+    ng staff ang pickup rider kaagad pagka-accept, bago pa man dumating
+    ang rider sa shop para timbangin ang laundry.
+
+    Puwede itong tawagin nang paulit-ulit (hal. nagbago ang rider na
+    ipinadala) — hindi ito naka-lock pagkatapos ng unang assignment,
+    laging pinapalitan ang laman ng pickup_rider_name/contact.
+
+    Gumagawa ng customer notification (type "pickup_rider_assigned")
+    at nagpu-push ng live "booking_updated" event papunta sa customer's
+    device, parehong pattern ng ibang status-mutating function dito.
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.fulfillment_mode != "delivery":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rider assignment only applies to delivery bookings, not drop-off."
+        )
+
+    non_assignable_statuses = ["Awaiting Approval", "Declined", "Claimed", "Cancelled"]
+    if booking.status in non_assignable_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot assign a pickup rider to a booking with status '{booking.status}'."
+        )
+
+    booking.pickup_rider_name = rider_data.rider_name
+    booking.pickup_rider_contact = rider_data.rider_contact
+    booking.pickup_rider_assigned_at = datetime.now(timezone.utc)
+
+    try:
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Assigned pickup rider {rider_data.rider_name} "
+                f"({rider_data.rider_contact}) to {booking.customer_name}'s booking"
+            )
+        )
+
+        if booking.customer_id:
+            notification_controller.create_notification(
+                db,
+                customer_id=booking.customer_id,
+                notif_type="pickup_rider_assigned",
+                title="Rider On The Way",
+                message=(
+                    f"{rider_data.rider_name} ({rider_data.rider_contact}) is on the way "
+                    f"to pick up your laundry for your booking at "
+                    f"{booking.shop_name or 'the shop'}."
+                ),
+                booking_id=booking.id
+            )
+
+        db.commit()
+        db.refresh(booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Pickup Rider Assignment Error: {str(e)}"
+        )
+
+
+async def assign_delivery_rider(
+    db: Session,
+    booking_id: int,
+    rider_data: RiderAssignmentInput,
+    current_user: models.User,
+):
+    """
+    NEW — Itinatakda ng staff ang pangalan at contact number ng rider
+    na maghahatid ng malinis na laundry pabalik sa customer, para sa
+    isang "delivery" booking. Pareho ang disenyo ng assign_pickup_
+    rider() sa itaas (manual text-entry, walang Rider table).
+
+    Pinapayagan habang ang booking status ay "Ready" o "In Progress"
+    (puwedeng i-preassign habang tinatapos pa ang paglaba, para ready
+    na agad ang dispatch sa sandaling matapos) — HINDI pinapayagan
+    kapag "Claimed" na (tapos na ang buong transaksyon) o kapag wala
+    pang laman/tinatanggap pa lang ang booking.
+
+    UPDATED (customer WebSocket): `async` dahil nagpu-push ito ng live
+    "booking_updated" event papunta sa customer's device pagkatapos
+    ma-commit, parehong pattern ng ibang status-mutating async function
+    sa file na ito (update_booking_status(), mark_booking_as_paid(),
+    atbp.) — mahalaga ito rito dahil ito na mismo ang "Your laundry is
+    on the way" na signal na hinihintay ng customer sa stepper.
+    """
+    shop_id = current_user.shop_id
+
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == shop_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.fulfillment_mode != "delivery":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rider assignment only applies to delivery bookings, not drop-off."
+        )
+
+    assignable_statuses = ["In Progress", "Ready"]
+    if booking.status not in assignable_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot assign a delivery rider to a booking with status "
+                f"'{booking.status}'. The laundry must be In Progress or Ready first."
+            )
+        )
+
+    booking.delivery_rider_name = rider_data.rider_name
+    booking.delivery_rider_contact = rider_data.rider_contact
+    booking.delivery_rider_assigned_at = datetime.now(timezone.utc)
+
+    try:
+        log_activity(
+            db, shop_id,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role,
+            description=(
+                f"Assigned delivery rider {rider_data.rider_name} "
+                f"({rider_data.rider_contact}) to {booking.customer_name}'s booking"
+            )
+        )
+
+        if booking.customer_id:
+            notification_controller.create_notification(
+                db,
+                customer_id=booking.customer_id,
+                notif_type="delivery_rider_assigned",
+                title="Laundry On The Way",
+                message=(
+                    f"{rider_data.rider_name} ({rider_data.rider_contact}) is on the way "
+                    f"to deliver your clean laundry from {booking.shop_name or 'the shop'}."
+                ),
+                booking_id=booking.id
+            )
+
+        db.commit()
+        db.refresh(booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "delivery_rider_name": reloaded.delivery_rider_name,
+                "delivery_rider_contact": reloaded.delivery_rider_contact,
+            })
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Delivery Rider Assignment Error: {str(e)}"
+        )
+
+
+# =========================================================
 # CUSTOMER (MOBILE APP) BOOKING FUNCTIONS
 # =========================================================
 
@@ -1835,6 +2079,10 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             )
 
     delivery_fee_charged = 0.0
+    # NEW (Delivery Address feature) — snapshot fields, filled in only
+    # when fulfillment_mode == "delivery" (see Booking docstring sa
+    # models.py para sa buong paliwanag kung bakit snapshot).
+    delivery_address_record = None
     if booking_data.fulfillment_mode == "delivery":
         if not shop.has_delivery:
             raise HTTPException(
@@ -1842,6 +2090,24 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
                 detail="This shop does not offer delivery. Please choose drop-off instead."
             )
         delivery_fee_charged = shop.delivery_fee
+
+        # address_id is required for delivery (see CustomerBookingCreate
+        # validator in schemas.py) — validate it belongs to THIS
+        # customer, same ownership-scoping pattern as add-on/promo
+        # validation elsewhere in this function.
+        delivery_address_record = (
+            db.query(Address)
+            .filter(
+                Address.id == booking_data.address_id,
+                Address.customer_id == customer.id,
+            )
+            .first()
+        )
+        if not delivery_address_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Selected delivery address was not found in your saved addresses."
+            )
 
     validated_add_ons = []
     add_ons_total = 0.0
@@ -1896,6 +2162,12 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         fulfillment_mode=booking_data.fulfillment_mode,
         pickup_datetime=booking_data.pickup_datetime,
         delivery_fee_charged=delivery_fee_charged,
+        # NEW (Delivery Address feature) — snapshot at booking time, not
+        # a live FK lookup (see Booking docstring sa models.py).
+        delivery_address_id=delivery_address_record.id if delivery_address_record else None,
+        delivery_address_line=delivery_address_record.address_line if delivery_address_record else None,
+        delivery_latitude=delivery_address_record.latitude if delivery_address_record else None,
+        delivery_longitude=delivery_address_record.longitude if delivery_address_record else None,
         promo_code=promo_record.code if promo_record else None,
         discount_amount=discount_amount,
         payment_method=booking_data.payment_method or "cash",

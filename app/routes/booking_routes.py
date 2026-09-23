@@ -6,7 +6,8 @@ from app.schemas import (
     BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine,
     CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest,
     PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput,
-    PaymentRejectRequest, BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest
+    PaymentRejectRequest, BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
+    RiderAssignmentInput,
 )
 from app.controller import booking_controller
 from app import models
@@ -218,6 +219,54 @@ async def finalize_pricing(
     """
     return await booking_controller.finalize_booking_pricing(
         db, booking_id, pricing_data, current_user
+    )
+
+
+# =========================================================
+# RIDER ASSIGNMENT ENDPOINTS (NEW — Pickup & Delivery feature)
+# =========================================================
+#
+# Manual text-entry lang (rider name + contact number) — walang Rider
+# table/model, walang naka-login na rider account. Applicable lang sa
+# mga booking na fulfillment_mode == "delivery" (see booking_controller.
+# assign_pickup_rider()/assign_delivery_rider() para sa validation).
+
+@router.patch("/{booking_id}/assign-pickup-rider", response_model=BookingResponse)
+def assign_pickup_rider(
+    booking_id: int,
+    rider_data: RiderAssignmentInput,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Staff enters the rider's name and contact number for the
+    PICKUP leg of a delivery booking (the rider who will collect dirty
+    laundry from the customer's address). Not gated to a single status
+    — can be set as soon as the booking is accepted and re-set later if
+    the assigned rider changes.
+    """
+    return booking_controller.assign_pickup_rider(
+        db, booking_id, rider_data, current_user
+    )
+
+
+@router.patch("/{booking_id}/assign-delivery-rider", response_model=BookingResponse)
+async def assign_delivery_rider(
+    booking_id: int,
+    rider_data: RiderAssignmentInput,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW — Staff enters the rider's name and contact number for the
+    DELIVERY leg of a delivery booking (the rider who will bring the
+    clean laundry back to the customer). Allowed while the booking is
+    'In Progress' or 'Ready'. Pushes a live 'booking_updated' event to
+    the customer's device — this is the "your laundry is on the way"
+    signal the mobile app stepper is listening for.
+    """
+    return await booking_controller.assign_delivery_rider(
+        db, booking_id, rider_data, current_user
     )
 
 
