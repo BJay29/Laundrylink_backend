@@ -1462,13 +1462,20 @@ async def finalize_booking_pricing(
     at ini-finalize na ang presyo bago ito pumasok sa normal na
     operational queue.
 
-    COMPUTATION:
-        final_price = (final_weight × ServiceType.price) + addon_charges
+    COMPUTATION (FIXED — Delivery Fee + Promo bug):
+        final_price = (final_weight × ServiceType.price)
+                       + addon_charges
+                       + booking.delivery_fee_charged
+                       − booking.discount_amount
 
     kung saan ang ServiceType.price/pricing_unit ay ang PAREHONG "Shop
     Rate" na ginagamit sa buong ibang bahagi ng sistema (walang
     hiwalay/bagong rate field na idinagdag — see ServiceTypeBase
-    docstring sa schemas.py).
+    docstring sa schemas.py). Ang delivery_fee_charged at
+    discount_amount ay pareho nang naka-save sa booking simula pa noong
+    creation (create_customer_booking()) — kinukuha lang sila dito, HINDI
+    muling kino-compute, para manatiling tugma ang huling babayaran sa
+    kung ano talaga ang ipinangako sa customer.
 
     Pagkatapos ma-compute:
       1. Isinasave ang final_weight, weighing_addon_charges, final_price,
@@ -1545,10 +1552,35 @@ async def finalize_booking_pricing(
             )
         )
 
+    # FIXED (Delivery Fee + Promo bug): dating kinukuwenta lang dito ang
+    # (final_weight × rate) + addon_charges — nawawala ang
+    # booking.delivery_fee_charged at booking.discount_amount, kaya sa
+    # sandaling ma-finalize ang presyo (staff weighing), NABURA na sa
+    # final_price/total_price ang delivery fee at anumang promo discount
+    # na dating naka-factor na sa ESTIMATED total nung una pang gawin
+    # ang booking sa create_customer_booking(). Kinukuha na ngayon dito
+    # ang parehong dalawang halaga MULA SA BOOKING MISMO (naka-save na
+    # sila doon simula pa noong creation, hindi na kailangang muling
+    # i-validate/i-recompute ang promo code dito) at isinasama sa
+    # pinal na kuwenta.
+    #
+    # NOTE: ang discount_amount ay ang FIXED NA PISONG HALAGA na na-lock
+    # in na noong una pang gawin ang booking (isinama na ang % discount
+    # computation doon) — sinasadyang HINDI na muling kino-compute ang
+    # % laban sa bagong (mas mataas o mas mababang) final subtotal, para
+    # hindi magbago ang "ipinangakong" halaga ng discount sa customer sa
+    # pagitan ng booking time at weighing time.
+    delivery_fee = booking.delivery_fee_charged or 0.0
+    discount = booking.discount_amount or 0.0
+
     computed_price = round(
-        (pricing_data.final_weight * service_type_record.price) + pricing_data.addon_charges,
+        (pricing_data.final_weight * service_type_record.price)
+        + pricing_data.addon_charges
+        + delivery_fee
+        - discount,
         2
     )
+    computed_price = max(0.0, computed_price)
 
     # Sync the authoritative weight/loads fields the same way the mobile
     # checkout flow does, so downstream code (Record Sales, machine
