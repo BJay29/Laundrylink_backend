@@ -490,6 +490,55 @@ class PromoCodeResponse(PromoCodeBase):
     times_used: int
     model_config = ConfigDict(from_attributes=True)
 
+
+# --- PROMO PREVIEW SCHEMAS (NEW — Mobile App real-time promo preview) ---
+
+class PromoPreviewRequest(BaseModel):
+    """
+    Schema para sa real-time promo code preview mula sa mobile app's
+    Booking Form — tinatawag habang nagta-type pa lang ang customer sa
+    promo code field (debounced sa client side), BAGO pa man i-submit
+    ang buong booking. Layunin: makita agad ng customer kung magkano
+    ang bawas nang hindi muna kailangang i-submit ang buong form.
+
+    shop_id + subtotal ay parehong kailangan dahil naka-scope ang bawat
+    promo code sa isang partikular na shop, at ang discount computation
+    (lalo na kung discount_type == "percent") ay depende sa
+    kasalukuyang subtotal (base price + add-ons + delivery fee, BAGO
+    ma-preview ang discount).
+    """
+    shop_id: int
+    code: str
+    subtotal: float
+
+    @field_validator("subtotal")
+    @classmethod
+    def validate_subtotal(cls, v):
+        if v < 0:
+            raise ValueError("subtotal cannot be negative.")
+        return v
+
+
+class PromoPreviewResponse(BaseModel):
+    """
+    Resulta ng promo preview. `valid=False` (kasama ang `message` na
+    dahilan) SA HALIP na isang HTTP error — sinadya ito dahil "preview"
+    lang ito habang nagta-type pa ang customer; hindi dapat magpakita
+    ng scary error banner sa bawat titik na hindi pa kumpletong code,
+    tahimik lang dapat sabihin sa UI na "Invalid code" o katulad.
+
+    NOTE: HINDI dinadagdagan ng preview na ito ang PromoCode.times_used
+    — nangyayari lang iyon sa TOTOONG pag-book (see
+    create_customer_booking() sa booking_controller.py).
+    """
+    valid: bool
+    code: str
+    message: Optional[str] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
+    discount_amount: float = 0.0
+    final_total: Optional[float] = None
+
 # --- SETTINGS SCHEMAS ---
 
 class SettingBase(BaseModel):

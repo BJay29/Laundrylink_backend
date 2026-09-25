@@ -330,7 +330,7 @@ def create_booking(db: Session, booking_data: BookingCreate, current_user: model
         )
 
 
-def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", current_user: models.User):
+async def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "BookingAssignMachine", current_user: models.User):
     """
     LEGACY (multi-machine assignment feature) — single washer + single
     dryer lang, isang beses lang. Iniwan ito nang buo, hindi tinanggal,
@@ -343,6 +343,10 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
     Booking.started_at sa sandaling ito naging "In Progress" — parehong
     sandali ng transition, kaya inilalagay ito dito sa halip na sa
     isang generic na "on status change" helper.
+
+    UPDATED (customer WebSocket — Booking & Order Tracking Flow Fix):
+    now `async` — pushes a live "booking_updated" event to the
+    customer's own device right after committing.
     """
     shop_id = current_user.shop_id
 
@@ -374,8 +378,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             detail="At least one machine (washer or dryer) must be provided."
         )
 
-    # NEW (duration-per-service-phase) — needed to pick the right
-    # washer/dryer duration per machine below.
     service_type_record = (
         db.query(ServiceType)
         .filter(
@@ -417,11 +419,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         machine.current_price = booking.total_price
         machine.total_cycles += 1
 
-        # NEW (duration-per-service-phase) — pick washer_duration_minutes
-        # or dryer_duration_minutes depending on THIS machine's type.
-        # get_machine_runtime() is kept as a last-resort fallback only
-        # if the service record itself is missing (e.g. deleted since
-        # the booking was made).
         if service_type_record:
             machine.remaining_time = (
                 service_type_record.washer_duration_minutes
@@ -455,7 +452,6 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         booking.dryer_id = assign_data.dryer_id
 
     booking.status = "In Progress"
-    # NEW (Order Tracking / Live Stepper feature)
     booking.started_at = datetime.now(timezone.utc)
 
     try:
@@ -470,7 +466,8 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
         )
 
         db.commit()
-        return (
+
+        reloaded = (
             db.query(Booking)
             .options(
                 joinedload(Booking.washer),
@@ -482,6 +479,20 @@ def assign_machine_to_booking(db: Session, booking_id: int, assign_data: "Bookin
             .filter(Booking.id == booking_id)
             .first()
         )
+
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "started_at": reloaded.started_at.isoformat() if reloaded.started_at else None,
+                "estimated_completion_time": (
+                    reloaded.estimated_completion_time.isoformat()
+                    if reloaded.estimated_completion_time else None
+                ),
+            })
+
+        return reloaded
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -504,15 +515,6 @@ def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service
     phase) and move_load_to_dryer() (dryer phase) below, so both phases
     of a load get the same telemetry treatment as the legacy single-
     machine flow did.
-
-    UPDATED (duration-per-service-phase): duration_minutes is passed in
-    by the caller, who has already picked the right value —
-    ServiceType.washer_duration_minutes or dryer_duration_minutes
-    depending on which phase this machine is entering. (An earlier
-    version tried deriving it from a per-machine
-    configured_duration_minutes column instead — reverted.) Also stamps
-    cycle_started_at so the frontend can compute a live, ticking
-    countdown instead of trusting a static remaining_time number.
     """
     machine.status = "Busy"
     machine.current_service_type = service_type_name
@@ -539,15 +541,8 @@ def _bind_machine_telemetry(db: Session, shop_id: int, machine: Machine, service
 
 def _release_machine(machine: Machine):
     """
-    NEW — Shared helper for freeing up a machine back to "Available",
-    same pattern as the release block inside update_booking_status().
-    Skips machines currently in Maintenance (those stay in Maintenance
-    regardless of booking lifecycle).
-
-    UPDATED (live timer feature): also clears cycle_started_at —
-    otherwise a freed machine's frontend timer would keep counting down
-    (or show a stale negative time) against a cycle that no longer
-    exists.
+    NEW — Shared helper for freeing up a machine back to "Available".
+    Skips machines currently in Maintenance.
     """
     if machine.status != "Maintenance":
         machine.status = "Available"
@@ -557,35 +552,13 @@ def _release_machine(machine: Machine):
         machine.current_price = 0.0
 
 
-def assign_machines_to_booking(db: Session, booking_id: int, assign_data: MachineAssignmentInput, current_user: models.User):
+async def assign_machines_to_booking(db: Session, booking_id: int, assign_data: MachineAssignmentInput, current_user: models.User):
     """
     NEW — Multi-machine assignment para sa isang Pending booking.
-    Kailangan eksaktong kasing-dami ng booking.loads ang machine_ids na
-    ipinasa (isang machine per load).
 
-    Ang TYPE ng machine na hinihingi (Washer o Dryer) ay base sa
-    service_type_record.required_phases:
-      - "full_service" o "wash_only" → WASHERS ang kailangan; bawat
-        load ay nagsisimula sa phase="washing". Para sa "full_service",
-        may susunod pang "Move to Dryer" step (move_load_to_dryer()).
-        Para sa "wash_only", wala nang susunod na phase — deretso na
-        sa "Ready" ang buong booking sa pamamagitan ng normal na status
-        update kapag tapos na ang washing.
-      - "dry_only" → DRYERS agad ang kailangan; bawat load ay direktang
-        nagsisimula sa phase="drying" (walang washing phase na dinadaanan).
-
-    Gumagawa ng isang BookingMachineAssignment row PER LOAD (load_number
-    1-indexed), tapos ise-set ang Booking.status papuntang "In Progress".
-
-    Kung walang ServiceType record na nakita (hal. na-delete na pagkatapos
-    gawin ang booking), fina-fallback sa "full_service" (washers) bilang
-    default, at PredictionService.get_machine_runtime() bilang fallback
-    duration — parehong fallback pattern gaya ng legacy
-    assign_machine_to_booking() sa itaas.
-
-    NEW (Order Tracking / Live Stepper feature): sini-stamp na rin ang
-    Booking.started_at sa parehong sandali na naging "In Progress" ang
-    booking.
+    UPDATED (customer WebSocket — Booking & Order Tracking Flow Fix):
+    now `async` — pushes a live "booking_updated" event to the
+    customer's device right after committing.
     """
     shop_id = current_user.shop_id
 
@@ -638,8 +611,6 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
     initial_phase = "drying" if required_phases == "dry_only" else "washing"
     now = datetime.now(timezone.utc)
 
-    # NEW (duration-per-service-phase) — resolve once, before the loop,
-    # since every machine assigned here is the same target_type.
     if service_type_record:
         duration_minutes = (
             service_type_record.dryer_duration_minutes
@@ -701,7 +672,6 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
         assigned_machine_labels.append(f"Load {load_number}: {machine.machine_type} #{machine.machine_number}")
 
     booking.status = "In Progress"
-    # NEW (Order Tracking / Live Stepper feature)
     booking.started_at = now
 
     try:
@@ -719,7 +689,8 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
         )
 
         db.commit()
-        return (
+
+        reloaded = (
             db.query(Booking)
             .options(
                 joinedload(Booking.washer),
@@ -731,6 +702,21 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
             .filter(Booking.id == booking_id)
             .first()
         )
+
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "started_at": reloaded.started_at.isoformat() if reloaded.started_at else None,
+                "estimated_completion_time": (
+                    reloaded.estimated_completion_time.isoformat()
+                    if reloaded.estimated_completion_time else None
+                ),
+                "machine_assignments": [a.to_dict() for a in reloaded.machine_assignments],
+            })
+
+        return reloaded
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -739,30 +725,14 @@ def assign_machines_to_booking(db: Session, booking_id: int, assign_data: Machin
         )
 
 
-def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data: MoveLoadToDryerInput, current_user: models.User):
+async def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data: MoveLoadToDryerInput, current_user: models.User):
     """
-    NEW — "Move to Dryer" action para sa isang SPECIFIC LOAD lang (hindi
-    buong booking). Real-time na pinipili ang available dryer sa mismong
-    sandaling ito tinawag — hindi paunang commitment nang ginawa pa lang
-    ang unang assignment (see BookingMachineAssignment docstring sa
-    models.py para sa buong reasoning kung bakit ganito ang disenyo).
+    NEW — "Move to Dryer" action para sa isang SPECIFIC LOAD lang.
 
-    Ire-release ang washer ng load na ito (papunta sa "Available"), tapos
-    bibigyan ito ng napiling dryer, ise-set ang phase papuntang "drying",
-    at magsisimula ang bagong countdown gamit ang PAREHONG
-    duration_minutes ng service (walang hiwalay na configured duration
-    para sa dry phase — parehong setting ang ginagamit sa dalawang phase).
-
-    Hindi ito applicable sa mga load na "dry_only" ang required_phases
-    (nagsisimula na sila agad sa "drying" mula sa assign_machines_to_
-    booking(), walang "washing" phase na dadaanan).
-
-    NOTE (Order Tracking / Live Stepper feature): hindi ito nagbabago ng
-    Booking.status (nananatiling "In Progress" ang buong booking habang
-    may loads na washing/drying pa) — kaya walang binabagong Booking-
-    level timestamp dito, per-load lang ang mga timestamp
-    (washing_completed_at, drying_started_at) na naka-tira na sa
-    BookingMachineAssignment.
+    UPDATED (customer WebSocket — Booking & Order Tracking Flow Fix):
+    now `async` — pushes a live "booking_updated" event, kasama ang
+    updated `machine_assignments` (may `phase`) para makita ng mobile
+    app yung "washing → drying" transition.
     """
     shop_id = current_user.shop_id
 
@@ -827,8 +797,6 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
             detail=f"Dryer #{dryer.machine_number} is currently busy."
         )
 
-    # NEW (duration-per-service-phase) — duration for the dry phase
-    # comes from THIS booking's ServiceType.dryer_duration_minutes.
     service_type_record = (
         db.query(ServiceType)
         .filter(
@@ -843,7 +811,6 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
         else PredictionService.get_machine_runtime("Dryer", booking.service_type)
     )
 
-    # Release the washer this load was using.
     if assignment.washer_id:
         washer = db.query(Machine).filter(
             Machine.id == assignment.washer_id,
@@ -872,7 +839,8 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
         )
 
         db.commit()
-        return (
+
+        reloaded = (
             db.query(Booking)
             .options(
                 joinedload(Booking.washer),
@@ -884,6 +852,20 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
             .filter(Booking.id == booking_id)
             .first()
         )
+
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "estimated_completion_time": (
+                    reloaded.estimated_completion_time.isoformat()
+                    if reloaded.estimated_completion_time else None
+                ),
+                "machine_assignments": [a.to_dict() for a in reloaded.machine_assignments],
+            })
+
+        return reloaded
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -895,32 +877,6 @@ def move_load_to_dryer(db: Session, booking_id: int, load_number: int, move_data
 def get_active_bookings(db: Session, shop_id: int):
     """
     Retrieves all non-finalized tasks for the Terminal UI.
-
-    UPDATED: also excludes "Awaiting Approval" and "Declined" — these
-    are shown only in the separate approval panel (get_awaiting_approval_
-    bookings below), not mixed into the normal Service Terminal list.
-    An "Awaiting Approval" booking only appears here once it has been
-    Accepted (status becomes "Pending", same as any manual booking).
-
-    UPDATED (Weighing / Finalize Pricing feature): idinagdag din sa
-    exclusion list ang "Awaiting Weighing" at "Awaiting Payment" — mga
-    mobile booking na naka-accept na pero HINDI pa dapat pumasok sa
-    machine-assignment queue:
-      - "Awaiting Weighing": wala pang aktwal na weight/presyo, kaya
-        walang kahit anong ma-a-assign na machine pa dito. Ipinapakita
-        ito sa hiwalay na panel (see get_awaiting_weighing_bookings()
-        sa ibaba), gamit ang finalize_booking_pricing() para tuluyan
-        itong pumasok dito.
-      - "Awaiting Payment": na-finalize na ang presyo pero online ang
-        payment method at hindi pa nababayaran — sadyang hinahawakan
-        muna bago pumasok sa operational queue (see mark_booking_as_paid()
-        sa ibaba, doon nangyayari ang awtomatikong paglipat papuntang
-        "Pending" kapag na-verify na ang bayad).
-
-    NOTE: hindi ito ginagalaw ng Activity Log — read-only na operation
-    ito (walang binabago), kaya walang kailangang i-log dito. Pinanatili
-    ang shop_id-only signature (hindi current_user) dahil hindi ito
-    kailangan ng actor attribution.
     """
     return (
         db.query(Booking)
@@ -935,7 +891,6 @@ def get_active_bookings(db: Session, shop_id: int):
             Booking.shop_id == shop_id,
             Booking.status.notin_([
                 "Claimed", "Cancelled", "Awaiting Approval", "Declined",
-                # NEW (Weighing / Finalize Pricing feature)
                 "Awaiting Weighing", "Awaiting Payment",
             ])
         )
@@ -947,14 +902,7 @@ def get_active_bookings(db: Session, shop_id: int):
 def _get_status_notification_content(new_status: str, booking: Booking):
     """
     NEW — Nagbabalik ng (type, title, message) tuple na naka-tugma sa
-    PARTIKULAR na status na pinasok ng booking. Ito ang gumagawa ng
-    magkakaibang notification kada pagbabago (In Progress, Ready,
-    Claimed, Cancelled) sa halip na iisang generic na "may update sa
-    booking mo" na paulit-ulit lang.
-
-    Nagbabalik ng None kung walang dapat i-notify para sa status na ito
-    (hal. "Pending", na karaniwang internal transition lang, hindi
-    kailangang batid agad ng customer bawat oras).
+    PARTIKULAR na status na pinasok ng booking.
     """
     shop_label = booking.shop_name or "the shop"
 
@@ -987,7 +935,18 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
     """
     Manages the booking lifecycle and releases machine resources back to 'Available'.
 
-    ... (walang binago sa dating docstring — see previous version) ...
+    FIXED (Booking & Order Tracking Flow Fix — missing timestamps bug):
+    dating hindi talaga naisa-stamp ang Booking.ready_at/completed_at
+    dito, kahit sinasabi ng docstring ng klase (models.py) na "dito ito
+    nangyayari" — resulta, permanenteng "Pending" ang mobile app's
+    "Ready — Rider Returning" at "Completed" timeline nodes kahit tapos
+    na talaga ang buong booking (estimated_completion_time property at
+    machine-release logic gumagana pa rin nang tama, pero itong dalawang
+    booking-level timestamp lang ang di na-set). Idinagdag na ngayon
+    ang pagse-set: ready_at kapag papuntang "Ready", completed_at kapag
+    papuntang "Claimed" — pareho lang isang beses lang, hindi
+    ino-overwrite kung meron na (parehong pattern ng started_at sa
+    ibang function dito).
 
     UPDATED (customer WebSocket): now `async` — pushes a live
     "booking_updated" event to the customer's own device (if connected)
@@ -1010,6 +969,15 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
 
     old_status = booking.status
     booking.status = new_status
+
+    now = datetime.now(timezone.utc)
+
+    # FIXED — stamp ready_at / completed_at at the exact moment of
+    # transition, same pattern as started_at elsewhere in this file.
+    if new_status == "Ready" and not booking.ready_at:
+        booking.ready_at = now
+    if new_status == "Claimed" and not booking.completed_at:
+        booking.completed_at = now
 
     if new_status in ["Ready", "Claimed", "Cancelled"]:
         legacy_assigned_ids = [
@@ -1038,7 +1006,6 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
                     machine_ids_to_release.add(assignment.dryer_id)
 
                 assignment.phase = "done"
-                now = datetime.now(timezone.utc)
                 if assignment.dryer_id and not assignment.drying_completed_at:
                     assignment.drying_completed_at = now
                 elif assignment.washer_id and not assignment.washing_completed_at:
@@ -1097,6 +1064,8 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
                 "booking_id": reloaded.id,
                 "status": reloaded.status,
                 "payment_status": reloaded.payment_status,
+                "ready_at": reloaded.ready_at.isoformat() if reloaded.ready_at else None,
+                "completed_at": reloaded.completed_at.isoformat() if reloaded.completed_at else None,
             })
 
         return reloaded
@@ -1114,8 +1083,6 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
 
 async def mark_booking_as_paid(db: Session, booking_id: int, payment_data: PaymentStatusUpdate, current_user: models.User):
     """
-    ... (walang binago sa dating docstring) ...
-
     UPDATED (customer WebSocket): now `async` — pushes a live
     "booking_updated" event to the customer's device right after
     committing.
@@ -1206,8 +1173,6 @@ async def mark_booking_as_paid(db: Session, booking_id: int, payment_data: Payme
 
 async def reject_payment(db: Session, booking_id: int, reason: str, current_user: models.User):
     """
-    ... (walang binago sa dating docstring) ...
-
     UPDATED (customer WebSocket): now `async` — pushes a live
     "booking_updated" event to the customer's device right after
     committing.
@@ -1298,16 +1263,7 @@ async def reject_payment(db: Session, booking_id: int, reason: str, current_user
 def get_pending_verification_bookings(db: Session, shop_id: int):
     """
     NEW (Online Payment feature) — Retrieves bookings ng shop na
-    payment_status == "pending_verification", i.e. mga GCash/PayMaya
-    booking na naka-upload na ng proof of payment pero hindi pa
-    na-verify/na-approve/na-reject ng staff. Backs ang "Pending Payment
-    Verification" panel/tab sa Service Terminal (PaymentVerificationModal).
-
-    NOTE: hindi ito naka-scope sa Booking.status (Pending/In Progress/
-    atbp.) — sinasadya, dahil ang payment verification ay HIWALAY na
-    proseso mula sa booking lifecycle mismo (puwedeng "Awaiting Payment"
-    o "Pending" pa rin ang booking status habang "pending_verification"
-    ang payment). Read-only, walang Activity Log entry.
+    payment_status == "pending_verification".
     """
     return (
         db.query(Booking)
@@ -1334,15 +1290,7 @@ async def submit_payment_proof(
 ):
     """
     NEW (Module C) — customer attaches proof of payment sa isang
-    booking na "Awaiting Payment" na (na-finalize na ng staff ang
-    presyo, online ang payment method). Itinatakda ang payment_status
-    sa "pending_verification" — parehong verification flow gaya ng
-    create-time na gcash/paymaya + proof_of_payment_url branch
-    (PaymentVerificationModal -> mark_booking_as_paid()/reject_payment()
-    ang gagamitin ng staff dito rin).
-
-    Naka-scope sa Booking.customer_id == customer.id, parehong pattern
-    ng cancel_customer_booking().
+    booking na "Awaiting Payment" na.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -1392,8 +1340,6 @@ async def submit_payment_proof(
             .first()
         )
 
-        # Refreshes the shop's "Pending Payment Verification" bell
-        # right away.
         await manager.broadcast(booking.shop_id, {
             "type": "new_payment_verification_request",
             "booking_id": reloaded.id,
@@ -1417,22 +1363,13 @@ async def submit_payment_proof(
 
 
 # =========================================================
-# WEIGHING / FINALIZE PRICING FUNCTIONS (NEW — reconciled mula sa
-# Admin Dashboard spec, Module B: "Mobile Booking Notification &
-# Pricing Modal")
+# WEIGHING / FINALIZE PRICING FUNCTIONS
 # =========================================================
 
 def get_awaiting_weighing_bookings(db: Session, shop_id: int):
     """
     NEW — Retrieves mobile bookings ng shop na status == "Awaiting
-    Weighing", i.e. na-accept na ng shop (dating "Awaiting Approval")
-    pero hindi pa na-timbang/na-finalize ang presyo. Backs ang bagong
-    notification panel/modal (Module B) sa Service Terminal, kung saan
-    ipapasok ng staff ang aktwal na weight + add-on charges bago
-    tawagin ang finalize_booking_pricing() sa ibaba.
-
-    Read-only, walang Activity Log entry — parehong pattern ng
-    get_awaiting_approval_bookings() at get_pending_verification_bookings().
+    Weighing".
     """
     return (
         db.query(Booking)
@@ -1456,62 +1393,7 @@ async def finalize_booking_pricing(
     current_user: models.User,
 ):
     """
-    NEW — Ito ang core ng Module B ("Mobile Booking Notification &
-    Pricing Modal"). Tinatawag ito kapag na-timbang na ng staff ang
-    aktwal na laundry ng isang mobile booking na "Awaiting Weighing",
-    at ini-finalize na ang presyo bago ito pumasok sa normal na
-    operational queue.
-
-    COMPUTATION (FIXED — Delivery Fee + Promo bug):
-        final_price = (final_weight × ServiceType.price)
-                       + addon_charges
-                       + booking.delivery_fee_charged
-                       − booking.discount_amount
-
-    kung saan ang ServiceType.price/pricing_unit ay ang PAREHONG "Shop
-    Rate" na ginagamit sa buong ibang bahagi ng sistema (walang
-    hiwalay/bagong rate field na idinagdag — see ServiceTypeBase
-    docstring sa schemas.py). Ang delivery_fee_charged at
-    discount_amount ay pareho nang naka-save sa booking simula pa noong
-    creation (create_customer_booking()) — kinukuha lang sila dito, HINDI
-    muling kino-compute, para manatiling tugma ang huling babayaran sa
-    kung ano talaga ang ipinangako sa customer.
-
-    Pagkatapos ma-compute:
-      1. Isinasave ang final_weight, weighing_addon_charges, final_price,
-         weighed_at.
-      2. SINI-SYNC ang weight/loads/total_price (ang "authoritative"
-         fields na ginagamit ng ibang existing code — Record Sales,
-         machine telemetry, atbp.) papunta sa bagong values na ito,
-         gamit ang PAREHONG _map_quantity_to_booking_fields() helper na
-         ginagamit ng create_customer_booking() para tama ang pagmapa
-         sa weight/loads depende sa pricing_unit ng service.
-      3. Itinatakda ang susunod na status:
-         - "gcash"/"paymaya" → "Awaiting Payment" (hinihintay pa ang
-           customer magbayad/mag-upload ng proof; makikita ito sa
-           get_active_bookings() ng Service Terminal LAMANG kapag
-           na-mark na paid via mark_booking_as_paid(), na siyang
-           awtomatikong lilipat papuntang "Pending").
-         - "cash"/"cod" → "Pending" — direktang pumapasok agad sa
-           Service Terminal machine-assignment queue (ito ang
-           "auto-route to Service Terminal" para sa COD/Cash na
-           hiningi ng spec).
-      4. Gumagawa ng customer notification (type "price_finalized")
-         — ito ang available na "push"-like mechanism ng kasalukuyang
-         sistema (walang hiwalay na customer-side WebSocket/FCM channel
-         na naka-configure; ang mobile app ay umaasa sa Notification
-         table + polling ng GET /bookings/mine, parehong pattern ng
-         lahat ng ibang status-change notification sa buong file na
-         ito).
-      5. Nagba-broadcast ng "booking_price_finalized" event papunta sa
-         SHOP's connected Service Terminal instance(s) — kapaki-pakinabang
-         ito para agad ma-refresh ng terminal ang Awaiting Weighing panel
-         nang hindi na kailangang mag-poll.
-
-    NOTE (Order Tracking / Live Stepper feature): hindi ito nagba-bago
-    ng started_at/ready_at/completed_at — ang weighed_at (nasa itaas na)
-    ang siyang ginagamit ng mobile app stepper bilang timestamp ng
-    "Weighed / Price Ready" step.
+    NEW — Core ng staff weighing/pricing modal.
     """
     shop_id = current_user.shop_id
 
@@ -1552,24 +1434,6 @@ async def finalize_booking_pricing(
             )
         )
 
-    # FIXED (Delivery Fee + Promo bug): dating kinukuwenta lang dito ang
-    # (final_weight × rate) + addon_charges — nawawala ang
-    # booking.delivery_fee_charged at booking.discount_amount, kaya sa
-    # sandaling ma-finalize ang presyo (staff weighing), NABURA na sa
-    # final_price/total_price ang delivery fee at anumang promo discount
-    # na dating naka-factor na sa ESTIMATED total nung una pang gawin
-    # ang booking sa create_customer_booking(). Kinukuha na ngayon dito
-    # ang parehong dalawang halaga MULA SA BOOKING MISMO (naka-save na
-    # sila doon simula pa noong creation, hindi na kailangang muling
-    # i-validate/i-recompute ang promo code dito) at isinasama sa
-    # pinal na kuwenta.
-    #
-    # NOTE: ang discount_amount ay ang FIXED NA PISONG HALAGA na na-lock
-    # in na noong una pang gawin ang booking (isinama na ang % discount
-    # computation doon) — sinasadyang HINDI na muling kino-compute ang
-    # % laban sa bagong (mas mataas o mas mababang) final subtotal, para
-    # hindi magbago ang "ipinangakong" halaga ng discount sa customer sa
-    # pagitan ng booking time at weighing time.
     delivery_fee = booking.delivery_fee_charged or 0.0
     discount = booking.discount_amount or 0.0
 
@@ -1582,9 +1446,6 @@ async def finalize_booking_pricing(
     )
     computed_price = max(0.0, computed_price)
 
-    # Sync the authoritative weight/loads fields the same way the mobile
-    # checkout flow does, so downstream code (Record Sales, machine
-    # telemetry) sees a value consistent with the service's pricing_unit.
     mapped_fields = _map_quantity_to_booking_fields(
         service_type_record.pricing_unit, pricing_data.final_weight
     )
@@ -1681,26 +1542,10 @@ async def finalize_booking_pricing(
 
 
 # =========================================================
-# RIDER ASSIGNMENT FUNCTIONS (NEW — Pickup & Delivery feature)
+# RIDER ASSIGNMENT FUNCTIONS
 # =========================================================
-#
-# Manual-entry lang, walang Rider table/model (see Booking docstring sa
-# models.py para sa buong reasoning). Dalawang HIWALAY na function ang
-# meron dahil magkaiba ang oras at konteksto ng pickup leg vs delivery
-# leg:
-#   - assign_pickup_rider(): tinatawag ng staff PAGKATAPOS ma-accept
-#     ang isang delivery booking (o kahit kailan habang wala pang
-#     laman ang "Ready"/"Claimed" status) — ito ang rider na kukuha ng
-#     maruming damit sa bahay ng customer papunta sa shop.
-#   - assign_delivery_rider(): tinatawag ng staff kapag naging "Ready"
-#     na ang laundry — ito ang rider na maghahatid ng malinis na damit
-#     pabalik sa customer.
-#
-# Pareho silang naka-scope kay fulfillment_mode == "delivery" —
-# walang silbi ang rider assignment sa isang "dropoff" booking, dahil
-# ang shop mismo ang pinupuntahan/kinukunan ng customer doon.
 
-def assign_pickup_rider(
+async def assign_pickup_rider(
     db: Session,
     booking_id: int,
     rider_data: RiderAssignmentInput,
@@ -1708,24 +1553,10 @@ def assign_pickup_rider(
 ):
     """
     NEW — Itinatakda ng staff ang pangalan at contact number ng rider
-    na kukuha ng maruming damit sa bahay ng customer, para sa isang
-    "delivery" booking. Manual text-entry lang sa Service Terminal —
-    walang naka-catalog na listahan ng riders, walang naka-login na
-    rider account.
+    na kukuha ng maruming damit sa bahay ng customer.
 
-    Pinapayagan habang ANG BOOKING AY HINDI PA "Claimed"/"Cancelled"/
-    "Declined"/"Awaiting Approval" — sinasadyang malawak ang saklaw
-    (hindi lang "Awaiting Weighing") dahil maaaring gustong i-set agad
-    ng staff ang pickup rider kaagad pagka-accept, bago pa man dumating
-    ang rider sa shop para timbangin ang laundry.
-
-    Puwede itong tawagin nang paulit-ulit (hal. nagbago ang rider na
-    ipinadala) — hindi ito naka-lock pagkatapos ng unang assignment,
-    laging pinapalitan ang laman ng pickup_rider_name/contact.
-
-    Gumagawa ng customer notification (type "pickup_rider_assigned")
-    at nagpu-push ng live "booking_updated" event papunta sa customer's
-    device, parehong pattern ng ibang status-mutating function dito.
+    UPDATED (customer WebSocket — Booking & Order Tracking Flow Fix):
+    now `async` — dagdag live push.
     """
     shop_id = current_user.shop_id
 
@@ -1798,6 +1629,15 @@ def assign_pickup_rider(
             .first()
         )
 
+        if reloaded.customer_id:
+            await customer_manager.send_to_customer(reloaded.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": reloaded.id,
+                "status": reloaded.status,
+                "pickup_rider_name": reloaded.pickup_rider_name,
+                "pickup_rider_contact": reloaded.pickup_rider_contact,
+            })
+
         return reloaded
     except Exception as e:
         db.rollback()
@@ -1815,22 +1655,7 @@ async def assign_delivery_rider(
 ):
     """
     NEW — Itinatakda ng staff ang pangalan at contact number ng rider
-    na maghahatid ng malinis na laundry pabalik sa customer, para sa
-    isang "delivery" booking. Pareho ang disenyo ng assign_pickup_
-    rider() sa itaas (manual text-entry, walang Rider table).
-
-    Pinapayagan habang ang booking status ay "Ready" o "In Progress"
-    (puwedeng i-preassign habang tinatapos pa ang paglaba, para ready
-    na agad ang dispatch sa sandaling matapos) — HINDI pinapayagan
-    kapag "Claimed" na (tapos na ang buong transaksyon) o kapag wala
-    pang laman/tinatanggap pa lang ang booking.
-
-    UPDATED (customer WebSocket): `async` dahil nagpu-push ito ng live
-    "booking_updated" event papunta sa customer's device pagkatapos
-    ma-commit, parehong pattern ng ibang status-mutating async function
-    sa file na ito (update_booking_status(), mark_booking_as_paid(),
-    atbp.) — mahalaga ito rito dahil ito na mismo ang "Your laundry is
-    on the way" na signal na hinihintay ng customer sa stepper.
+    na maghahatid ng malinis na laundry pabalik sa customer.
     """
     shop_id = current_user.shop_id
 
@@ -1868,7 +1693,7 @@ async def assign_delivery_rider(
     try:
         log_activity(
             db, shop_id,
-            actor_name=current_user.full_name or current_user.email,
+            actor_name=current_user.full_name or current_user.role,
             actor_role=current_user.role,
             description=(
                 f"Assigned delivery rider {rider_data.rider_name} "
@@ -1930,18 +1755,7 @@ async def assign_delivery_rider(
 def _map_quantity_to_booking_fields(pricing_unit: str, quantity: float) -> dict:
     """
     Ang Booking table ay may weight/loads columns, hindi generic na
-    "quantity" — dahil pareho itong ginagamit ng existing Booking Modal
-    (web) sa halip na baguhin ang schema ng buong table, ito na lang ang
-    i-map papunta sa tamang column base sa pricing_unit ng service:
-      - "kg"    → weight = quantity, loads = 1
-      - "load"  → loads = quantity, weight = 0.0 (hindi applicable)
-      - "piece" → loads = quantity, weight = 0.0 (hindi applicable)
-
-    NOTE (Weighing / Finalize Pricing feature): ginagamit na rin ito
-    ngayon ng finalize_booking_pricing() sa itaas, hindi lang ng
-    create_customer_booking() sa ibaba — parehong pattern ng pag-map,
-    kaya iisa lang ang lohika ng "quantity → weight/loads" sa buong
-    sistema.
+    "quantity".
     """
     if pricing_unit == "kg":
         return {"weight": quantity, "loads": 1}
@@ -1950,20 +1764,8 @@ def _map_quantity_to_booking_fields(pricing_unit: str, quantity: float) -> dict:
 
 def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> tuple:
     """
-    Nagva-validate ng promo code (active, not expired, may natitirang
-    uses) at nagko-compute ng discount base sa subtotal. Kung invalid
-    ang code (mali, expired, ubos na ang uses), raise HTTPException
-    kaagad — hindi ito basta na lang ini-ignore, dahil ipinasok mismo
-    ng customer ang code na 'to, dapat malaman nila kung bakit hindi
-    gumana.
-
-    Returns (promo_record, discount_amount) — 'yung promo_record ang
-    ipapasa pabalik para ma-increment ang times_used pagkatapos
-    ma-confirm na successful ang buong booking transaction.
-
-    NOTE: ginagamit na rin ito ngayon ng create_booking() (walk-in
-    promo support), hindi lang ng create_customer_booking() (mobile
-    app) — parehong function, iisang validation/computation logic.
+    Nagva-validate ng promo code at nagko-compute ng discount base sa
+    subtotal.
     """
     promo = (
         db.query(PromoCode)
@@ -1999,75 +1801,51 @@ def _apply_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> 
     return promo, round(discount, 2)
 
 
+def preview_promo_code(db: Session, shop_id: int, code: str, subtotal: float) -> dict:
+    """
+    NEW (Real-time Promo Preview feature) — customer-facing, NON-
+    MUTATING "dry run" ng _apply_promo_code().
+    """
+    cleaned_code = (code or "").strip().upper()
+
+    if not cleaned_code:
+        return {
+            "valid": False,
+            "code": cleaned_code,
+            "message": None,
+            "discount_type": None,
+            "discount_value": None,
+            "discount_amount": 0.0,
+            "final_total": round(subtotal, 2),
+        }
+
+    try:
+        promo_record, discount_amount = _apply_promo_code(db, shop_id, cleaned_code, subtotal)
+    except HTTPException as e:
+        return {
+            "valid": False,
+            "code": cleaned_code,
+            "message": e.detail if isinstance(e.detail, str) else "Invalid promo code.",
+            "discount_type": None,
+            "discount_value": None,
+            "discount_amount": 0.0,
+            "final_total": round(subtotal, 2),
+        }
+
+    return {
+        "valid": True,
+        "code": promo_record.code,
+        "message": None,
+        "discount_type": promo_record.discount_type,
+        "discount_value": promo_record.discount_value,
+        "discount_amount": discount_amount,
+        "final_total": round(subtotal - discount_amount, 2),
+    }
+
+
 async def create_customer_booking(db: Session, customer: models.Customer, booking_data: CustomerBookingCreate):
     """
     Creates a booking INITIATED BY THE CUSTOMER via the mobile app.
-    Unlike create_booking() (Service Terminal / staff), hindi agad ito
-    "Pending" — nagsisimula ito sa status "Awaiting Approval" at
-    kailangang tanggapin (Accept) o tanggihan (Decline) ng shop bago ito
-    pumasok sa normal na Service Terminal flow.
-
-    UPDATED: pinoproseso na rin ang fulfillment_mode (dropoff/delivery),
-    add-ons, at promo code:
-      1. base_price = service.price × quantity
-      2. + add-ons total (mula sa add_on_ids, kada isa naka-validate na
-         kabilang sa parehong shop at is_active)
-      3. + delivery_fee (kung fulfillment_mode == "delivery", kinukuha
-         mula sa Shop.delivery_fee; error kung ang shop pala ay
-         Shop.has_delivery == False)
-      4. − discount (kung may promo_code, naka-validate sa
-         _apply_promo_code())
-    Ang resultang total_price ang siyang naka-save sa Booking.
-
-    UPDATED (Payment): ini-set na rin ang payment_method galing sa
-    customer's checkout choice (booking_data.payment_method — "cash"
-    para sa dropoff, "cod" para sa delivery, o "gcash"/"paymaya" kapag
-    ini-enable na ang online payment). payment_status ay depende sa
-    parehong logic ng create_booking() (see below) — hiwalay pa ring
-    action ng staff ang pag-verify/pag-reject (see mark_booking_as_paid()
-    at reject_payment()).
-
-    UPDATED (Online Payment feature — GCash/PayMaya QR + Proof of
-    Payment): kung ang payment_method ay "gcash" o "paymaya" AT may
-    ibinigay na booking_data.proof_of_payment_url (na-upload na ng
-    customer papunta sa Supabase Storage bago tinawag ang endpoint na
-    ito), ang INITIAL payment_status ay "pending_verification" sa
-    halip na "unpaid" — parehong logic ng create_booking() sa itaas.
-
-    UPDATED (Weighing / Finalize Pricing feature): ang total_price na
-    kino-compute dito ay HINDI na ang FINAL na presyo — ito na ngayon
-    ang ESTIMATE lang ng customer (naka-base sa quantity na kanilang
-    ibinigay sa checkout, bago pa man timbangin nang aktwal). Ise-save
-    ito RIN sa bagong Booking.estimated_weight/estimated_price
-    (kasabay pa rin ng weight/loads/total_price, para hindi masira ang
-    kahit anong existing display na umaasa doon habang wala pa itong
-    na-fifinalize — see BookingResponse/Booking.to_dict()). Ang totoong
-    FINAL na presyo ay itatakda na lang ng staff sa
-    finalize_booking_pricing() sa itaas, PAGKATAPOS ma-accept ang
-    booking na ito (see accept_customer_booking() sa ibaba, na
-    naglilipat na ngayon papuntang "Awaiting Weighing" sa halip na
-    deretsong "Pending").
-
-    NOTE (multi-machine assignment feature): hindi pa rin dito nagaganap
-    ang machine assignment — nananatiling "Awaiting Approval" muna, tapos
-    "Awaiting Weighing" (via accept_customer_booking()), tapos "Pending"
-    o "Awaiting Payment" (via finalize_booking_pricing()), at doon pa
-    lang ito aassignan ng machine gamit ang assign_machines_to_booking(),
-    gaya rin ng manual bookings.
-
-    NEW (safety net): bago pa man tingnan ang service catalog, sinusuri
-    muna kung shop.is_online — ibig sabihin, may naka-buk as na Service
-    Terminal ba ang shop na ito ngayon (see Shop.is_online sa models.py,
-    na-update ng ws_manager.py sa connect()/disconnect()). Kung offline
-    ang shop, walang talagang tatanggap/makakapag-accept ng booking na
-    ito kahit ma-create pa ito, kaya sinasarhan na natin ito dito bago pa
-    man mag-deduct ng anuman. Ito ang "totoong" hadlang — ang UI-level
-    check (disabled na "Book Now" button sa mobile app) ay convenience
-    lang, hindi ito dapat pag-asahan bilang tanging proteksyon, dahil
-    puwede pa ring i-bypass ang UI (direktang API call, atbp.).
-
-    Broadcasts a real-time WebSocket notification to the shop's connected
-    Service Terminal instance(s) after a successful commit.
     """
     shop = db.query(models.Shop).filter(models.Shop.id == booking_data.shop_id).first()
     if not shop or not shop.is_published:
@@ -2111,9 +1889,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             )
 
     delivery_fee_charged = 0.0
-    # NEW (Delivery Address feature) — snapshot fields, filled in only
-    # when fulfillment_mode == "delivery" (see Booking docstring sa
-    # models.py para sa buong paliwanag kung bakit snapshot).
     delivery_address_record = None
     if booking_data.fulfillment_mode == "delivery":
         if not shop.has_delivery:
@@ -2123,10 +1898,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             )
         delivery_fee_charged = shop.delivery_fee
 
-        # address_id is required for delivery (see CustomerBookingCreate
-        # validator in schemas.py) — validate it belongs to THIS
-        # customer, same ownership-scoping pattern as add-on/promo
-        # validation elsewhere in this function.
         delivery_address_record = (
             db.query(Address)
             .filter(
@@ -2173,7 +1944,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
 
     total_price = round(subtotal - discount_amount, 2)
 
-    # NEW (Online Payment feature) — same logic as create_booking().
     initial_payment_status = "unpaid"
     if booking_data.payment_method == "online_qr" and booking_data.proof_of_payment_url:
         initial_payment_status = "pending_verification"
@@ -2194,8 +1964,6 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         fulfillment_mode=booking_data.fulfillment_mode,
         pickup_datetime=booking_data.pickup_datetime,
         delivery_fee_charged=delivery_fee_charged,
-        # NEW (Delivery Address feature) — snapshot at booking time, not
-        # a live FK lookup (see Booking docstring sa models.py).
         delivery_address_id=delivery_address_record.id if delivery_address_record else None,
         delivery_address_line=delivery_address_record.address_line if delivery_address_record else None,
         delivery_latitude=delivery_address_record.latitude if delivery_address_record else None,
@@ -2203,12 +1971,8 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         promo_code=promo_record.code if promo_record else None,
         discount_amount=discount_amount,
         payment_method=booking_data.payment_method or "cash",
-        # NEW (Online Payment feature)
         payment_status=initial_payment_status,
         proof_of_payment_url=booking_data.proof_of_payment_url,
-        # NEW (Weighing / Finalize Pricing feature) — ang customer's
-        # sariling estimate, hiwalay sa weight/total_price sa itaas
-        # (na magiging "current" na rin habang wala pang na-finalize).
         estimated_weight=booking_data.quantity,
         estimated_price=total_price,
         booking_timestamp=datetime.now(timezone.utc),
@@ -2268,8 +2032,7 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
 def get_awaiting_approval_bookings(db: Session, shop_id: int):
     """
     Retrieves customer-submitted bookings still waiting for the shop's
-    Accept/Decline decision. Backs the notification panel on the web app.
-    NOTE: read-only, no Activity Log entry.
+    Accept/Decline decision.
     """
     return (
         db.query(Booking)
@@ -2289,16 +2052,7 @@ def get_awaiting_approval_bookings(db: Session, shop_id: int):
 def get_customer_bookings(db: Session, customer_id: int):
     """
     NEW — Retrieves EVERY booking made by a given customer, across ALL
-    shops, any status — the data behind the mobile app's History page
-    (and, if reused, a Notifications page). Most recent first.
-
-    NOTE: read-only, no Activity Log entry (Activity Log is a shop-side
-    accountability trail — this is the customer looking at their own
-    data, not an action being performed on the shop's behalf).
-
-    Booking.shop is lazy="joined" (see models.py) so the shop_name
-    property is populated without triggering a separate query per
-    booking, even though this list can span many different shops.
+    shops, any status.
     """
     return (
         db.query(Booking)
@@ -2315,29 +2069,13 @@ def get_customer_bookings(db: Session, customer_id: int):
     )
 
 
-def accept_customer_booking(db: Session, booking_id: int, current_user: models.User):
+async def accept_customer_booking(db: Session, booking_id: int, current_user: models.User):
     """
     Accepts a customer-submitted booking.
 
-    UPDATED (Weighing / Finalize Pricing feature): dating deretsong
-    "Pending" ang tinutuluyan nito — ngayon papunta muna ito sa BAGONG
-    "Awaiting Weighing" status. Dahilan: ang presyo/weight na dala ng
-    mobile booking na ito ay ESTIMATE pa lang ng customer (walang
-    aktwal na pagtimbang), kaya kailangan munang dumaan sa staff
-    weighing/finalize-pricing step (finalize_booking_pricing() sa
-    itaas) bago ito tuluyang maging isang normal na "Pending" booking
-    na puwedeng bigyan ng machine.
-
-    Kapag na-finalize na ang presyo, doon pa lang ito lilipat papuntang
-    "Pending" (cash/cod) o "Awaiting Payment" (gcash/paymaya), at doon
-    pa lang ito puwedeng bigyan ng machine gamit ang
-    assign_machines_to_booking(), gaya rin ng manual bookings.
-
-    NEW (Notification): gumagawa rin ito ngayon ng "booking_accepted"
-    notification para sa customer, para malaman nila agad (sa
-    Notification Page + bell badge) na tinanggap na ng shop ang
-    kanilang request — na-update ang mensahe para banggitin na
-    hihintayin pa nila ang staff na kumpirmahin ang aktwal na timbang.
+    UPDATED (customer WebSocket — Booking & Order Tracking Flow Fix):
+    now `async` — pushes a live "booking_updated" event right after
+    committing.
     """
     shop_id = current_user.shop_id
 
@@ -2353,8 +2091,6 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
             detail="Booking request not found or already handled."
         )
 
-    # UPDATED (Weighing / Finalize Pricing feature) — "Awaiting Weighing"
-    # sa halip na deretsong "Pending".
     booking.status = "Awaiting Weighing"
 
     try:
@@ -2381,6 +2117,14 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
 
         db.commit()
         db.refresh(booking)
+
+        if booking.customer_id:
+            await customer_manager.send_to_customer(booking.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": booking.id,
+                "status": booking.status,
+            })
+
         return booking
     except Exception as e:
         db.rollback()
@@ -2391,9 +2135,7 @@ def accept_customer_booking(db: Session, booking_id: int, current_user: models.U
 
 def get_all_bookings(db: Session, shop_id: int):
     """
-    NEW — Retrieves EVERY booking for this shop, any status, most recent
-    first. Backs the Record Sales page's bookings table (Date, Customer,
-    Service, Payment). Read-only, no Activity Log entry.
+    NEW — Retrieves EVERY booking for this shop, any status.
     """
     return (
         db.query(Booking)
@@ -2403,25 +2145,12 @@ def get_all_bookings(db: Session, shop_id: int):
     )
 
 
-def decline_customer_booking(db: Session, booking_id: int, reason: str, current_user: models.User):
+async def decline_customer_booking(db: Session, booking_id: int, reason: str, current_user: models.User):
     """
     Declines a customer-submitted booking — moves it to "Declined".
-    Kept in the database (not deleted) so it stays visible in the
-    Activity Log/history, but it will never appear in the Service
-    Terminal's active bookings list (see get_active_bookings() filter).
 
-    NEW: now REQUIRES a `reason` (see BookingDeclineRequest validator —
-    the empty-string case never reaches here). Saved onto
-    Booking.decline_reason so the customer can see WHY their request was
-    declined (e.g. "Fully booked") the next time they check the booking
-    in the mobile app, instead of just seeing a bare "Declined" status.
-    Also folded into the Activity Log description for the shop's own
-    history/accountability.
-
-    NEW (Notification): gumagawa rin ito ngayon ng "booking_declined"
-    notification para sa customer, kasama ang parehong `reason` sa
-    message — hindi na nila kailangang pumunta pa sa History page para
-    lang malaman kung bakit hindi natuloy ang booking nila.
+    UPDATED (customer WebSocket — Booking & Order Tracking Flow Fix):
+    now `async` — pushes a live "booking_updated" event.
     """
     shop_id = current_user.shop_id
 
@@ -2466,6 +2195,15 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
 
         db.commit()
         db.refresh(booking)
+
+        if booking.customer_id:
+            await customer_manager.send_to_customer(booking.customer_id, {
+                "type": EVENT_BOOKING_UPDATED,
+                "booking_id": booking.id,
+                "status": booking.status,
+                "decline_reason": booking.decline_reason,
+            })
+
         return booking
     except Exception as e:
         db.rollback()
@@ -2478,29 +2216,7 @@ def decline_customer_booking(db: Session, booking_id: int, reason: str, current_
 async def cancel_customer_booking(db: Session, booking_id: int, customer: models.Customer):
     """
     NEW — Kinakansela ng CUSTOMER mismo (mobile app) ang sarili nilang
-    booking. Pinapayagan lang ito habang ang status ay "Awaiting
-    Approval" o "Pending" — sa dalawang puntong ito, wala pang aktibong
-    machine cycle/resources na ginagamit ng shop para dito. Kapag
-    "In Progress" na (naka-assign na ng washer/dryer, umiikot na ang
-    machine), hindi na ito basta pwedeng kanselahin mula sa app —
-    kailangan nang direktang kausapin ang shop, dahil may naikuha nang
-    hardware resource ang shop para dito.
-
-    NOTE (Weighing / Finalize Pricing feature): sinasadyang HINDI pa
-    isinama ang "Awaiting Weighing"/"Awaiting Payment" sa
-    cancellable_statuses sa ibaba — hindi pa ito hiningi ng kasalukuyang
-    spec, at nangangailangan ng dagdag na pag-iisip (hal. dapat bang
-    puwedeng kanselahin ang isang naka-finalize nang presyo?) bago ito
-    idagdag. Idudulog na lang ito bilang susunod na item kung kakailanganin.
-
-    Naka-scope sa Booking.customer_id == customer.id (hindi lang
-    booking_id) para hindi makakansela ang isang customer ng booking ng
-    ibang tao sa pamamagitan lang ng pag-guess ng ID.
-
-    Gumagawa rin ito ng notification PARA SA CUSTOMER MISMO (type
-    "booking_cancelled") bilang kumpirmasyon na naitala ang kanilang
-    pagkansela, at nagbo-broadcast sa Service Terminal (WebSocket) para
-    agad na malaman ng shop kung meron.
+    booking.
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,

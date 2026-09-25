@@ -7,7 +7,7 @@ from app.schemas import (
     CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest,
     PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput,
     PaymentRejectRequest, BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
-    RiderAssignmentInput,
+    RiderAssignmentInput, PromoPreviewRequest, PromoPreviewResponse,
 )
 from app.controller import booking_controller
 from app import models
@@ -74,7 +74,7 @@ async def update_status(
 
 
 @router.patch("/{booking_id}/assign-machine", response_model=BookingResponse)
-def assign_machine(
+async def assign_machine(
     booking_id: int,
     assign_data: BookingAssignMachine,
     current_user: models.User = Depends(get_current_user),
@@ -83,14 +83,18 @@ def assign_machine(
     """
     LEGACY — single washer + single dryer assignment. Kept for backward
     compatibility. Use POST /{id}/assign-machines for new multi-load bookings.
+
+    UPDATED (Booking & Order Tracking Flow Fix): booking_controller.
+    assign_machine_to_booking() is now `async` (live customer push) —
+    route updated to match.
     """
-    return booking_controller.assign_machine_to_booking(
+    return await booking_controller.assign_machine_to_booking(
         db, booking_id, assign_data, current_user
     )
 
 
 @router.post("/{booking_id}/assign-machines", response_model=BookingResponse)
-def assign_machines(
+async def assign_machines(
     booking_id: int,
     assign_data: MachineAssignmentInput,
     current_user: models.User = Depends(get_current_user),
@@ -102,14 +106,18 @@ def assign_machines(
     (washers vs dryers) is resolved server-side from the booking's
     service required_phases. Creates one BookingMachineAssignment row
     per load and sets status to 'In Progress'.
+
+    UPDATED (Booking & Order Tracking Flow Fix): booking_controller.
+    assign_machines_to_booking() is now `async` (live customer push) —
+    route updated to match.
     """
-    return booking_controller.assign_machines_to_booking(
+    return await booking_controller.assign_machines_to_booking(
         db, booking_id, assign_data, current_user
     )
 
 
 @router.patch("/{booking_id}/loads/{load_number}/move-to-dryer", response_model=BookingResponse)
-def move_load_to_dryer(
+async def move_load_to_dryer(
     booking_id: int,
     load_number: int,
     move_data: MoveLoadToDryerInput,
@@ -120,8 +128,13 @@ def move_load_to_dryer(
     NEW — Moves ONE load from washing to drying, picking the dryer in
     real time (not reserved upfront). Releases that load's washer,
     assigns the given dryer, and starts a new countdown.
+
+    UPDATED (Booking & Order Tracking Flow Fix): booking_controller.
+    move_load_to_dryer() is now `async` (live customer push — this is
+    the "Washing → Drying" real-time update the spec calls out) — route
+    updated to match.
     """
-    return booking_controller.move_load_to_dryer(
+    return await booking_controller.move_load_to_dryer(
         db, booking_id, load_number, move_data, current_user
     )
 
@@ -232,7 +245,7 @@ async def finalize_pricing(
 # assign_pickup_rider()/assign_delivery_rider() para sa validation).
 
 @router.patch("/{booking_id}/assign-pickup-rider", response_model=BookingResponse)
-def assign_pickup_rider(
+async def assign_pickup_rider(
     booking_id: int,
     rider_data: RiderAssignmentInput,
     current_user: models.User = Depends(get_current_user),
@@ -244,8 +257,12 @@ def assign_pickup_rider(
     laundry from the customer's address). Not gated to a single status
     — can be set as soon as the booking is accepted and re-set later if
     the assigned rider changes.
+
+    UPDATED (Booking & Order Tracking Flow Fix): booking_controller.
+    assign_pickup_rider() is now `async` (live customer push, matching
+    assign_delivery_rider() below) — route updated to match.
     """
-    return booking_controller.assign_pickup_rider(
+    return await booking_controller.assign_pickup_rider(
         db, booking_id, rider_data, current_user
     )
 
@@ -273,6 +290,27 @@ async def assign_delivery_rider(
 # =========================================================
 # CUSTOMER (MOBILE APP) BOOKING ENDPOINTS
 # =========================================================
+
+@router.post("/promo-preview", response_model=PromoPreviewResponse)
+def preview_promo_code(
+    preview_data: PromoPreviewRequest,
+    current_customer: models.Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (Real-time Promo Preview feature) — mobile app calls this while
+    the customer is still typing a promo code in the Booking Form
+    (debounced client-side), BEFORE submitting the full booking. Never
+    raises for an invalid/expired/exhausted code — returns
+    {"valid": false, "message": "..."} instead, so the UI can show a
+    calm inline hint rather than a scary error banner mid-typing. Does
+    NOT increment PromoCode.times_used — that only happens for a real,
+    submitted booking (see POST /bookings/customer below).
+    """
+    return booking_controller.preview_promo_code(
+        db, preview_data.shop_id, preview_data.code, preview_data.subtotal
+    )
+
 
 @router.post("/customer", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
 async def create_customer_booking(
@@ -306,7 +344,7 @@ def get_awaiting_approval_bookings(
 
 
 @router.patch("/{booking_id}/accept", response_model=BookingResponse)
-def accept_customer_booking(
+async def accept_customer_booking(
     booking_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -316,19 +354,29 @@ def accept_customer_booking(
     'Awaiting Weighing' (Weighing feature: no longer straight to
     'Pending' — staff must finalize the actual weight/price first via
     PATCH /{id}/finalize-pricing).
+
+    UPDATED (Booking & Order Tracking Flow Fix): booking_controller.
+    accept_customer_booking() is now `async` (live customer push) —
+    route updated to match.
     """
-    return booking_controller.accept_customer_booking(db, booking_id, current_user)
+    return await booking_controller.accept_customer_booking(db, booking_id, current_user)
 
 
 @router.patch("/{booking_id}/decline", response_model=BookingResponse)
-def decline_customer_booking(
+async def decline_customer_booking(
     booking_id: int,
     decline_data: BookingDeclineRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Declines a customer-submitted booking — moves it to 'Declined' with a required reason."""
-    return booking_controller.decline_customer_booking(
+    """
+    Declines a customer-submitted booking — moves it to 'Declined' with a required reason.
+
+    UPDATED (Booking & Order Tracking Flow Fix): booking_controller.
+    decline_customer_booking() is now `async` (live customer push) —
+    route updated to match.
+    """
+    return await booking_controller.decline_customer_booking(
         db, booking_id, decline_data.reason, current_user
     )
 
