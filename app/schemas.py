@@ -491,6 +491,27 @@ class PromoCodeResponse(PromoCodeBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PromoCodePreview(BaseModel):
+    """
+    NEW (Home page promo carousel) — safe, public-facing view of an
+    ACTIVE promo code, exposed on ShopPublicResponse.active_promos
+    below. Unlike PromoCodeResponse (owner-facing, includes
+    times_used/max_uses/is_active), this only carries what a customer
+    should see: the code itself (so they can copy/use it directly from
+    the carousel — same code they'd type into the Promo code field on
+    BookingFormPage) and the discount shape needed to render a label
+    like "20% OFF" or "₱50 OFF". Which promos qualify as "active" is
+    decided server-side in shop_service.get_all_shops() /
+    get_nearby_shops() (is_active, not expired, not past max_uses) —
+    this schema itself does no filtering.
+    """
+    code: str
+    discount_type: str
+    discount_value: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # --- PROMO PREVIEW SCHEMAS (NEW — Mobile App real-time promo preview) ---
 
 class PromoPreviewRequest(BaseModel):
@@ -1316,6 +1337,18 @@ class ShopPublicResponse(BaseModel):
     has_delivery: bool = False
     delivery_fee: float = 0.0
     is_online: bool = False
+
+    # NEW (Home page promo carousel) — currently-ACTIVE promo codes for
+    # this shop (is_active, not expired, not past max_uses — the
+    # filtering itself happens in shop_service.get_all_shops() /
+    # get_nearby_shops(), never trust this field to already be
+    # filtered if you're populating it elsewhere). Empty list for a
+    # shop with no live promos right now, which the mobile app's Home
+    # page uses to decide whether that shop appears in the carousel at
+    # all. NOT set by model_validate() alone since Shop has no matching
+    # attribute — the shop_service functions below fill it in manually
+    # after the initial from_attributes validation.
+    active_promos: List[PromoCodePreview] = []
 
     model_config = ConfigDict(from_attributes=True)
 
