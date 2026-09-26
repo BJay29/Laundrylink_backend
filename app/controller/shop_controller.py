@@ -93,6 +93,22 @@ def get_shop_detail(db: Session, shop_id: int):
     ng model_validate(), na awtomatikong kumukuha ng lahat ng fields),
     pero "Closed" pagpasok sa Shop Detail — same shop, magkaibang
     endpoint construction lang ang dahilan, hindi real status change.
+
+    FIXED (Online Payment toggle bug — Booking & Order Tracking Flow
+    Fix): SAME class of bug as is_online above, three more fields this
+    time — gcash_qr_url, paymaya_qr_url, qr_code_url ay hindi rin
+    dating pinapasa dito (kahit ilang beses na naka-upload ang shop ng
+    QR sa Optimization Settings, palaging null ang bumabalik sa Shop
+    Detail — kaya BookingFormPage's `_onlinePaymentAvailable` check
+    (`qrCodeUrl != null`) ay LAGING false anuman ang gawin ng shop).
+    At kahit naitama na ang QR fields, hindi pa rin ito sapat: dagdag
+    ding idinagdag ang accepts_cash/accepts_cod/accepts_online — ito
+    ang totoong "Payment Methods" toggle mismo (hiwalay sa "may
+    na-upload bang QR" na tanong), na dating wala rin dito kahit
+    nasa schema na at nasa Shop model na ang column. Kailangan PAREHONG
+    naka-ON ang toggle AT may QR bago ituring na available ng mobile
+    app ang Online Payment — see Shop.acceptsOnline sa shop.dart at
+    _onlinePaymentAvailable sa booking_form_page.dart.
     """
     shop = (
         db.query(Shop)
@@ -123,6 +139,16 @@ def get_shop_detail(db: Session, shop_id: int):
         has_delivery=shop.has_delivery,
         delivery_fee=shop.delivery_fee,
         is_online=shop.is_online,  # FIX: dati'y nawawala, kaya default False palagi
+        # FIX (Online Payment toggle bug): dati'y nawawala rin ang tatlong
+        # ito, kaya laging null ang QR sa mobile app kahit na-upload na.
+        gcash_qr_url=shop.gcash_qr_url,
+        paymaya_qr_url=shop.paymaya_qr_url,
+        qr_code_url=shop.qr_code_url,
+        # FIX (Online Payment toggle bug): ito mismo ang toggle na
+        # dating hindi dumarating sa mobile app — see docstring sa itaas.
+        accepts_cash=shop.accepts_cash,
+        accepts_cod=shop.accepts_cod,
+        accepts_online=shop.accepts_online,
         services=[ShopServicePreview.model_validate(s) for s in services],
         add_ons=[AddOnPreview.model_validate(a) for a in add_ons],
     )
