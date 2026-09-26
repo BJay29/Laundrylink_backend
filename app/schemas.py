@@ -826,7 +826,7 @@ class PaymentStatusUpdate(BaseModel):
     ma-overwrite pabalik sa "cash" default. Kaya None ang ibig sabihin
     "huwag galawin, panatilihin ang existing value ng booking".
     """
-    payment_method: Optional[str] = None  # "cash", "cod", "gcash", "paymaya", o None (keep existing)
+    payment_method: Optional[str] = None  # "cash", "cod", "gcash", "online_qr", o None (keep existing)
 
     @field_validator("payment_method")
     @classmethod
@@ -1354,7 +1354,29 @@ class ShopPublicResponse(BaseModel):
 
 
 class ShopDetailResponse(BaseModel):
-    """Shop Detail page: shop info + list ng available services + add-ons."""
+    """
+    Shop Detail page: shop info + list ng available services + add-ons.
+
+    FIXED (Online Payment toggle bug — Booking & Order Tracking Flow
+    Fix): dating WALA dito ang accepts_cash/accepts_cod/accepts_online
+    — kahit naka-ON na ang "Online Payment" toggle ng shop sa
+    Optimization Settings (Shop.accepts_online sa database), hindi ito
+    dumarating sa mobile app dahil hindi ito kasama sa response schema
+    na ito. Ang BookingFormPage sa Flutter ay gumagamit lang ng
+    qr_code_url (meron/walang QR na-upload) bilang gate, kaya kahit
+    naka-ON ang toggle, permanenteng naka-disable ang "Online Payment"
+    option kung wala pang QR — ngunit kahit MERON nang QR, walang paraan
+    ang app na malaman kung talagang GUSTO ng shop na tanggapin ito
+    (ang toggle mismo). Idinagdag ang tatlong field na ito para
+    kumpleto na ang parehong signal (toggle + QR presence) na
+    kailangan ng mobile app.
+
+    Walang binago sa controller na gumagawa nito — `model_config =
+    from_attributes=True` ay awtomatikong kumukuha na mula sa
+    Shop.accepts_cash/accepts_cod/accepts_online SQLAlchemy attributes
+    (meron na ang mga column na ito sa Shop model), basta idinagdag
+    lang sila dito sa schema.
+    """
     id: int
     shop_name: str
     address: Optional[str] = None
@@ -1369,6 +1391,11 @@ class ShopDetailResponse(BaseModel):
     # FIXED: dating `Optional[srt]` (typo) — NameError sa pag-import ng
     # schemas.py na pumipigil sa pagsisimula ng buong backend.
     qr_code_url: Optional[str] = None
+
+    # FIXED (Online Payment toggle bug) — see docstring sa itaas.
+    accepts_cash: bool = True
+    accepts_cod: bool = False
+    accepts_online: bool = False
 
     services: List[ShopServicePreview] = []
     add_ons: List[AddOnPreview] = []
