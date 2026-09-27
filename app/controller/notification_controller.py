@@ -141,3 +141,45 @@ def mark_all_read(db: Session, customer_id: int):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error marking all notifications as read: {str(e)}"
         )
+
+
+def delete_notification(db: Session, notification_id: int, customer_id: int):
+    """
+    NEW (swipe-to-dismiss feature) — permanently deletes a single
+    notification, scoped to customer_id (same ownership-check pattern
+    as mark_read) so a customer can't delete another customer's
+    notification just by guessing an id.
+
+    Raises 404 if the notification doesn't exist OR doesn't belong to
+    this customer (same non-leaking behavior as mark_read — we don't
+    distinguish "not found" from "not yours" in the error message).
+
+    Returns {"message": ...} on success. There's nothing to "undo" here
+    at the DB level (hard delete, not a soft-delete flag) — the mobile
+    app's optimistic-UI + re-insert-on-failure pattern is what gives
+    the customer a chance to retry if this fails.
+    """
+    notification = (
+        db.query(Notification)
+        .filter(
+            Notification.id == notification_id,
+            Notification.customer_id == customer_id
+        )
+        .first()
+    )
+    if not notification:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification not found."
+        )
+
+    try:
+        db.delete(notification)
+        db.commit()
+        return {"message": "Notification deleted."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting notification: {str(e)}"
+        )

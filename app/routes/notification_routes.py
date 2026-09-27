@@ -2,7 +2,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
-from app.schemas import NotificationResponse, NotificationMarkReadResponse, UnreadCountResponse
+from app.schemas import (
+    NotificationResponse,
+    NotificationMarkReadResponse,
+    UnreadCountResponse,
+    NotificationDeleteResponse,
+)
 from app.controller import notification_controller
 from app import models
 from app.security import get_current_customer
@@ -72,3 +77,21 @@ def mark_all_notifications_read(
     Notification Page, o may "Mark all as read" button doon.
     """
     return notification_controller.mark_all_read(db, current_customer.id)
+
+
+@router.delete("/{notification_id}", response_model=NotificationDeleteResponse)
+def delete_notification(
+    notification_id: int,
+    current_customer: models.Customer = Depends(get_current_customer),  # ⬅️ galing sa customer JWT
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (swipe-to-dismiss feature) — permanently deletes a single
+    notification belonging to the logged-in customer. Called by the
+    mobile app's Notifications Page when the customer swipes a
+    notification away and confirms removal. Naka-scope sa
+    current_customer.id, parehong ownership-check pattern ng
+    mark_notification_read — hindi matatanggal ng isang customer ang
+    notification ng ibang tao sa pamamagitan lang ng pag-guess ng ID.
+    """
+    return notification_controller.delete_notification(db, notification_id, current_customer.id)

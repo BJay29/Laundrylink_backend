@@ -1498,3 +1498,39 @@ class SupabaseWebhookPayload(BaseModel):
     old_record: Optional[SupabaseAuthRecord] = None
 
     model_config = ConfigDict(populate_by_name=True)
+
+# --- NOTIFICATION SCHEMAS ---
+
+class NotificationResponse(BaseModel):
+    """A single notification entry for the mobile app's Notifications page."""
+    id: int
+    booking_id: Optional[int] = None
+    type: str = "general"
+    title: str
+    message: str
+    is_read: bool
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationMarkReadResponse(BaseModel):
+    """Simple confirmation response for the mark-read / mark-all-read endpoints."""
+    message: str
+    updated_count: int
+
+
+class UnreadCountResponse(BaseModel):
+    """Simple response para sa GET /notifications/unread-count."""
+    unread_count: int
+
+
+class NotificationDeleteResponse(BaseModel):
+    """
+    NEW (swipe-to-dismiss feature) — simple confirmation response for
+    DELETE /notifications/{id}. No updated_count needed here (unlike
+    NotificationMarkReadResponse) since a delete is always exactly one
+    row or a 404 — there's no idempotent "already deleted, 0 affected"
+    case to report.
+    """
+    message: str
