@@ -143,7 +143,24 @@ def get_shop_detail(db: Session, shop_id: int):
         # ito, kaya laging null ang QR sa mobile app kahit na-upload na.
         gcash_qr_url=shop.gcash_qr_url,
         paymaya_qr_url=shop.paymaya_qr_url,
-        qr_code_url=shop.qr_code_url,
+        # FIX (root cause — qr_code_url permanently null): ang web app's
+        # Optimization Settings page (OptimizationSettings.jsx) ay
+        # nagsu-save LANG papunta sa gcash_qr_url / paymaya_qr_url —
+        # walang UI na nagse-set ng qr_code_url mismo, kaya laging null
+        # ito sa DB anuman ang gawin ng shop sa web. Pero ang mobile
+        # app's BookingFormPage ay `qr_code_url` (isang generic QR)
+        # LANG ang tinitingnan — kaya hindi kailanman makikita ng
+        # mobile app ang QR na na-upload sa web.
+        #
+        # Fallback na ito sa halip na hintayin munang gawan ng bagong
+        # migration + bagong upload slot ang web app: kung wala pang
+        # nakatalagang generic qr_code_url, gamitin na lang ang
+        # gcash_qr_url — o paymaya_qr_url kung wala ring gcash — bilang
+        # ang QR na ipapakita sa Online Payment ng mobile app. Kapag
+        # nag-decide kayong palawakin pa ito (hal. hayaang pumili ang
+        # customer ng GCash vs PayMaya sa checkout mismo), dito rin
+        # babaguhin.
+        qr_code_url=shop.qr_code_url or shop.gcash_qr_url or shop.paymaya_qr_url,
         # FIX (Online Payment toggle bug): ito mismo ang toggle na
         # dating hindi dumarating sa mobile app — see docstring sa itaas.
         accepts_cash=shop.accepts_cash,
