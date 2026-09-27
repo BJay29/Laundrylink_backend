@@ -611,6 +611,9 @@ class Booking(Base):
 
     pickup_datetime = Column(DateTime(timezone=True), nullable=True)
 
+    dropoff_datetime = Column(DateTime(timezone=True), nullable=True)
+
+
     delivery_datetime = Column(DateTime(timezone=True), nullable=True)
 
     delivery_fee_charged = Column(Float, default=0.0)
@@ -805,6 +808,7 @@ class Booking(Base):
             "special_instructions": self.special_instructions,
             "fulfillment_mode": self.fulfillment_mode,
             "pickup_datetime": self.pickup_datetime.isoformat() if self.pickup_datetime else None,
+            "dropoff_datetime": self.dropoff_datetime.isoformat() if self.dropoff_datetime else None,
             "delivery_datetime": self.delivery_datetime.isoformat() if self.delivery_datetime else None,
             "delivery_fee_charged": self.delivery_fee_charged,
             "promo_code": self.promo_code,

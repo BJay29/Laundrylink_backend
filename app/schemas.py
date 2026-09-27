@@ -1086,6 +1086,8 @@ class BookingResponse(BaseModel):
     special_instructions: Optional[str] = None
     fulfillment_mode: Optional[str] = "dropoff"
     pickup_datetime: Optional[datetime] = None
+    dropoff_datetime: Optional[datetime] = None
+
     delivery_datetime: Optional[datetime] = None
     delivery_fee_charged: Optional[float] = 0.0
     promo_code: Optional[str] = None
@@ -1186,6 +1188,8 @@ class CustomerBookingCreate(BaseModel):
     special_instructions: Optional[str] = None
     fulfillment_mode: str = "dropoff"
     pickup_datetime: Optional[datetime] = None
+    dropoff_datetime: Optional[datetime] = None
+
     add_on_ids: List[int] = []
     promo_code: Optional[str] = None
 

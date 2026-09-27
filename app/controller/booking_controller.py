@@ -1962,6 +1962,11 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
         source="mobile",
         special_instructions=booking_data.special_instructions,
         fulfillment_mode=booking_data.fulfillment_mode,
+        dropoff_datetime=(
+            booking_data.dropoff_datetime
+            if booking_data.fulfillment_mode == "dropoff"
+            else None
+        ),
         pickup_datetime=booking_data.pickup_datetime,
         delivery_fee_charged=delivery_fee_charged,
         delivery_address_id=delivery_address_record.id if delivery_address_record else None,
