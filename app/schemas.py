@@ -3,6 +3,9 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid as uuid_lib
 
+# Mga valid na time window label (Flexible Booking)
+ALLOWED_TIME_WINDOWS = {"morning", "afternoon", "evening", "anytime"}
+
 # --- AUTHENTICATION & OWNER SCHEMAS ---
 
 class OwnerCreate(BaseModel):
@@ -1088,6 +1091,11 @@ class BookingResponse(BaseModel):
     pickup_datetime: Optional[datetime] = None
     dropoff_datetime: Optional[datetime] = None
 
+    # NEW (Flexible Booking) — time window labels: "morning" |
+    # "afternoon" | "evening" | "anytime" | null (null = eksaktong oras).
+    dropoff_window: Optional[str] = None
+    pickup_window: Optional[str] = None
+
     delivery_datetime: Optional[datetime] = None
     delivery_fee_charged: Optional[float] = 0.0
     promo_code: Optional[str] = None
@@ -1181,6 +1189,10 @@ class CustomerBookingCreate(BaseModel):
     saan-saan man iyon dating dinaraanan — tinatanggal ang manual
     Accept/Decline gate para sa flow na ito, dahil ang weighing/
     finalize-pricing step mismo ang bagong "confirmation point" ng shop.
+
+    NEW (Preferred Drop-off + Flexible Booking): `dropoff_datetime`
+    (optional, dropoff lang) at ang optional na time windows
+    (`dropoff_window`, `pickup_window`).
     """
     shop_id: int
     service_type: str
@@ -1189,6 +1201,10 @@ class CustomerBookingCreate(BaseModel):
     fulfillment_mode: str = "dropoff"
     pickup_datetime: Optional[datetime] = None
     dropoff_datetime: Optional[datetime] = None
+
+    # NEW (Flexible Booking) — optional time windows
+    dropoff_window: Optional[str] = None
+    pickup_window: Optional[str] = None
 
     add_on_ids: List[int] = []
     promo_code: Optional[str] = None
@@ -1226,6 +1242,13 @@ class CustomerBookingCreate(BaseModel):
             raise ValueError("pickup_datetime is required when fulfillment_mode is 'delivery'.")
         return v
 
+    @field_validator("dropoff_window", "pickup_window")
+    @classmethod
+    def validate_window(cls, v):
+        if v is not None and v not in ALLOWED_TIME_WINDOWS:
+            raise ValueError(f"time window must be one of: {', '.join(sorted(ALLOWED_TIME_WINDOWS))}")
+        return v
+
     @field_validator("address_id")
     @classmethod
     def validate_address_required_for_delivery(cls, v, info):
@@ -1239,6 +1262,49 @@ class CustomerBookingCreate(BaseModel):
         allowed = {"cash", "cod", "gcash", "online_qr"}
         if v not in allowed:
             raise ValueError(f"payment_method must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+
+class CustomerBookingUpdate(BaseModel):
+    """
+    NEW (Edit Booking) — partial update ng customer sa sarili niyang
+    booking, habang "Awaiting Approval" pa lang. Lahat optional; ang
+    ipinadala lang ang babaguhin (model_dump(exclude_unset=True) sa
+    controller), kaya ang pagpapadala ng `null` ay nangangahulugang
+    "i-clear" (hal. tanggalin ang preferred drop-off).
+
+    Sinadyang WALA dito ang fulfillment_mode, quantity, add_on_ids at
+    promo_code — binabago ng mga iyon ang presyo, at ang presyo ay
+    hawak na ng weighing/finalize flow ng shop.
+    """
+    dropoff_datetime: Optional[datetime] = None
+    dropoff_window: Optional[str] = None
+    pickup_datetime: Optional[datetime] = None
+    pickup_window: Optional[str] = None
+    address_id: Optional[int] = None
+    special_instructions: Optional[str] = None
+    payment_method: Optional[str] = None
+
+    @field_validator("dropoff_window", "pickup_window")
+    @classmethod
+    def validate_window(cls, v):
+        if v is not None and v not in ALLOWED_TIME_WINDOWS:
+            raise ValueError(f"time window must be one of: {', '.join(sorted(ALLOWED_TIME_WINDOWS))}")
+        return v
+
+    @field_validator("special_instructions")
+    @classmethod
+    def clean_instructions(cls, v):
+        if v is None:
+            return None
+        cleaned = v.strip()
+        return cleaned or None
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v):
+        if v is not None and v not in {"cash", "cod", "online_qr"}:
+            raise ValueError("payment_method must be one of: cash, cod, online_qr")
         return v
 
 
@@ -1291,31 +1357,6 @@ class ActivityLogResponse(BaseModel):
     timestamp: datetime
 
     model_config = ConfigDict(from_attributes=True)
-
-# --- NOTIFICATION SCHEMAS ---
-
-class NotificationResponse(BaseModel):
-    """A single notification entry for the mobile app's Notifications page."""
-    id: int
-    booking_id: Optional[int] = None
-    type: str = "general"
-    title: str
-    message: str
-    is_read: bool
-    created_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class NotificationMarkReadResponse(BaseModel):
-    """Simple confirmation response for the mark-read / mark-all-read endpoints."""
-    message: str
-    updated_count: int
-
-
-class UnreadCountResponse(BaseModel):
-    """Simple response para sa GET /notifications/unread-count."""
-    unread_count: int
 
 # --- CUSTOMER-FACING (PUBLIC) SHOP SCHEMAS ---
 

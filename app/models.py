@@ -580,6 +580,11 @@ class Booking(Base):
     mismo ay pinapanatili pa rin (nullable, SET NULL on delete) bilang
     REFERENCE lang papunta sa orihinal na saved address record —
     hindi ito ang pinagkukunan ng aktwal na address na ipinapakita.
+
+    NEW (Preferred Drop-off + Flexible Booking): idinagdag ang
+    `dropoff_datetime` (optional na oras kung kailan balak pumunta ng
+    customer sa shop, dropoff bookings lang) at ang dalawang time
+    window labels — `dropoff_window` at `pickup_window`.
     """
     __tablename__ = "bookings"
 
@@ -611,8 +616,19 @@ class Booking(Base):
 
     pickup_datetime = Column(DateTime(timezone=True), nullable=True)
 
+    # NEW (Preferred Drop-off feature) — optional na oras kung kailan
+    # balak pumunta ng customer sa shop para mag-drop-off ng laundry.
+    # HIWALAY sa pickup_datetime (na para sa delivery pickup leg at
+    # required doon). Heads-up lang ito para sa staff, walang epekto
+    # sa status/pricing. Laging null para sa "delivery" bookings.
     dropoff_datetime = Column(DateTime(timezone=True), nullable=True)
 
+    # NEW (Flexible Booking) — time window label: "morning" |
+    # "afternoon" | "evening" | "anytime" | null (null = eksaktong
+    # oras ang ibinigay, gaya ng dati). Ang *_datetime pa rin ang
+    # may hawak ng petsa; ang window ang nagsasabi kung flexible ang oras.
+    dropoff_window = Column(String(20), nullable=True)
+    pickup_window = Column(String(20), nullable=True)
 
     delivery_datetime = Column(DateTime(timezone=True), nullable=True)
 
@@ -809,6 +825,8 @@ class Booking(Base):
             "fulfillment_mode": self.fulfillment_mode,
             "pickup_datetime": self.pickup_datetime.isoformat() if self.pickup_datetime else None,
             "dropoff_datetime": self.dropoff_datetime.isoformat() if self.dropoff_datetime else None,
+            "dropoff_window": self.dropoff_window,
+            "pickup_window": self.pickup_window,
             "delivery_datetime": self.delivery_datetime.isoformat() if self.delivery_datetime else None,
             "delivery_fee_charged": self.delivery_fee_charged,
             "promo_code": self.promo_code,

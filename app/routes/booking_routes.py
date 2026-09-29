@@ -4,7 +4,7 @@ from typing import List
 from app.database import get_db
 from app.schemas import (
     BookingCreate, BookingResponse, BookingStatusUpdate, BookingAssignMachine,
-    CustomerBookingCreate, BookingDecisionResponse, BookingDeclineRequest,
+    CustomerBookingCreate, CustomerBookingUpdate, BookingDecisionResponse, BookingDeclineRequest,
     PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput,
     PaymentRejectRequest, BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
     RiderAssignmentInput, PromoPreviewRequest, PromoPreviewResponse,
@@ -387,6 +387,34 @@ def get_all_bookings(
 ):
     """Returns every booking for the logged-in user's shop, any status. Backs Record Sales."""
     return booking_controller.get_all_bookings(db, current_user.shop_id)
+
+
+@router.patch("/{booking_id}", response_model=BookingResponse)
+async def update_my_booking(
+    booking_id: int,
+    update_data: CustomerBookingUpdate,
+    current_customer: models.Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (Flexible Booking — Edit Booking) — customer edits their own
+    booking while it's still 'Awaiting Approval'. Partial update: only
+    the fields actually sent are changed (see CustomerBookingUpdate /
+    booking_controller.update_customer_booking() for details). Once the
+    shop has accepted the booking, editing is no longer allowed — the
+    customer would need to cancel instead. Broadcasts a
+    'booking_edited_by_customer' event to the shop's Service Terminal
+    so staff see the change live if they're already viewing the request.
+
+    NOTE: route order matters here — this generic '/{booking_id}' PATCH
+    must stay BELOW the more specific '/{booking_id}/...' PATCH routes
+    above (status, assign-machine, mark-paid, etc.), since FastAPI
+    matches routes in declaration order and a broader path pattern
+    declared first would shadow the more specific ones.
+    """
+    return await booking_controller.update_customer_booking(
+        db, booking_id, current_customer, update_data
+    )
 
 
 @router.patch("/{booking_id}/cancel", response_model=BookingResponse)

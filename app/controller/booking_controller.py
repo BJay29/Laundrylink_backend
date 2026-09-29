@@ -3,7 +3,7 @@ from app.schemas import (
     BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
     MachineAssignmentInput, MoveLoadToDryerInput, PaymentRejectRequest,
     BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
-    RiderAssignmentInput,
+    RiderAssignmentInput, CustomerBookingUpdate,
 )
 from app.services.prediction_service import PredictionService
 from app.services.ws_manager import (
@@ -1967,6 +1967,16 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             if booking_data.fulfillment_mode == "dropoff"
             else None
         ),
+        dropoff_window=(
+            booking_data.dropoff_window
+            if booking_data.fulfillment_mode == "dropoff"
+            else None
+        ),
+        pickup_window=(
+            booking_data.pickup_window
+            if booking_data.fulfillment_mode == "delivery"
+            else None
+        ),
         pickup_datetime=booking_data.pickup_datetime,
         delivery_fee_charged=delivery_fee_charged,
         delivery_address_id=delivery_address_record.id if delivery_address_record else None,
@@ -2307,4 +2317,179 @@ async def cancel_customer_booking(db: Session, booking_id: int, customer: models
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error cancelling booking: {str(e)}"
+        )
+
+async def update_customer_booking(
+     db: Session,
+     booking_id: int,
+     customer: models.Customer,
+     update_data: CustomerBookingUpdate,
+):
+    """
+    NEW (Edit Booking) — ang CUSTOMER mismo ang nag-e-edit ng sarili
+    niyang booking. Pinapayagan lang habang "Awaiting Approval":
+    pagkatapos ma-accept, nagsisimula na ang weighing/pricing kaya
+    cancel o makipag-ugnayan na lang sa shop.
+
+    Mga hindi mababago dito: fulfillment_mode, quantity, add-ons,
+    promo — nakakaapekto sa presyo. Kung gusto ng customer na
+    palitan ang mga iyon, i-cancel at gumawa ng bago.
+
+    Ginagamit ang model_dump(exclude_unset=True), kaya ang field na
+    hindi ipinadala ay hindi ginagalaw, at ang ipinadalang null ay
+    nagki-clear.
+    """
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.customer_id == customer.id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.status != "Awaiting Approval":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"This booking can no longer be edited (current status: "
+                f"'{booking.status}'). You can cancel it or contact the shop directly."
+            )
+        )
+
+    changes = update_data.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No changes were provided."
+        )
+
+    mode = booking.fulfillment_mode
+
+    # --- Mode-specific guards ---
+    dropoff_only = {"dropoff_datetime", "dropoff_window"}
+    delivery_only = {"pickup_datetime", "pickup_window", "address_id"}
+    if mode == "dropoff" and (delivery_only & changes.keys()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pickup and address can only be edited on delivery bookings."
+        )
+    if mode == "delivery" and (dropoff_only & changes.keys()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Drop-off time can only be edited on drop-off bookings."
+        )
+
+    # Pickup date ay required sa delivery — hindi puwedeng i-clear.
+    if mode == "delivery" and "pickup_datetime" in changes and changes["pickup_datetime"] is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A pickup date and time is required for delivery bookings."
+        )
+
+    # --- Payment method validation ---
+    if "payment_method" in changes:
+        new_method = changes["payment_method"]
+        if new_method is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment method cannot be empty."
+            )
+        if new_method == "cash" and mode == "delivery":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cash on Counter is only for drop-off bookings. Choose Cash on Delivery instead."
+            )
+        if new_method == "cod" and mode == "dropoff":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cash on Delivery is only for delivery bookings. Choose Cash on Counter instead."
+            )
+        if new_method == "online_qr":
+            shop = booking.shop
+            if not shop or not shop.accepts_online or not shop.qr_code_url:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This shop is not accepting online payments right now."
+                )
+
+    # --- Address validation + snapshot (delivery only) ---
+    if "address_id" in changes:
+        address = None
+        if changes["address_id"] is not None:
+            address = (
+                db.query(Address)
+                .filter(
+                    Address.id == changes["address_id"],
+                    Address.customer_id == customer.id,
+                )
+                .first()
+            )
+        if not address:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Selected delivery address was not found in your saved addresses."
+            )
+        booking.delivery_address_id = address.id
+        booking.delivery_address_line = address.address_line
+        booking.delivery_latitude = address.latitude
+        booking.delivery_longitude = address.longitude
+
+    # --- Apply the simple fields ---
+    simple_fields = [
+        "dropoff_datetime", "dropoff_window",
+        "pickup_datetime", "pickup_window",
+        "special_instructions", "payment_method",
+    ]
+    for field in simple_fields:
+        if field in changes:
+            setattr(booking, field, changes[field])
+
+    changed_labels = ", ".join(sorted(changes.keys()))
+
+    try:
+        log_activity(
+            db, booking.shop_id,
+            actor_name=customer.full_name,
+            actor_role="customer",
+            description=(
+                f"Customer edited their booking request - {booking.service_type} "
+                f"(changed: {changed_labels})"
+            )
+        )
+
+        db.commit()
+        db.refresh(booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+
+        # Live push sa shop dashboard para hindi sila magulat sa
+        # nabagong request habang tinitingnan nila ito.
+        await manager.broadcast(booking.shop_id, {
+            "type": "booking_edited_by_customer",
+            "booking_id": reloaded.id,
+            "customer_name": reloaded.customer_name,
+            "service_type": reloaded.service_type,
+            "changed_fields": sorted(changes.keys()),
+        })
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating booking: {str(e)}"
         )
