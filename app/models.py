@@ -1,5 +1,5 @@
 from app.database import Base
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Numeric 
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone, timedelta
 
@@ -655,6 +655,22 @@ class Booking(Base):
     # Supabase Storage.
     proof_of_payment_url = Column(String, nullable=True)
 
+    # NEW (Secure Payment Verification System) — reference number ng
+    # online payment (GCash/Maya/bank transfer) na ipinasok ng
+    # customer. UNIQUE constraint (partial index, see SQL migration)
+    # para hindi magamit muli ang parehong reference number.
+    reference_number = Column(String(50), nullable=True)
+
+    # True kapag na-verify na ng OCR pipeline (o na-bypass via Sandbox
+    # Mode, kung APP_ENV == "development" at "TEST-" ang prefix ng
+    # reference_number) na talagang lumalabas ang reference number sa
+    # loob ng resibo mismo.
+    is_verified_by_ocr = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Amount na na-extract ng OCR mula sa mismong resibo — HINDI mula
+    # sa customer input — para sa cross-check laban sa final_price.
+    extracted_amount = Column(Numeric(10, 2), nullable=True)
+
     # (Online Payment feature) — dahilan kung bakit tinanggihan ng
     # staff ang isang online payment proof (reject_payment() sa
     # booking_controller.py). Parehong pattern ng decline_reason sa itaas.
@@ -837,6 +853,9 @@ class Booking(Base):
             "paid_at": self.paid_at.isoformat() if self.paid_at else None,
             "proof_of_payment_url": self.proof_of_payment_url,
             "payment_rejection_reason": self.payment_rejection_reason,
+            "reference_number": self.reference_number,
+            "is_verified_by_ocr": self.is_verified_by_ocr,
+            "extracted_amount": float(self.extracted_amount) if self.extracted_amount is not None else None,
             # NEW (Weighing / Finalize Pricing feature)
             "estimated_weight": self.estimated_weight,
             "estimated_price": self.estimated_price,
@@ -1034,4 +1053,51 @@ class Address(Base):
             "longitude": self.longitude,
             "is_default": self.is_default,
             "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+class PaymentAuditLog(Base):
+    """
+    NEW (Secure Payment Verification System) — append-only audit trail
+    para sa bawat aksyon (VIEW/APPROVE/REJECT) na ginawa ng staff sa
+    isang online payment submission.
+
+    APPEND-ONLY BY DESIGN: walang update_audit_log() o
+    delete_audit_log() function kahit saan sa controller layer nito —
+    ang tanging operation na dapat mangyari dito ay db.add() + commit.
+    Ang SQL migration ay naglalagay din ng REVOKE UPDATE, DELETE sa
+    database level bilang karagdagang proteksyon (epektibo lang kung
+    hindi superuser/service-role connection ang ginagamit ng backend —
+    see migration script docstring).
+    """
+    __tablename__ = "payment_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    transaction_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False)
+
+    staff_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    staff_email = Column(String(255), nullable=False)
+
+    # 'VIEW' | 'APPROVE' | 'REJECT'
+    action_performed = Column(String(20), nullable=False)
+
+    previous_status = Column(String(30), nullable=True)
+    current_status = Column(String(30), nullable=True)
+
+    rejection_reason = Column(String, nullable=True)
+
+    transaction = relationship("Booking", foreign_keys=[transaction_id])
+    staff = relationship("User", foreign_keys=[staff_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "transaction_id": self.transaction_id,
+            "staff_id": self.staff_id,
+            "staff_email": self.staff_email,
+            "action_performed": self.action_performed,
+            "previous_status": self.previous_status,
+            "current_status": self.current_status,
+            "rejection_reason": self.rejection_reason,
         }

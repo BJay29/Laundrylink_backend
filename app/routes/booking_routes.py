@@ -8,6 +8,7 @@ from app.schemas import (
     PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput,
     PaymentRejectRequest, BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
     RiderAssignmentInput, PromoPreviewRequest, PromoPreviewResponse,
+    PaymentAuditLogResponse,
 )
 from app.controller import booking_controller
 from app import models
@@ -155,6 +156,12 @@ async def mark_paid(
     Payment', marking it paid also auto-routes it to 'Pending', making
     it visible in the Service Terminal for machine assignment.
 
+    UPDATED (Secure Payment Verification System — Dual-Check Threshold
+    Control): payment_data now carries manual_verification_confirmed —
+    required=True when the transaction amount is >= ₱5,000 (enforced
+    inside booking_controller.mark_booking_as_paid()). This also writes
+    an append-only "APPROVE" entry to payment_audit_logs.
+
     FIXED: booking_controller.mark_booking_as_paid() is now `async`
     (customer WebSocket push) — route updated to match.
     """
@@ -175,6 +182,9 @@ async def reject_payment(
     GCash/PayMaya payment proof sitting at 'pending_verification'.
     Reverts payment_status to 'unpaid' and saves the rejection reason.
 
+    UPDATED (Secure Payment Verification System): also writes an
+    append-only "REJECT" entry to payment_audit_logs.
+
     FIXED: booking_controller.reject_payment() is now `async` (customer
     WebSocket push) — route updated to match.
     """
@@ -194,6 +204,26 @@ def get_pending_verification_bookings(
     Verification" panel in the Service Terminal.
     """
     return booking_controller.get_pending_verification_bookings(db, current_user.shop_id)
+
+
+@router.get("/{booking_id}/audit-trail", response_model=List[PaymentAuditLogResponse])
+def get_payment_audit_trail(
+    booking_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (Secure Payment Verification System — Immutable Audit Trail) —
+    Ibinabalik ang buong history (VIEW/APPROVE/REJECT entries) ng isang
+    online payment submission, pinaka-bago muna. Tinatawag ito ng web
+    dashboard kapag binuksan ng staff ang PaymentVerificationModal ng
+    isang partikular na booking — ang tawag mismo dito ay nag-lo-log ng
+    isa pang "VIEW" entry (see booking_controller.
+    get_payment_audit_trail()), kaya ang bawat pagbukas ng resibo ay
+    naka-rekord din, hindi lang ang Approve/Reject.
+    """
+    _, logs = booking_controller.get_payment_audit_trail(db, booking_id, current_user)
+    return logs
 
 
 # =========================================================
@@ -439,6 +469,14 @@ async def submit_payment_proof(
     an already-"Awaiting Payment" booking. Sets payment_status to
     "pending_verification", notifies the shop's Service Terminal, and
     pushes a confirmation back to the customer's own device.
+
+    UPDATED (Secure Payment Verification System): proof_data now
+    requires a reference_number. In production (APP_ENV != "development"),
+    the backend calls OCR.space to verify the reference number actually
+    appears on the uploaded receipt image, rejecting with 400 ("Fraud
+    Alert") if it doesn't match. In development, a reference_number
+    starting with "TEST-" bypasses OCR entirely (Sandbox Mode) — see
+    booking_controller.submit_payment_proof() for the full logic.
     """
     return await booking_controller.submit_payment_proof(
         db, booking_id, proof_data, current_customer

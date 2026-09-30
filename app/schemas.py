@@ -1,10 +1,32 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import re
 import uuid as uuid_lib
 
 # Mga valid na time window label (Flexible Booking)
 ALLOWED_TIME_WINDOWS = {"morning", "afternoon", "evening", "anytime"}
+
+# NEW (Secure Payment Verification System) — kung ang reference number
+# ay nagsisimula sa prefix na ito, kikilalanin ito ng backend bilang
+# isang Sandbox/Testing Mode submission (see booking_controller.
+# submit_payment_proof()) — pero SANDBOX-MODE lang ito papayagan kapag
+# APP_ENV == "development" doon; hindi ito ipinapatupad dito sa schema
+# level, dito lang tinitiyak na sundin ang basic format kahit anong
+# klaseng reference number ang ibinigay.
+TEST_REFERENCE_PREFIX = "TEST-"
+
+# NEW (Secure Payment Verification System) — pangkaraniwang format ng
+# reference number ng mga local payment channel: alphanumeric, walang
+# space, 6-20 characters. Sadyang maluwag ito (hindi eksaktong 13
+# characters lang para sa GCash) dahil iba-ibang klase ng channel ang
+# maaaring tanggapin ng shop (GCash, Maya, bank transfer, atbp.) —
+# ang mas mahigpit na per-channel na format check (hal. eksaktong 13
+# digits) ay ginagawa sa MOBILE APP side bilang UX hint, hindi dito,
+# para hindi ma-block ng backend ang mga totoong legitimate na
+# reference number mula sa ibang channel na hindi pa naisip dito.
+REFERENCE_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9-]{6,20}$")
+
 
 # --- AUTHENTICATION & OWNER SCHEMAS ---
 
@@ -828,8 +850,19 @@ class PaymentStatusUpdate(BaseModel):
     payment_method nito — dapat manatili itong "gcash"/"paymaya", hindi
     ma-overwrite pabalik sa "cash" default. Kaya None ang ibig sabihin
     "huwag galawin, panatilihin ang existing value ng booking".
+
+    NEW (Secure Payment Verification System — Dual-Check Threshold
+    Control): `manual_verification_confirmed` — REQUIRED na `true`
+    kapag ang halaga ng transaction ay ≥ ₱5,000 (chinecheck ito sa
+    booking_controller.mark_booking_as_paid(), hindi dito, dahil
+    kailangan munang i-load ang booking mula sa DB para malaman ang
+    final_price). Ito ang interactive checkbox assertion na
+    pinipirmahan ng staff na "manually validated ko ang ledger record
+    sa opisyal na bank/e-wallet app history namin" — bago pumayag na
+    i-approve ang mataas na halaga na transaction.
     """
     payment_method: Optional[str] = None  # "cash", "cod", "gcash", "online_qr", o None (keep existing)
+    manual_verification_confirmed: bool = False
 
     @field_validator("payment_method")
     @classmethod
@@ -882,8 +915,28 @@ class BookingSubmitPaymentProofRequest(BaseModel):
     finalize na ng staff ang presyo, online ang payment method). Ang
     larawan mismo ay hiwalay na na-upload via POST /uploads/payment-proof
     — yung resulting public URL na lang ang ipinapasa dito.
+
+    NEW (Secure Payment Verification System): idinagdag ang
+    `reference_number` — REQUIRED na ngayon. Ito ang titignan ng
+    backend para sa:
+      1. UNIQUE constraint check (hindi na pwedeng magamit muli ang
+         parehong reference number sa ibang booking) — see
+         booking_controller.submit_payment_proof().
+      2. Sandbox Mode bypass kapag APP_ENV == "development" at
+         nagsisimula sa "TEST-" (see TEST_REFERENCE_PREFIX sa itaas)
+         — lalaktawan ang OCR validation, awtomatikong tatanggapin.
+      3. Live OCR substring-matching sa production — dapat lumabas ang
+         eksaktong reference number na ito sa loob ng extracted text
+         mula sa resibo mismo, kundi ma-reject ang submission (400,
+         "Fraud Alert").
+
+    Format: alphanumeric + dash, 6-20 characters (maluwag na pattern —
+    ang mas mahigpit na per-channel na format check, hal. eksaktong 13
+    digits para sa GCash, ay ginagawa sa MOBILE APP bilang UX hint
+    lang, hindi dito).
     """
     proof_of_payment_url: str
+    reference_number: str
 
     @field_validator("proof_of_payment_url")
     @classmethod
@@ -891,6 +944,18 @@ class BookingSubmitPaymentProofRequest(BaseModel):
         cleaned = v.strip()
         if not cleaned:
             raise ValueError("proof_of_payment_url cannot be empty.")
+        return cleaned
+
+    @field_validator("reference_number")
+    @classmethod
+    def validate_reference_number(cls, v):
+        cleaned = v.strip().upper()
+        if not cleaned:
+            raise ValueError("reference_number cannot be empty.")
+        if not REFERENCE_NUMBER_PATTERN.match(cleaned):
+            raise ValueError(
+                "reference_number must be 6-20 characters, letters/numbers/dashes only."
+            )
         return cleaned
 
 
@@ -1109,6 +1174,11 @@ class BookingResponse(BaseModel):
 
     proof_of_payment_url: Optional[str] = None
     payment_rejection_reason: Optional[str] = None
+
+    # NEW (Secure Payment Verification System)
+    reference_number: Optional[str] = None
+    is_verified_by_ocr: bool = False
+    extracted_amount: Optional[float] = None
 
     # NEW (Weighing / Finalize Pricing feature)
     estimated_weight: Optional[float] = None
@@ -1579,3 +1649,29 @@ class NotificationDeleteResponse(BaseModel):
     case to report.
     """
     message: str
+
+
+# --- PAYMENT AUDIT LOG SCHEMAS (NEW — Secure Payment Verification System) ---
+
+class PaymentAuditLogResponse(BaseModel):
+    """
+    Isang entry sa append-only payment_audit_logs table — response
+    view lang, walang katumbas na Create/Update schema dahil dapat
+    isa lang ang paraan ng paggawa nito: internal na
+    booking_controller._write_audit_log() helper (INSERT lang, hindi
+    kailanman UPDATE/DELETE — see PaymentAuditLog model docstring sa
+    models.py). Ginagamit ito ng web dashboard para ipakita ang
+    "history" ng isang transaction (VIEW/APPROVE/REJECT entries) sa
+    Payment Verification page.
+    """
+    id: int
+    timestamp: datetime
+    transaction_id: int
+    staff_id: Optional[int] = None
+    staff_email: str
+    action_performed: str
+    previous_status: Optional[str] = None
+    current_status: Optional[str] = None
+    rejection_reason: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)

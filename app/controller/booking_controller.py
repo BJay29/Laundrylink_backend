@@ -1,11 +1,14 @@
+import os
+
 from app.models import Booking, Machine, Setting, ServiceType, BookingInventoryUsage, AddOn, PromoCode, BookingAddOnUsage, BookingMachineAssignment, Address
 from app.schemas import (
     BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
     MachineAssignmentInput, MoveLoadToDryerInput, PaymentRejectRequest,
     BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
-    RiderAssignmentInput, CustomerBookingUpdate,
+    RiderAssignmentInput, CustomerBookingUpdate, TEST_REFERENCE_PREFIX,
 )
 from app.services.prediction_service import PredictionService
+from app.services import ocr_service
 from app.services.ws_manager import (
     manager,
     EVENT_NEW_BOOKING_REQUEST,
@@ -20,6 +23,59 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timezone
 from app.services.customer_ws_manager import customer_manager, EVENT_BOOKING_UPDATED
+
+
+# =========================================================
+# SECURE PAYMENT VERIFICATION SYSTEM — shared config + helpers
+# =========================================================
+
+# NEW — Dual-Environment Orchestration (Feature Flag). Kunin lang ang
+# APP_ENV kapag kailangan (hindi module-level constant) para tama pa
+# rin ang behavior kahit magbago ang env var habang nakatakbo pa ang
+# process (hal. sa testing).
+def _is_development_env() -> bool:
+    return os.getenv("APP_ENV", "development") == "development"
+
+
+# NEW — Dual-Check Threshold Control. Anumang transaction na ≥ dito ay
+# kailangan ng manual_verification_confirmed=True bago ma-approve.
+DUAL_CHECK_THRESHOLD = 5000.0
+
+
+def _write_audit_log(
+    db: Session,
+    transaction_id: int,
+    staff,
+    action_performed: str,
+    previous_status: str = None,
+    current_status: str = None,
+    rejection_reason: str = None,
+):
+    """
+    NEW (Secure Payment Verification System) — APPEND-ONLY audit log
+    writer. Ito ang TANGING function sa buong codebase na dapat
+    gumagawa ng row sa payment_audit_logs — sinasadyang walang
+    update_audit_log() o delete_audit_log() function kahit saan, para
+    hindi ma-tempt na baguhin/burahin ang isang entry pagkatapos itong
+    magawa (see PaymentAuditLog model docstring sa models.py).
+
+    [staff] ay maaaring models.User (staff/manager/owner) — kinukuha
+    dito ang staff_id at staff_email. Hindi ito kinu-commit dito
+    mismo — sinasadya, para isang atomic transaction lang ang buong
+    aksyon (booking update + audit log), gaya ng pattern ng
+    notification_controller.create_notification().
+    """
+    entry = models.PaymentAuditLog(
+        transaction_id=transaction_id,
+        staff_id=staff.id if staff else None,
+        staff_email=staff.email if staff else "system",
+        action_performed=action_performed,
+        previous_status=previous_status,
+        current_status=current_status,
+        rejection_reason=rejection_reason,
+    )
+    db.add(entry)
+    return entry
 
 
 def create_booking(db: Session, booking_data: BookingCreate, current_user: models.User):
@@ -1086,6 +1142,21 @@ async def mark_booking_as_paid(db: Session, booking_id: int, payment_data: Payme
     UPDATED (customer WebSocket): now `async` — pushes a live
     "booking_updated" event to the customer's device right after
     committing.
+
+    NEW (Secure Payment Verification System — Dual-Check Threshold
+    Control): kapag ang halaga ng transaction ay ≥
+    DUAL_CHECK_THRESHOLD (₱5,000), REQUIRED ang
+    payment_data.manual_verification_confirmed == True — ito ang
+    interactive checkbox assertion na pinipirmahan ng staff sa web
+    dashboard na "manually validated ko ang ledger record sa opisyal
+    na bank/e-wallet app history namin" bago pumayag na i-approve.
+
+    NEW (Secure Payment Verification System — Immutable Audit Trail):
+    bawat successful na "APPROVE" action ay nagsusulat ng isang
+    append-only row sa payment_audit_logs (see _write_audit_log()),
+    bago pa man ang db.commit() — parehong transaction ang buong
+    booking update + audit log entry, kaya magkasabay silang
+    mag-rollback kung may mag-fail.
     """
     shop_id = current_user.shop_id
 
@@ -1106,6 +1177,24 @@ async def mark_booking_as_paid(db: Session, booking_id: int, payment_data: Payme
             detail="This booking is already marked as paid."
         )
 
+    # NEW — Dual-Check Threshold Control. Ang final_price ang mas
+    # authoritative na halaga kapag meron na (Weighing feature); kung
+    # wala pa (hal. walk-in booking na direktang may total_price),
+    # gamitin na lang ang total_price.
+    amount_to_check = booking.final_price if booking.final_price is not None else booking.total_price
+    if amount_to_check is not None and amount_to_check >= DUAL_CHECK_THRESHOLD:
+        if not payment_data.manual_verification_confirmed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"This transaction is ₱{amount_to_check:,.2f}, which meets or exceeds the "
+                    f"₱{DUAL_CHECK_THRESHOLD:,.0f} dual-check threshold. Please confirm you've "
+                    "manually validated this against your official bank/e-wallet ledger before approving."
+                ),
+            )
+
+    previous_payment_status = booking.payment_status
+
     if payment_data.payment_method is not None:
         booking.payment_method = payment_data.payment_method
     booking.payment_status = "paid"
@@ -1123,6 +1212,16 @@ async def mark_booking_as_paid(db: Session, booking_id: int, payment_data: Payme
                 f"Marked booking for {booking.customer_name} as PAID "
                 f"(via {booking.payment_method})"
             )
+        )
+
+        # NEW — append-only audit trail entry for this approval.
+        _write_audit_log(
+            db,
+            transaction_id=booking.id,
+            staff=current_user,
+            action_performed="APPROVE",
+            previous_status=previous_payment_status,
+            current_status="paid",
         )
 
         if booking.customer_id:
@@ -1176,6 +1275,10 @@ async def reject_payment(db: Session, booking_id: int, reason: str, current_user
     UPDATED (customer WebSocket): now `async` — pushes a live
     "booking_updated" event to the customer's device right after
     committing.
+
+    NEW (Secure Payment Verification System — Immutable Audit Trail):
+    bawat "REJECT" action ay nagsusulat din ng append-only audit log
+    entry, kasama ang rejection_reason.
     """
     shop_id = current_user.shop_id
 
@@ -1199,6 +1302,8 @@ async def reject_payment(db: Session, booking_id: int, reason: str, current_user
             )
         )
 
+    previous_payment_status = booking.payment_status
+
     booking.payment_status = "unpaid"
     booking.payment_rejection_reason = reason
 
@@ -1211,6 +1316,17 @@ async def reject_payment(db: Session, booking_id: int, reason: str, current_user
                 f"Rejected online payment proof for {booking.customer_name}'s booking "
                 f"(Reason: {reason})"
             )
+        )
+
+        # NEW — append-only audit trail entry for this rejection.
+        _write_audit_log(
+            db,
+            transaction_id=booking.id,
+            staff=current_user,
+            action_performed="REJECT",
+            previous_status=previous_payment_status,
+            current_status="unpaid",
+            rejection_reason=reason,
         )
 
         if booking.customer_id:
@@ -1282,6 +1398,50 @@ def get_pending_verification_bookings(db: Session, shop_id: int):
         .all()
     )
 
+
+def get_payment_audit_trail(db: Session, booking_id: int, current_user: models.User):
+    """
+    NEW (Secure Payment Verification System) — Tinitignan ng staff ang
+    isang online payment submission (halimbawa, binuksan ang
+    PaymentVerificationModal). Isa itong "VIEW" action na naka-log din
+    sa append-only audit trail — kasama ito sa spec na "action_performed
+    (e.g., VIEW, APPROVE, REJECT)".
+
+    Nagbabalik ng (booking, logs) tuple — ang buong audit history ng
+    transaction na ito, pinaka-bago muna, para ipakita sa staff sa
+    Payment Verification page ("Nakita ni Staff X ito noong... na-
+    reject dati dahil sa...", atbp).
+    """
+    booking = db.query(Booking).filter(
+        Booking.id == booking_id,
+        Booking.shop_id == current_user.shop_id,
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    _write_audit_log(
+        db,
+        transaction_id=booking.id,
+        staff=current_user,
+        action_performed="VIEW",
+        previous_status=booking.payment_status,
+        current_status=booking.payment_status,
+    )
+    db.commit()
+
+    logs = (
+        db.query(models.PaymentAuditLog)
+        .filter(models.PaymentAuditLog.transaction_id == booking.id)
+        .order_by(models.PaymentAuditLog.timestamp.desc())
+        .all()
+    )
+    return booking, logs
+
+
 async def submit_payment_proof(
     db: Session,
     booking_id: int,
@@ -1291,6 +1451,20 @@ async def submit_payment_proof(
     """
     NEW (Module C) — customer attaches proof of payment sa isang
     booking na "Awaiting Payment" na.
+
+    UPDATED (Secure Payment Verification System):
+      1. UNIQUE reference_number check (app-level — gives a friendlier
+         error message than a raw IntegrityError from the DB's partial
+         unique index; see SQL migration for that DB-level guard).
+      2. Sandbox/Testing Mode: kapag APP_ENV == "development" AT
+         nagsisimula ang reference_number sa "TEST-", lalaktawan ang
+         OCR validation, awtomatikong ituturing na "verified" ito, at
+         gagawa ng dummy extracted_amount (= booking.final_price) para
+         sa pagsubok ng buong flow nang walang gastos sa totoong OCR API.
+      3. Live Production OCR: kung hindi sandbox, tatawagin ang
+         OCR.space (see app/services/ocr_service.py) — dapat lumabas
+         ang reference_number sa loob ng extracted text mula sa
+         resibo mismo, kundi ma-reject (400, "Fraud Alert").
     """
     booking = db.query(Booking).filter(
         Booking.id == booking_id,
@@ -1313,17 +1487,82 @@ async def submit_payment_proof(
             )
         )
 
-    booking.proof_of_payment_url = proof_data.proof_of_payment_url
-    booking.payment_status = "pending_verification"
+    # --- 1. UNIQUE reference_number check (app-level) ---
+    duplicate = (
+        db.query(Booking)
+        .filter(
+            Booking.reference_number == proof_data.reference_number,
+            Booking.id != booking.id,
+        )
+        .first()
+    )
+    if duplicate:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This reference number has already been used for another transaction. "
+                "Please double-check your receipt."
+            ),
+        )
 
-    try:
+    # --- 2. Sandbox/Testing Mode bypass ---
+    is_sandbox_submission = (
+        _is_development_env()
+        and proof_data.reference_number.startswith(TEST_REFERENCE_PREFIX)
+    )
+
+    if is_sandbox_submission:
+        booking.is_verified_by_ocr = True
+        booking.extracted_amount = booking.final_price
         log_activity(
             db, booking.shop_id,
             actor_name=customer.full_name,
             actor_role="customer",
-            description=f"Customer submitted payment proof for their booking - {booking.service_type}"
+            description=(
+                f"[SANDBOX MODE] Customer submitted a TEST payment proof for their "
+                f"booking - {booking.service_type} (ref: {proof_data.reference_number})"
+            )
+        )
+    else:
+        # --- 3. Live Production OCR verification ---
+        try:
+            ocr_result = await ocr_service.verify_payment_receipt(
+                proof_data.proof_of_payment_url, proof_data.reference_number
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Could not verify the receipt right now. Please try again shortly. ({str(e)})",
+            )
+
+        if not ocr_result["matched"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Fraud Alert: the reference number you entered was not found on the "
+                    "uploaded receipt. Please double-check your receipt and try again."
+                ),
+            )
+
+        booking.is_verified_by_ocr = True
+        booking.extracted_amount = ocr_result["extracted_amount"]
+
+        log_activity(
+            db, booking.shop_id,
+            actor_name=customer.full_name,
+            actor_role="customer",
+            description=(
+                f"Customer submitted payment proof for their booking - "
+                f"{booking.service_type} (ref: {proof_data.reference_number}, "
+                f"OCR-verified)"
+            )
         )
 
+    booking.reference_number = proof_data.reference_number
+    booking.proof_of_payment_url = proof_data.proof_of_payment_url
+    booking.payment_status = "pending_verification"
+
+    try:
         db.commit()
         db.refresh(booking)
 
