@@ -22,7 +22,7 @@ import httpx
 # Ang default value dito ay ang ibinigay na key — gumagana ito kaagad
 # kahit wala pang env var, pero dapat pa ring i-configure nang tama sa
 # production environment settings.
-OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "K82062009788957")
+OCR_SPACE_API_KEY = os.environ["OCR_SPACE_API_KEY"]
 OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/imageurl"
 
 # Sinusubukang hanapin ang halaga sa resibo (hal. "PHP 410.00",

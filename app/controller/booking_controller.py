@@ -34,7 +34,7 @@ from app.services.customer_ws_manager import customer_manager, EVENT_BOOKING_UPD
 # rin ang behavior kahit magbago ang env var habang nakatakbo pa ang
 # process (hal. sa testing).
 def _is_development_env() -> bool:
-    return os.getenv("APP_ENV", "development") == "development"
+    return os.getenv("APP_ENV", "production") == "development"
 
 
 # NEW — Dual-Check Threshold Control. Anumang transaction na ≥ dito ay
