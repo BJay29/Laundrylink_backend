@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional
 import pickle
 import json 
 import os 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 # Import the training logic from your ml_engine
 from ml_engine.train import run_training_pipeline, run_pooled_training_pipeline
@@ -40,6 +40,20 @@ class PredictionService:
 
     Every row in the response now carries "model_tier" so the frontend
     can show which tier produced it (see the dashboard badge design).
+
+    UPDATED (weather fix — rain_mm laging 0.0): dalawang dagdag na
+    pagbabago dito bukod sa Naga City fallback sa weather_service.py:
+      1. Ang forecast loop ay nagsisimula sa bukas (offset 1) hanggang
+         offset 7 (today + 7), pero ang Open-Meteo `forecast_days=7`
+         ay nagbabalik lang ng today hanggang today + 6 — kaya ang
+         ika-7 na araw ay walang weather data at laging 0.0. Ngayon,
+         humihingi na ng days + 1 na araw ang _rain_lookup().
+      2. Ang petsa ay kinukuha dati gamit ang datetime.now() ng server
+         (UTC sa Render), pero ang weather data ay naka-key sa petsa ng
+         Asia/Manila (UTC+8). Tuwing 4:00 PM–11:59 PM UTC, ang "today"
+         ng server ay isang araw na nasa likod ng Manila, kaya
+         nagmi-mismatch ang mga petsa. Ngayon, _manila_now() na ang
+         ginagamit sa lahat ng forecast tier.
     """
 
     # --- NAGA CITY UTILITY RATES ---
@@ -61,6 +75,10 @@ class PredictionService:
     POOLED_MODEL_PATH = MODEL_DIR / "forecast_pooled.pkl"
     METRICS_PATH = MODEL_DIR / "model_metrics.json"
 
+    # Philippines (UTC+8, walang DST) — tumutugma sa timezone="Asia/Manila"
+    # na hinihingi natin sa Open-Meteo sa weather_service.py.
+    MANILA_TZ = timezone(timedelta(hours=8))
+
     # Assumed daily bookings for a shop with ZERO history, used only to
     # turn the pooled model's ratio prediction into a currency estimate
     # when there's nothing else to scale against. Matches AIEngine's own
@@ -68,6 +86,11 @@ class PredictionService:
     # forecasting systems in this codebase don't quietly disagree on
     # what "a normal new shop's day" looks like.
     ASSUMED_NEW_SHOP_DAILY_BOOKINGS = 12
+
+    @classmethod
+    def _manila_now(cls) -> datetime:
+        """Kasalukuyang oras sa Asia/Manila, anuman ang timezone ng server."""
+        return datetime.now(cls.MANILA_TZ)
 
     @classmethod
     def retrain_model(cls, shop_id: int = 1):
@@ -106,6 +129,10 @@ class PredictionService:
         weather) and its own average ticket price (from its configured
         ServiceType catalog, so a new shop's income projection uses ITS
         OWN prices, not a system-wide guess, even before it has bookings).
+
+        NOTE: kung NULL ang latitude/longitude ng shop, ipinapasa pa rin
+        ang None dito — ang weather_service.py na ang nag-a-apply ng
+        Naga City fallback (DEFAULT_LATITUDE/DEFAULT_LONGITUDE).
         """
         from app.models import Shop, ServiceType
 
@@ -155,8 +182,19 @@ class PredictionService:
 
     @classmethod
     def _rain_lookup(cls, latitude: Optional[float], longitude: Optional[float], days: int) -> Dict[Any, float]:
-        rain_frame = weather_service.get_forecast_rain_mm(latitude, longitude, days=days)
+        """
+        Mapping ng {petsa (Manila): rain_mm} para sa susunod na `days`
+        na araw simula BUKAS.
+
+        FIXED: humihingi na ng `days + 1` na araw sa Open-Meteo, dahil
+        ang forecast loop sa ibaba ay tumatakbo mula bukas (offset 1)
+        hanggang today + days — at ang `forecast_days=days` ay nagbabalik
+        lang ng today hanggang today + (days - 1), kaya laging walang
+        weather data ang huling araw.
+        """
+        rain_frame = weather_service.get_forecast_rain_mm(latitude, longitude, days=days + 1)
         if rain_frame.empty:
+            print(f"[{datetime.now()}] Weather lookup returned no data — rain_mm will default to 0.0.")
             return {}
         return {row.booking_date.date(): float(row.rain_mm) for row in rain_frame.itertuples()}
 
@@ -177,7 +215,7 @@ class PredictionService:
 
         rain_by_date = cls._rain_lookup(context["latitude"], context["longitude"], days)
 
-        today = datetime.now()
+        today = cls._manila_now()
         forecast_rows = []
         for offset in range(1, days + 1):
             target_date = today + timedelta(days=offset)
@@ -224,7 +262,7 @@ class PredictionService:
         feature_columns = artifact["feature_columns"]
         rain_by_date = cls._rain_lookup(context["latitude"], context["longitude"], days)
 
-        today = datetime.now()
+        today = cls._manila_now()
         forecast_rows = []
         for offset in range(1, days + 1):
             target_date = today + timedelta(days=offset)
@@ -261,7 +299,7 @@ class PredictionService:
     def _forecast_weather_only(cls, context: Dict[str, Any], days: int) -> list:
         rain_by_date = cls._rain_lookup(context["latitude"], context["longitude"], days)
 
-        today = datetime.now()
+        today = cls._manila_now()
         forecast_rows = []
         for offset in range(1, days + 1):
             target_date = today + timedelta(days=offset)

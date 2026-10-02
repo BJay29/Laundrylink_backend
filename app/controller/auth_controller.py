@@ -1,6 +1,7 @@
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from app import models, schemas
+from app.services import weather_service
 
 
 def register_shop_for_owner(db: Session, shop_data: schemas.OwnerCreate, current_user: models.User):
@@ -18,6 +19,13 @@ def register_shop_for_owner(db: Session, shop_data: schemas.OwnerCreate, current
     current_user na, na-resolve na via get_current_user dependency).
     Ginagawa dito ang Shop entity, tapos ni-link ang current_user
     (na naka-synced na mula sa webhook) papunta rito.
+
+    UPDATED (weather forecast fix): ang bagong Shop ay may default na
+    coordinates na ng Naga City, Camarines Sur (galing sa
+    weather_service.DEFAULT_LATITUDE/DEFAULT_LONGITUDE), para hindi na
+    NULL ang latitude/longitude at gumana agad ang weather forecast.
+    Pwede itong palitan ng owner mamaya sa shop profile settings
+    (PUT /settings/profile — tumatanggap na ng latitude/longitude).
     """
     # Owner lang dapat ang tumatawag dito, at isang beses lang dapat
     # (hindi na dapat may existing shop_id na).
@@ -35,7 +43,9 @@ def register_shop_for_owner(db: Session, shop_data: schemas.OwnerCreate, current
 
     new_shop = models.Shop(
         shop_name=shop_data.shop_name,
-        address=shop_data.address
+        address=shop_data.address,
+        latitude=weather_service.DEFAULT_LATITUDE,
+        longitude=weather_service.DEFAULT_LONGITUDE,
     )
     db.add(new_shop)
     db.commit()

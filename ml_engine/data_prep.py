@@ -4,6 +4,7 @@ Database-to-feature preparation for LaundryLink forecasting.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -20,6 +21,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.database import SessionLocal
 from app.models import Booking, Shop
 from app.services import weather_service
+
+logger = logging.getLogger(__name__)
 
 # Feature columns used by the PER-SHOP machine learning model.
 # UPDATED: added "rain_mm" — daily rainfall (mm) at the shop's own
@@ -83,10 +86,13 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     frame["day_of_week"] = frame["booking_date"].dt.weekday.astype(int)
     frame["is_weekend"] = frame["day_of_week"].isin([5, 6]).astype(int)
 
-    # NEW — attach real historical rainfall for this shop's own location,
-    # matched to each booking date. If the shop has no lat/long set, or
-    # the external call fails, rain_mm falls back to 0.0 rather than
-    # breaking training.
+    # Attach real historical rainfall for this shop's own location,
+    # matched to each booking date.
+    #
+    # UPDATED: kung walang latitude/longitude ang shop (NULL sa DB), ang
+    # weather_service na ang gagamit ng Naga City fallback — kaya hindi
+    # na ito laging 0.0. Ang 0.0 ay fallback na lang kapag talagang
+    # pumalya ang external call, para hindi masira ang training.
     shop = db.query(Shop).filter(Shop.id == shop_id).first()
     rain_frame = weather_service.get_historical_rain_mm(
         shop.latitude if shop else None,
@@ -97,8 +103,21 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     if not rain_frame.empty:
         frame = frame.merge(rain_frame, on="booking_date", how="left")
     else:
+        logger.warning(
+            "Shop %s: no historical weather data available — rain_mm set to 0.0 for all %d training days.",
+            shop_id, len(frame),
+        )
         frame["rain_mm"] = 0.0
+
+    matched_days = int(frame["rain_mm"].notna().sum())
     frame["rain_mm"] = frame["rain_mm"].fillna(0.0)
+
+    # Para madaling ma-verify pagkatapos mag-retrain: dapat hindi 0
+    # ang "rainy_days" kung umulan talaga sa panahong iyon.
+    logger.info(
+        "Shop %s: weather matched for %d/%d training days, %d day(s) with rain > 0 mm.",
+        shop_id, matched_days, len(frame), int((frame["rain_mm"] > 0).sum()),
+    )
 
     return frame[
         [
