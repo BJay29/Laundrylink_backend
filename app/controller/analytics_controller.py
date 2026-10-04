@@ -1,9 +1,10 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pathlib import Path
 import json
+import pickle
 
 from app import models
 from app.services.ai_engine import AIEngine
@@ -168,7 +169,7 @@ class AnalyticsController:
         # 8. AI Engine Data
         ai = AIEngine()
         predicted_count_today  = ai.get_predicted_bookings(datetime.now())
-        projected_income_today = ai.calculate_projected_income(predicted_count_today)
+        projected_income_today  = ai.calculate_projected_income(predicted_count_today)
 
         active_machines = db.query(models.Machine).filter(
             models.Machine.shop_id == shop_id,
@@ -240,6 +241,10 @@ class AnalyticsController:
         resolves the forecast through a 3-tier fallback (the shop's own
         trained model → the pooled/cold-start model → a weather-only
         outlook for brand-new shops), documented in prediction_service.py.
+
+        NOTE: ang predicted_bookings ay hinuhulaan na ng model mula sa
+        weather forecast, at ang projected_income ay predicted_bookings
+        x average_ticket.
         """
         raw_forecast = PredictionService.get_revenue_forecast(shop_id=shop_id, days=7)
         ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
@@ -270,17 +275,46 @@ class AnalyticsController:
     # ─────────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def get_ai_prediction_metrics(db: Session) -> Dict[str, Any]:
+    def get_ai_prediction_metrics(db: Session, shop_id: Optional[int] = None) -> Dict[str, Any]:
         """
-        Retrieves real-time accuracy metrics from the dynamic model_metrics.json file.
-        Not shop-specific by design — reflects the global model's accuracy.
-        """
-        metrics_path = PredictionService.METRICS_PATH
-        if not metrics_path.exists():
-            return {"status": "error", "message": "Metrics configuration not found"}
+        Retrieves accuracy metrics for the AI Calibration section.
 
-        with open(metrics_path, "r") as f:
-            data = json.load(f)
+        UPDATED (per-shop): dati ay isang global model_metrics.json ang
+        binabasa — kung sinong shop ang huling na-train, iyon ang
+        accuracy na nakikita ng lahat. Ngayon, kapag may shop_id, binabasa
+        ang metrics na naka-save sa loob ng sariling model file ng
+        shop (forecast_shop_{shop_id}.pkl → artifact["metrics"]).
+
+        Kung may shop_id pero wala pang sariling model ang shop, "error"
+        ang ibabalik (0% sa UI) — hindi ang accuracy ng ibang shop.
+
+        Kung walang shop_id na ibinigay (lumang pagtawag), ang global
+        model_metrics.json pa rin ang babasahin, gaya ng dati.
+
+        Ang accuracy ay sa DAMI NG BOOKINGS na (hindi na sa kita) para sa
+        mga model na na-retrain na pagkatapos ng weather-driven update.
+        """
+        data: Optional[Dict[str, Any]] = None
+
+        if shop_id is not None:
+            shop_model_path = PredictionService.MODEL_DIR / f"forecast_shop_{shop_id}.pkl"
+            if not shop_model_path.exists() or shop_model_path.stat().st_size == 0:
+                return {"status": "error", "message": "No trained model for this shop yet"}
+            try:
+                with shop_model_path.open("rb") as model_file:
+                    artifact = pickle.load(model_file)
+                data = artifact.get("metrics")
+            except Exception as e:
+                print(f"[{datetime.now()}] Could not read metrics for shop {shop_id}: {e}")
+                return {"status": "error", "message": "Could not read model metrics"}
+            if not data:
+                return {"status": "error", "message": "Model has no metrics recorded"}
+        else:
+            metrics_path = PredictionService.METRICS_PATH
+            if not metrics_path.exists():
+                return {"status": "error", "message": "Metrics configuration not found"}
+            with open(metrics_path, "r") as f:
+                data = json.load(f)
 
         return {
             "status":                   "success",

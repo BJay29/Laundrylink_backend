@@ -39,6 +39,10 @@ def get_forecast_graph(
     Each row now includes "model_tier" ("shop_model" | "pooled_model" |
     "weather_only") and "rain_mm" — see AnalyticsController.get_forecast_data()
     and PredictionService.get_revenue_forecast() for the 3-tier fallback.
+
+    NOTE: ang predicted_bookings ay hinuhulaan na ng model mula sa
+    weather forecast (rain_mm), at ang projected_income ay
+    predicted_bookings x average_ticket.
     """
     try:
         return AnalyticsController.get_forecast_data(db, shop_id)
@@ -98,15 +102,23 @@ def get_weekly_history(
 
 
 @router.get("/accuracy")
-def get_accuracy_metrics(db: Session = Depends(get_db)):
+def get_accuracy_metrics(
+    shop_id: int = Depends(get_current_shop_id),  # UPDATED: per-shop na ang accuracy
+    db: Session = Depends(get_db)
+):
     """
-    Returns AI model accuracy metrics read from model_metrics.json.
+    Returns AI model accuracy metrics for the LOGGED-IN user's own shop.
     Used by the Financial Forecast page AI Calibration section.
-    Not shop-specific — this reflects whichever shop-specific model was
-    trained most recently, so no shop_id is needed here.
+
+    UPDATED: dati ay isang global model_metrics.json ang binabasa nito —
+    ibig sabihin, kung sinong shop ang huling na-train, iyon ang
+    accuracy na nakikita ng LAHAT ng shop. Ngayon, binabasa na ang
+    metrics na naka-save sa sariling model file ng shop (forecast_shop_{id}.pkl).
+    Kung wala pang sariling model ang shop, status "error" ang ibabalik
+    (0% sa UI) sa halip na accuracy ng ibang shop.
     """
     try:
-        return AnalyticsController.get_ai_prediction_metrics(db)
+        return AnalyticsController.get_ai_prediction_metrics(db, shop_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -119,24 +131,34 @@ def retrain_model(
     """
     Manually triggers the AI model retraining pipeline for the LOGGED-IN
     user's own shop. Normally runs automatically every 24 hours via the
-    scheduler.
+    scheduler (see main.retrain_all_shops()).
 
-    FIXED: this previously called PredictionService.retrain_model() with
-    no arguments, which trained shop_id=1's model regardless of which
-    shop the caller actually belonged to — meaning any owner clicking
-    "Retrain Model" was silently retraining shop 1's forecast, not
-    their own. It now trains the caller's own shop.
+    FIXED (earlier): this previously trained shop_id=1's model
+    regardless of which shop the caller belonged to. It now trains the
+    caller's own shop.
 
-    Requires 14+ days of this shop's own booking history — if the shop
-    doesn't have that yet, the forecast graph will keep serving from the
-    pooled/weather-only fallback tiers until it does.
+    UPDATED (real result): dati, PredictionService.retrain_model() ang
+    tinatawag dito — nilalamon nito ang lahat ng error (print lang),
+    kaya "success" ang lagi mong nakikita sa Swagger kahit pumalya ang
+    training. Ngayon, ang training pipeline mismo ang tinatawag, kaya:
+      - 200 + metrics (accuracy, MAE, R²) kapag nag-train talaga
+      - 400 kapag kulang ang data (kailangan ng 14+ araw ng bookings)
+      - 500 + dahilan para sa iba pang error
     """
+    from ml_engine.train import run_training_pipeline
+
     try:
-        from app.services.prediction_service import PredictionService
-        PredictionService.retrain_model(shop_id=shop_id)
-        return {"status": "success", "message": f"Model retraining triggered successfully for shop {shop_id}."}
+        metrics = run_training_pipeline(shop_id=shop_id)
+        return {
+            "status": "success",
+            "message": f"Model retrained successfully for shop {shop_id}.",
+            "metrics": metrics,
+        }
+    except ValueError as e:
+        # Hal. kulang pa ang bookings (kailangan ng 14+ araw)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Training failed: {e}")
 
 
 @router.post("/retrain-pooled-model")
@@ -145,11 +167,18 @@ def retrain_pooled_model(
     db: Session = Depends(get_db)
 ):
     """
-    NEW — manually triggers training of the pooled/cold-start model
-    across every shop with enough history to contribute (see
+    Manually triggers training of the pooled/cold-start model across
+    every shop with enough history to contribute (see
     ml_engine.data_prep.fetch_pooled_daily_frame). This is what powers
     Tier 2 of a new shop's forecast, before that shop has trained a
     model of its own.
+
+    OPTIONAL: hindi kailangang i-train ito para gumana ang sariling
+    model ng bawat shop. Kailangan nito ng kabuuang 30+ shop-days.
+
+    UPDATED (real result): tulad ng /retrain-model, ang training pipeline
+    na mismo ang tinatawag para makita ang totoong resulta o error
+    (400 kapag kulang ang pooled data).
 
     NOTE: this affects the WHOLE platform's pooled model, not just the
     caller's shop — shop_id here is only used to confirm the caller is
@@ -160,12 +189,19 @@ def retrain_pooled_model(
     currently do role checks either, so this matches existing behavior
     until that's decided.
     """
+    from ml_engine.train import run_pooled_training_pipeline
+
     try:
-        from app.services.prediction_service import PredictionService
-        PredictionService.retrain_pooled_model()
-        return {"status": "success", "message": "Pooled model retraining triggered successfully."}
+        metrics = run_pooled_training_pipeline()
+        return {
+            "status": "success",
+            "message": "Pooled model retrained successfully.",
+            "metrics": metrics,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Pooled training failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -3,10 +3,12 @@ load_dotenv()
 import os
 import re
 import uvicorn
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from sqlalchemy import func
 from app.database import engine, SessionLocal
 from app import models
 # Import routes
@@ -24,12 +26,29 @@ from app.services.prediction_service import PredictionService
 from app.routes import upload_routes
 
 
+# Minimum na bilang ng ARAW na may bookings bago i-train ang sariling
+# model ng isang shop (kapareho ng 14-day floor sa ml_engine/train.py).
+MIN_TRAINING_DAYS = 14
+
+# Gaano katagal maghihintay pagkatapos mag-boot ang server bago tumakbo
+# ang unang training (para tapos na ang startup at hindi nagsasabay).
+STARTUP_TRAINING_DELAY_SECONDS = 60
+
+
 # --- DATABASE SEEDING & DATA INTEGRITY LOGIC ---
 
 def seed_settings(db: Session):
     """
     Ensures that default optimization settings exist for shop_id=1.
     This runs ONLY if the settings table is empty for this shop.
+
+    FIXED: ang dating default_settings ay gumagamit ng mga field na
+    wala na sa models.Setting (full_service_price, regular_wash_price,
+    titan_wash_price, comforter_price, detergent_cost_per_load) — kaya
+    TypeError ("invalid keyword argument") ang tinatamaan nito tuwing
+    walang settings ang shop 1. Ang mga presyo ay nasa ServiceType na
+    ngayon, at supplies_cost_per_load na ang pangalan ng dating
+    detergent_cost_per_load.
     """
     existing_settings = db.query(models.Setting).filter(models.Setting.shop_id == 1).first()
     
@@ -39,13 +58,9 @@ def seed_settings(db: Session):
         default_settings = models.Setting(
             shop_id=1,
             operation_start_hour=8,
-            full_service_price=210.0,
-            regular_wash_price=65.0,  
-            titan_wash_price=100.0,   
-            comforter_price=150.0,    
             electricity_rate=12.0,
             water_rate=50.0,
-            detergent_cost_per_load=10.0,
+            supplies_cost_per_load=10.0,
             off_peak_hours="8:00 AM - 11:00 AM"
         )
         db.add(default_settings)
@@ -83,6 +98,49 @@ def seed_hardware_and_inventory():
     finally:
         db.close()
 
+
+# --- AUTOMATED FORECAST RETRAINING ---
+
+def retrain_all_shops():
+    """
+    NEW: nagre-retrain ng sariling forecast model ng BAWAT shop na may
+    sapat na data (hindi na shop 1 lang — ang PredictionService.
+    retrain_model() ay may default na shop_id=1, kaya dati ay shop 1
+    lang ang natatrain ng scheduler at hindi kailanman nabubuo ang
+    model ng mga bagong shop).
+
+    Ang eligible na shop ay iyong may hindi bababa sa MIN_TRAINING_DAYS
+    na ARAW na may kahit isang booking. Ang bawat shop ay sariling
+    try/except, kaya kapag pumalya ang isa, tuloy pa rin ang iba.
+    """
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(
+                models.Booking.shop_id,
+                func.count(func.distinct(func.date(models.Booking.created_at))).label("booking_days"),
+            )
+            .group_by(models.Booking.shop_id)
+            .all()
+        )
+        eligible_shop_ids = [row.shop_id for row in rows if row.booking_days >= MIN_TRAINING_DAYS]
+    except Exception as e:
+        print(f"[{datetime.now()}] Could not determine shops to retrain: {e}")
+        return
+    finally:
+        db.close()
+
+    if not eligible_shop_ids:
+        print(f"[{datetime.now()}] Retraining skipped: no shop has {MIN_TRAINING_DAYS}+ days of bookings yet.")
+        return
+
+    print(f"[{datetime.now()}] Retraining forecast models for shops: {eligible_shop_ids}")
+    for shop_id in eligible_shop_ids:
+        try:
+            PredictionService.retrain_model(shop_id=shop_id)
+        except Exception as e:
+            print(f"[{datetime.now()}] Retraining failed for shop {shop_id}: {e}")
+
 # --- LIFESPAN MANAGER ---
 
 @asynccontextmanager
@@ -105,9 +163,24 @@ async def lifespan(app: FastAPI):
         seed_hardware_and_inventory()
 
         # Initialize Automated 24-hour Retraining Scheduler
-        scheduler.add_job(PredictionService.retrain_model, 'interval', hours=24)
+        #
+        # UPDATED: (1) lahat ng eligible na shop ang tina-train, hindi
+        # shop 1 lang; (2) may unang takbo ilang segundo pagkatapos
+        # mag-boot — kailangan ito dahil sa Render, ang ml_models/ ay
+        # nabubura sa bawat deploy/restart (at natutulog ang libreng
+        # instance kapag walang gumagamit), kaya kung 24 oras lang ang
+        # hihintayin, madalas ay wala pang model pagkatapos ng restart.
+        scheduler.add_job(
+            retrain_all_shops,
+            'interval',
+            hours=24,
+            next_run_time=datetime.now() + timedelta(seconds=STARTUP_TRAINING_DELAY_SECONDS),
+            max_instances=1,
+            coalesce=True,
+        )
         scheduler.start()
-        print("AI Engine Scheduler: Automated 24-hour Training ONLINE")
+        print("AI Engine Scheduler: Automated 24-hour Training ONLINE "
+              f"(first run in {STARTUP_TRAINING_DELAY_SECONDS}s)")
         
     except Exception as e:
         print(f"Critical System Boot Error: {e}")
@@ -119,7 +192,8 @@ async def lifespan(app: FastAPI):
     
     # Graceful shutdown
     print("LaundryLink Backend: Initiating Graceful Shutdown...")
-    scheduler.shutdown()
+    if scheduler.running:
+        scheduler.shutdown()
     print("AI Engine Scheduler: SHUTDOWN")
 
 # --- FASTAPI INSTANCE ---
