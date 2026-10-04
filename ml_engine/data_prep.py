@@ -1,5 +1,14 @@
 """
 Database-to-feature preparation for LaundryLink forecasting.
+
+UPDATED (weather-driven bookings forecast): ang model ay hinuhulaan na
+ang DAMI NG BOOKINGS (hindi na ang kita) mula sa araw ng linggo, trend,
+at ulan (rain_mm). Ang income ay kinukuwenta na lang pagkatapos:
+predicted_bookings x average_ticket (see PredictionService).
+
+Dati, kasama sa features ang booking_count at total_loads — pero hindi pa
+alam ang mga iyon sa mga susunod na araw, kaya nilalagyan lang ng
+nakapirming 12/18 sa prediction at halos wala nang epekto ang ulan.
 """
 
 from __future__ import annotations
@@ -25,16 +34,24 @@ from app.services import weather_service
 logger = logging.getLogger(__name__)
 
 # Feature columns used by the PER-SHOP machine learning model.
-# UPDATED: added "rain_mm" — daily rainfall (mm) at the shop's own
-# location, matched by date against real historical weather.
-FEATURE_COLUMNS = ["day_index", "day_of_week", "is_weekend", "booking_count", "total_loads", "rain_mm"]
+# UPDATED: tinanggal ang "booking_count" at "total_loads" — ang mga iyon
+# na ang TARGET/kahihinatnan, hindi na input. Ang natira ay mga bagay na
+# alam na nang maaga: trend (day_index), araw ng linggo, at forecast na
+# ulan (rain_mm, matched by date sa real historical weather sa training).
+FEATURE_COLUMNS = ["day_index", "day_of_week", "is_weekend", "rain_mm"]
+
+# Ang hinuhulaan ng per-shop model.
+TARGET_COLUMN = "booking_count"
 
 # Feature columns used by the POOLED (multi-shop, cold-start) model.
-# No day_index/booking_count/total_loads here — those are meaningful
-# only within a single shop's own trend/scale, not across shops with
-# different sizes and different start dates. Weekday pattern + rain are
-# the only signals that generalize across shops.
+# No day_index here — meaningful lang iyon sa loob ng iisang shop's own
+# trend. Weekday pattern + rain ang mga signal na nagge-generalize sa
+# iba't ibang shop.
 POOLED_FEATURE_COLUMNS = ["day_of_week", "is_weekend", "rain_mm"]
+
+# UPDATED: ang pooled model ay hinuhulaan na ang booking_ratio (bookings
+# ng araw / karaniwang bookings ng shop), hindi na revenue_ratio.
+POOLED_TARGET_COLUMN = "booking_ratio"
 
 # Minimum number of daily rows a shop must have before its data is
 # folded into the pooled/global training set. Matches the 14-day floor
@@ -89,10 +106,10 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     # Attach real historical rainfall for this shop's own location,
     # matched to each booking date.
     #
-    # UPDATED: kung walang latitude/longitude ang shop (NULL sa DB), ang
-    # weather_service na ang gagamit ng Naga City fallback — kaya hindi
-    # na ito laging 0.0. Ang 0.0 ay fallback na lang kapag talagang
-    # pumalya ang external call, para hindi masira ang training.
+    # Kung walang latitude/longitude ang shop (NULL sa DB), ang
+    # weather_service na ang gagamit ng Naga City fallback. Ang 0.0 ay
+    # fallback na lang kapag talagang pumalya ang external call, para
+    # hindi masira ang training.
     shop = db.query(Shop).filter(Shop.id == shop_id).first()
     rain_frame = weather_service.get_historical_rain_mm(
         shop.latitude if shop else None,
@@ -113,7 +130,7 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     frame["rain_mm"] = frame["rain_mm"].fillna(0.0)
 
     # Para madaling ma-verify pagkatapos mag-retrain: dapat hindi 0
-    # ang "rainy_days" kung umulan talaga sa panahong iyon.
+    # ang "rainy days" kung umulan talaga sa panahong iyon.
     logger.info(
         "Shop %s: weather matched for %d/%d training days, %d day(s) with rain > 0 mm.",
         shop_id, matched_days, len(frame), int((frame["rain_mm"] > 0).sum()),
@@ -136,18 +153,21 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
 
 def fetch_pooled_daily_frame(db: Session) -> pd.DataFrame:
     """
-    NEW — builds the multi-shop training set for the pooled/global
-    cold-start model.
+    Builds the multi-shop training set for the pooled/global cold-start
+    model.
 
     Each contributing shop's daily booking_count and total_revenue are
     converted into RATIOS against that shop's own average — this is
     what lets a tiny shop and a big shop sit in the same training set
     without the big shop's raw numbers dominating the fit. The pooled
-    model then learns "how much a day's revenue deviates from a shop's
+    model then learns "how much a day's bookings deviate from a shop's
     own normal, given the day of week and how much it rained" — a
     coefficient that transfers to a brand-new shop with zero history,
     scaled by that new shop's own baseline once it has one (see
-    PredictionService._get_shop_baseline_revenue).
+    PredictionService._get_shop_baselines).
+
+    UPDATED: ang target ay booking_ratio na (revenue_ratio ay nandito
+    pa rin sa frame pero hindi na ginagamit sa training).
 
     Shops with fewer than MIN_DAYS_FOR_POOLING days of data are skipped
     entirely — not enough signal to compute a meaningful average yet.

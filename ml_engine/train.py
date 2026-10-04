@@ -1,5 +1,10 @@
 """
-Train the LaundryLink revenue forecasting models.
+Train the LaundryLink demand forecasting models.
+
+UPDATED (weather-driven bookings forecast): ang per-shop model ay
+hinuhulaan na ang DAMI NG BOOKINGS kada araw (hindi na ang kita) mula sa
+trend, araw ng linggo, at ulan. Ang projected income ay kinukuwenta sa
+PredictionService: predicted_bookings x average_ticket.
 
 Run from the project root:
     python -m ml_engine.train                 # trains shop 1's own model
@@ -25,6 +30,8 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from ml_engine.data_prep import (
     FEATURE_COLUMNS,
     POOLED_FEATURE_COLUMNS,
+    TARGET_COLUMN,
+    POOLED_TARGET_COLUMN,
     load_training_data,
     load_pooled_training_data,
 )
@@ -35,18 +42,19 @@ MODEL_DIR = PROJECT_ROOT / "ml_models"
 REPORT_PATH = MODEL_DIR / "accuracy_report.png"
 METRICS_PATH = MODEL_DIR / "model_metrics.json"
 
-# UPDATED: each shop now gets its OWN artifact file, instead of every
-# shop overwriting the same single "forecast.pkl". This is the actual
-# fix for "every shop sees the same forecast graph" — the old single
-# global MODEL_PATH meant whichever shop was trained last (always
-# shop_id=1 by default) was the only model that ever existed.
+# Each shop gets its OWN artifact file, instead of every shop
+# overwriting the same single "forecast.pkl".
 def shop_model_path(shop_id: int) -> Path:
     return MODEL_DIR / f"forecast_shop_{shop_id}.pkl"
 
 
-# NEW — the pooled/cold-start model, shared by every shop that doesn't
-# have (or doesn't yet have) enough of its own history to train on.
+# The pooled/cold-start model, shared by every shop that doesn't have
+# (or doesn't yet have) enough of its own history to train on.
 POOLED_MODEL_PATH = MODEL_DIR / "forecast_pooled.pkl"
+
+# Kung mas kaunti pa rito ang araw ng data, maingay ang makukuhang epekto
+# ng ulan (babala lang sa log — hindi pinipigilan ang training).
+RECOMMENDED_MIN_DAYS = 30
 
 # Setup logging for production monitoring
 logging.basicConfig(level=logging.INFO)
@@ -63,13 +71,13 @@ def _split_validation(frame):
 
 
 def _save_accuracy_report(validation_frame, predictions) -> None:
-    """Generates and saves a visual plot comparing actual vs predicted revenue."""
+    """Generates and saves a visual plot comparing actual vs predicted daily bookings."""
     plt.figure(figsize=(10, 5))
-    plt.plot(validation_frame["booking_date"], validation_frame["total_revenue"], marker="o", label="Actual")
+    plt.plot(validation_frame["booking_date"], validation_frame[TARGET_COLUMN], marker="o", label="Actual")
     plt.plot(validation_frame["booking_date"], predictions, marker="x", label="Predicted")
-    plt.title("LaundryLink Forecast Validation: Actual vs Predicted Revenue")
+    plt.title("LaundryLink Forecast Validation: Actual vs Predicted Daily Bookings")
     plt.xlabel("Date")
-    plt.ylabel("Daily Revenue")
+    plt.ylabel("Daily Bookings")
     plt.xticks(rotation=35, ha="right")
     plt.grid(True, alpha=0.25)
     plt.legend()
@@ -78,57 +86,78 @@ def _save_accuracy_report(validation_frame, predictions) -> None:
     plt.close()
 
 
+def _coefficients(model, feature_columns) -> dict:
+    """Mapping ng feature -> coefficient, para makita kung ano ang natutunan ng model."""
+    return {column: round(float(coef), 4) for column, coef in zip(feature_columns, model.coef_)}
+
+
 def run_training_pipeline(shop_id: int = 1) -> dict:
     """
     Trains a SHOP-SPECIFIC model and saves it to forecast_shop_{shop_id}.pkl.
     Requires at least 14 days of that shop's own daily booking history.
+
+    Target: daily booking_count. Features: day_index, day_of_week,
+    is_weekend, rain_mm.
     """
     try:
         frame = load_training_data(shop_id=shop_id)
         if len(frame) < 14:
             raise ValueError("At least 14 daily booking aggregates are required to train the model.")
+        if len(frame) < RECOMMENDED_MIN_DAYS:
+            logger.warning(
+                "Shop %s has only %d days of data — the learned effect of rain may be noisy "
+                "until there are at least %d days.",
+                shop_id, len(frame), RECOMMENDED_MIN_DAYS,
+            )
 
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         train_frame, validation_frame = _split_validation(frame)
 
         # Initialize and train model
         model = LinearRegression()
-        model.fit(train_frame[FEATURE_COLUMNS].to_numpy(), train_frame["total_revenue"].to_numpy())
+        model.fit(train_frame[FEATURE_COLUMNS].to_numpy(), train_frame[TARGET_COLUMN].to_numpy())
 
         # Perform predictions and validation
         validation_predictions = model.predict(validation_frame[FEATURE_COLUMNS].to_numpy())
         validation_predictions = np.maximum(validation_predictions, 0.0)
 
-        # Calculate performance metrics
-        mae = mean_absolute_error(validation_frame["total_revenue"], validation_predictions)
-        r2 = r2_score(validation_frame["total_revenue"], validation_predictions)
-        mean_actual = validation_frame["total_revenue"].mean()
+        # Calculate performance metrics (sa bookings na ngayon)
+        mae = mean_absolute_error(validation_frame[TARGET_COLUMN], validation_predictions)
+        r2 = r2_score(validation_frame[TARGET_COLUMN], validation_predictions)
+        mean_actual = validation_frame[TARGET_COLUMN].mean()
         accuracy_percentage = max(0.0, 100.0 - ((mae / mean_actual) * 100.0)) if mean_actual else 0.0
 
-        # FIXED (kept from previous pass): prediction_service.py reads
-        # average_ticket / average_loads_per_booking / last_day_index off
+        # Ano ang natutunan ng model? Ang "rain_mm" ang importante dito:
+        # positibo = mas maraming bookings kapag maulan, negatibo = mas
+        # kaunti. Tingnan ito sa logs pagkatapos mag-retrain.
+        coefficients = _coefficients(model, FEATURE_COLUMNS)
+        logger.info(
+            "Shop %s learned coefficients: %s (intercept %.2f). "
+            "rain_mm = %+.4f bookings per extra mm of rain.",
+            shop_id, coefficients, float(model.intercept_), coefficients.get("rain_mm", 0.0),
+        )
+
+        # prediction_service.py reads average_ticket / last_day_index off
         # the artifact — computed here from the FULL frame so it reflects
-        # the shop's true pricing and true latest trained day, not the
-        # old hardcoded defaults.
+        # the shop's true pricing and true latest trained day.
+        # average_ticket ang ginagamit pang-convert ng predicted bookings
+        # papuntang projected income.
         total_bookings_all = frame["booking_count"].sum()
         average_ticket = (
             float(frame["total_revenue"].sum() / total_bookings_all)
             if total_bookings_all > 0 else 150.0
-        )
-        average_loads_per_booking = (
-            float(frame["total_loads"].sum() / total_bookings_all)
-            if total_bookings_all > 0 else 1.0
         )
         last_day_index = int(frame["day_index"].max())
 
         artifact = {
             "model": model,
             "feature_columns": FEATURE_COLUMNS,
+            "target": TARGET_COLUMN,
             "trained_at": datetime.now(timezone.utc).isoformat(),
             "shop_id": shop_id,
             "average_ticket": round(average_ticket, 2),
-            "average_loads_per_booking": round(average_loads_per_booking, 4),
             "last_day_index": last_day_index,
+            "coefficients": coefficients,
             "metrics": {
                 "accuracy_percentage": round(float(accuracy_percentage), 2),
                 "mean_absolute_error": round(float(mae), 2),
@@ -152,7 +181,7 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
 
         _save_accuracy_report(validation_frame, validation_predictions)
 
-        logger.info(f"Training complete for shop {shop_id}. Accuracy: {accuracy_percentage}%")
+        logger.info(f"Training complete for shop {shop_id}. Bookings accuracy: {accuracy_percentage:.2f}%")
         return artifact["metrics"]
 
     except Exception as e:
@@ -162,10 +191,11 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
 
 def run_pooled_training_pipeline() -> dict:
     """
-    NEW — trains the pooled/global cold-start model across every shop
-    that has at least MIN_DAYS_FOR_POOLING days of history. Target is
-    revenue_ratio (each shop's day normalized against its own average),
-    not raw currency, so shops of different sizes combine cleanly.
+    Trains the pooled/global cold-start model across every shop that has
+    at least MIN_DAYS_FOR_POOLING days of history. Target is
+    booking_ratio (each shop's day normalized against its own average
+    daily bookings), not raw counts, so shops of different sizes combine
+    cleanly.
     """
     try:
         frame = load_pooled_training_data()
@@ -179,19 +209,28 @@ def run_pooled_training_pipeline() -> dict:
         train_frame, validation_frame = _split_validation(frame)
 
         model = LinearRegression()
-        model.fit(train_frame[POOLED_FEATURE_COLUMNS].to_numpy(), train_frame["revenue_ratio"].to_numpy())
+        model.fit(train_frame[POOLED_FEATURE_COLUMNS].to_numpy(), train_frame[POOLED_TARGET_COLUMN].to_numpy())
 
         validation_predictions = model.predict(validation_frame[POOLED_FEATURE_COLUMNS].to_numpy())
         validation_predictions = np.maximum(validation_predictions, 0.0)
 
-        mae = mean_absolute_error(validation_frame["revenue_ratio"], validation_predictions)
-        r2 = r2_score(validation_frame["revenue_ratio"], validation_predictions)
+        mae = mean_absolute_error(validation_frame[POOLED_TARGET_COLUMN], validation_predictions)
+        r2 = r2_score(validation_frame[POOLED_TARGET_COLUMN], validation_predictions)
+
+        coefficients = _coefficients(model, POOLED_FEATURE_COLUMNS)
+        logger.info(
+            "Pooled model learned coefficients: %s (intercept %.4f). "
+            "rain_mm = %+.4f booking-ratio per extra mm of rain.",
+            coefficients, float(model.intercept_), coefficients.get("rain_mm", 0.0),
+        )
 
         artifact = {
             "model": model,
             "feature_columns": POOLED_FEATURE_COLUMNS,
+            "target": POOLED_TARGET_COLUMN,
             "trained_at": datetime.now(timezone.utc).isoformat(),
             "shop_count": int(frame["shop_id"].nunique()),
+            "coefficients": coefficients,
             "metrics": {
                 "mean_absolute_error": round(float(mae), 4),
                 "r2_score": round(float(r2), 4),

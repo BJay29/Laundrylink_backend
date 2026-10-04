@@ -12,10 +12,9 @@ from app.services import weather_service
 class PredictionService:
     """
     Core logic for calculating utility consumption and machine profitability,
-    plus the 7-day revenue/booking forecast used by the Financial Forecast page.
+    plus the 7-day bookings/income forecast used by the Financial Forecast page.
 
-    UPDATED: get_revenue_forecast() now resolves per shop using a 3-tier
-    fallback instead of always loading one single global forecast.pkl:
+    get_revenue_forecast() resolves per shop using a 3-tier fallback:
 
         Tier 1 — Shop's own model (forecast_shop_{shop_id}.pkl):
             best accuracy, trained on this shop's own history + its own
@@ -24,36 +23,45 @@ class PredictionService:
 
         Tier 2 — Pooled model (forecast_pooled.pkl):
             used when the shop has no model of its own yet. Predicts a
-            revenue RATIO (vs. a normal day) from weekday + rain, then
-            scales that ratio by the shop's own average daily revenue
-            if it has any bookings at all, or a literature-informed
-            baseline booking count (see _get_shop_baseline_revenue) if
-            it has none.
+            booking RATIO (vs. a normal day) from weekday + rain, then
+            scales that ratio by the shop's own average daily bookings
+            if it has any history, or an assumed baseline (see
+            _get_shop_baselines) if it has none.
 
         Tier 3 — Weather-only outlook:
-            used only when the pooled model itself doesn't exist yet
-            (the whole platform is too new to have any shop cross the
-            pooling threshold). Returns real forecasted rainfall per
-            day with predicted_bookings/projected_income left as None,
-            so the frontend can show an honest "insufficient data" state
+            used only when the pooled model itself doesn't exist yet.
+            Returns real forecasted rainfall per day with
+            predicted_bookings/projected_income left as None, so the
+            frontend can show an honest "insufficient data" state
             instead of a fabricated number.
 
-    Every row in the response now carries "model_tier" so the frontend
-    can show which tier produced it (see the dashboard badge design).
+    Every row in the response carries "model_tier" so the frontend can
+    show which tier produced it.
 
-    UPDATED (weather fix — rain_mm laging 0.0): dalawang dagdag na
-    pagbabago dito bukod sa Naga City fallback sa weather_service.py:
+    UPDATED (weather-driven bookings forecast): ang model ay hinuhulaan
+    na ang DAMI NG BOOKINGS (target = "booking_count" / "booking_ratio")
+    mula sa trend, araw ng linggo, at forecast na ulan. Ang
+    projected_income ay kinukuwenta na lang pagkatapos:
+
+        projected_income = predicted_bookings x average_ticket
+
+    Dati, ang model ay hinuhulaan ang kita at kailangan pa ng
+    booking_count/total_loads bilang input — na hindi pa alam sa mga
+    susunod na araw, kaya nilalagyan lang ng nakapirming 12 (weekday) /
+    18 (weekend) at halos wala nang epekto ang ulan.
+
+    BACKWARD COMPATIBILITY: ang mga lumang model file (walang "target"
+    key sa artifact) ay patuloy pang gumagana sa lumang paraan hanggang
+    sa mag-retrain — para hindi mawala ang charts habang hinihintay ang
+    retraining.
+
+    UPDATED (weather fix — rain_mm laging 0.0):
       1. Ang forecast loop ay nagsisimula sa bukas (offset 1) hanggang
          offset 7 (today + 7), pero ang Open-Meteo `forecast_days=7`
-         ay nagbabalik lang ng today hanggang today + 6 — kaya ang
-         ika-7 na araw ay walang weather data at laging 0.0. Ngayon,
-         humihingi na ng days + 1 na araw ang _rain_lookup().
-      2. Ang petsa ay kinukuha dati gamit ang datetime.now() ng server
-         (UTC sa Render), pero ang weather data ay naka-key sa petsa ng
-         Asia/Manila (UTC+8). Tuwing 4:00 PM–11:59 PM UTC, ang "today"
-         ng server ay isang araw na nasa likod ng Manila, kaya
-         nagmi-mismatch ang mga petsa. Ngayon, _manila_now() na ang
-         ginagamit sa lahat ng forecast tier.
+         ay nagbabalik lang ng today hanggang today + 6. Kaya humihingi
+         na ng days + 1 na araw ang _rain_lookup().
+      2. Ang petsa ay kinukuha gamit ang _manila_now() (UTC+8) para
+         tumugma sa petsa ng weather data, anuman ang timezone ng server.
     """
 
     # --- NAGA CITY UTILITY RATES ---
@@ -80,8 +88,8 @@ class PredictionService:
     MANILA_TZ = timezone(timedelta(hours=8))
 
     # Assumed daily bookings for a shop with ZERO history, used only to
-    # turn the pooled model's ratio prediction into a currency estimate
-    # when there's nothing else to scale against. Matches AIEngine's own
+    # turn the pooled model's ratio prediction into a booking count when
+    # there's nothing else to scale against. Matches AIEngine's own
     # WEEKDAY_BASE constant (app/services/ai_engine.py) so the two
     # forecasting systems in this codebase don't quietly disagree on
     # what "a normal new shop's day" looks like.
@@ -108,7 +116,7 @@ class PredictionService:
     @classmethod
     def retrain_pooled_model(cls):
         """
-        NEW — triggers training of the pooled/cold-start model across
+        Triggers training of the pooled/cold-start model across
         every eligible shop. Called by POST /analytics/retrain-pooled-model.
         """
         try:
@@ -155,13 +163,18 @@ class PredictionService:
         }
 
     @classmethod
-    def _get_shop_baseline_revenue(cls, db, shop_id: int, average_ticket: float) -> float:
+    def _get_shop_baselines(cls, db, shop_id: int, average_ticket: float) -> Dict[str, float]:
         """
-        Baseline daily revenue used to scale the pooled model's ratio
-        prediction into currency. Prefers the shop's OWN historical
-        average if it has any bookings at all (self-calibrating even
-        with sparse data); falls back to average_ticket * an assumed
-        baseline booking count only for a shop with truly zero history.
+        Baselines na ginagamit para i-scale ang pooled model's ratio
+        prediction papunta sa totoong bilang:
+          - "bookings": karaniwang bookings kada araw
+          - "revenue":  karaniwang kita kada araw (para lang sa lumang
+                        pooled artifacts na revenue_ratio pa ang target)
+          - "ticket":   karaniwang halaga kada booking (revenue / bookings)
+
+        Prefers the shop's OWN historical averages if it has any
+        bookings at all; falls back to assumed values only for a shop
+        with truly zero history.
         """
         from sqlalchemy import func
         from app.models import Booking
@@ -169,6 +182,7 @@ class PredictionService:
         rows = (
             db.query(
                 func.date(Booking.created_at).label("d"),
+                func.count(Booking.id).label("n"),
                 func.sum(Booking.total_price).label("rev"),
             )
             .filter(Booking.shop_id == shop_id)
@@ -176,9 +190,21 @@ class PredictionService:
             .all()
         )
         if rows:
-            return sum(float(r.rev or 0.0) for r in rows) / len(rows)
+            avg_bookings = sum(int(r.n or 0) for r in rows) / len(rows)
+            avg_revenue = sum(float(r.rev or 0.0) for r in rows) / len(rows)
+            if avg_bookings > 0:
+                return {
+                    "bookings": avg_bookings,
+                    "revenue": avg_revenue,
+                    "ticket": max(avg_revenue / avg_bookings, 1.0),
+                }
 
-        return average_ticket * cls.ASSUMED_NEW_SHOP_DAILY_BOOKINGS
+        assumed = float(cls.ASSUMED_NEW_SHOP_DAILY_BOOKINGS)
+        return {
+            "bookings": assumed,
+            "revenue": average_ticket * assumed,
+            "ticket": average_ticket,
+        }
 
     @classmethod
     def _rain_lookup(cls, latitude: Optional[float], longitude: Optional[float], days: int) -> Dict[Any, float]:
@@ -186,17 +212,36 @@ class PredictionService:
         Mapping ng {petsa (Manila): rain_mm} para sa susunod na `days`
         na araw simula BUKAS.
 
-        FIXED: humihingi na ng `days + 1` na araw sa Open-Meteo, dahil
-        ang forecast loop sa ibaba ay tumatakbo mula bukas (offset 1)
-        hanggang today + days — at ang `forecast_days=days` ay nagbabalik
-        lang ng today hanggang today + (days - 1), kaya laging walang
-        weather data ang huling araw.
+        Humihingi ng `days + 1` na araw sa Open-Meteo, dahil ang forecast
+        loop ay tumatakbo mula bukas (offset 1) hanggang today + days —
+        at ang `forecast_days=days` ay nagbabalik lang ng today hanggang
+        today + (days - 1).
         """
         rain_frame = weather_service.get_forecast_rain_mm(latitude, longitude, days=days + 1)
         if rain_frame.empty:
             print(f"[{datetime.now()}] Weather lookup returned no data — rain_mm will default to 0.0.")
             return {}
         return {row.booking_date.date(): float(row.rain_mm) for row in rain_frame.itertuples()}
+
+    @classmethod
+    def _make_row(
+        cls,
+        target_date: datetime,
+        predicted_bookings: Optional[int],
+        projected_income: Optional[float],
+        rain_mm: float,
+        model_tier: str,
+    ) -> Dict[str, Any]:
+        """Isang forecast row sa format na inaasahan ng frontend."""
+        return {
+            "date": target_date.strftime("%Y-%m-%d"),
+            "label": target_date.strftime("%b %d, %a"),
+            "predicted_bookings": predicted_bookings,
+            "projected_income": round(projected_income, 2) if projected_income is not None else None,
+            "rain_mm": round(rain_mm, 1),
+            "is_peak": target_date.weekday() in (0, 4, 5, 6),
+            "model_tier": model_tier,
+        }
 
     # ─────────────────────────────────────────────────────────────────────
     # TIER 1 — SHOP'S OWN MODEL
@@ -209,6 +254,8 @@ class PredictionService:
 
         model = artifact["model"]
         feature_columns = artifact["feature_columns"]
+        # Walang "target" = lumang artifact na kita (total_revenue) ang hinuhulaan.
+        target = artifact.get("target", "total_revenue")
         average_ticket = max(float(artifact.get("average_ticket", context["average_ticket"])), 1.0)
         average_loads_per_booking = max(float(artifact.get("average_loads_per_booking", 1.0)), 1.0)
         last_day_index = int(artifact.get("last_day_index", 0))
@@ -220,32 +267,35 @@ class PredictionService:
         for offset in range(1, days + 1):
             target_date = today + timedelta(days=offset)
             day_of_week = target_date.weekday()
-            historical_day_index = last_day_index + offset
-            estimated_bookings = 18 if day_of_week in (5, 6) else 12
-            estimated_loads = max(1, round(estimated_bookings * average_loads_per_booking))
+            is_weekend = 1 if day_of_week in (5, 6) else 0
             rain_mm = rain_by_date.get(target_date.date(), 0.0)
 
+            # Para lang sa lumang artifacts na kailangan pa ng booking_count/
+            # total_loads bilang input. Hindi ginagamit ng mga bagong model.
+            legacy_bookings_guess = 18 if is_weekend else 12
+            legacy_loads_guess = max(1, round(legacy_bookings_guess * average_loads_per_booking))
+
             feature_map = {
-                "day_index": historical_day_index,
+                "day_index": last_day_index + offset,
                 "day_of_week": day_of_week,
-                "is_weekend": 1 if day_of_week in (5, 6) else 0,
-                "booking_count": estimated_bookings,
-                "total_loads": estimated_loads,
+                "is_weekend": is_weekend,
                 "rain_mm": rain_mm,
+                "booking_count": legacy_bookings_guess,
+                "total_loads": legacy_loads_guess,
             }
             features = [[feature_map[column] for column in feature_columns]]
-            projected_income = max(float(model.predict(features)[0]), 0.0)
-            predicted_bookings = max(0, round(projected_income / average_ticket))
+            prediction = max(float(model.predict(features)[0]), 0.0)
 
-            forecast_rows.append({
-                "date": target_date.strftime("%Y-%m-%d"),
-                "label": target_date.strftime("%b %d, %a"),
-                "predicted_bookings": predicted_bookings,
-                "projected_income": round(projected_income, 2),
-                "rain_mm": round(rain_mm, 1),
-                "is_peak": day_of_week in (0, 4, 5, 6),
-                "model_tier": "shop_model",
-            })
+            if target == "booking_count":
+                predicted_bookings = max(0, round(prediction))
+                projected_income = predicted_bookings * average_ticket
+            else:
+                projected_income = prediction
+                predicted_bookings = max(0, round(projected_income / average_ticket))
+
+            forecast_rows.append(
+                cls._make_row(target_date, predicted_bookings, projected_income, rain_mm, "shop_model")
+            )
 
         return forecast_rows
 
@@ -254,12 +304,14 @@ class PredictionService:
     # ─────────────────────────────────────────────────────────────────────
 
     @classmethod
-    def _forecast_from_pooled_model(cls, context: Dict[str, Any], baseline_revenue: float, days: int) -> list:
+    def _forecast_from_pooled_model(cls, context: Dict[str, Any], baselines: Dict[str, float], days: int) -> list:
         with cls.POOLED_MODEL_PATH.open("rb") as model_file:
             artifact = pickle.load(model_file)
 
         model = artifact["model"]
         feature_columns = artifact["feature_columns"]
+        # Walang "target" = lumang artifact na revenue_ratio ang hinuhulaan.
+        target = artifact.get("target", "revenue_ratio")
         rain_by_date = cls._rain_lookup(context["latitude"], context["longitude"], days)
 
         today = cls._manila_now()
@@ -275,19 +327,18 @@ class PredictionService:
                 "rain_mm": rain_mm,
             }
             features = [[feature_map[column] for column in feature_columns]]
-            revenue_ratio = max(float(model.predict(features)[0]), 0.0)
-            projected_income = revenue_ratio * baseline_revenue
-            predicted_bookings = max(0, round(projected_income / context["average_ticket"]))
+            ratio = max(float(model.predict(features)[0]), 0.0)
 
-            forecast_rows.append({
-                "date": target_date.strftime("%Y-%m-%d"),
-                "label": target_date.strftime("%b %d, %a"),
-                "predicted_bookings": predicted_bookings,
-                "projected_income": round(projected_income, 2),
-                "rain_mm": round(rain_mm, 1),
-                "is_peak": day_of_week in (0, 4, 5, 6),
-                "model_tier": "pooled_model",
-            })
+            if target == "booking_ratio":
+                predicted_bookings = max(0, round(ratio * baselines["bookings"]))
+                projected_income = predicted_bookings * baselines["ticket"]
+            else:
+                projected_income = ratio * baselines["revenue"]
+                predicted_bookings = max(0, round(projected_income / baselines["ticket"]))
+
+            forecast_rows.append(
+                cls._make_row(target_date, predicted_bookings, projected_income, rain_mm, "pooled_model")
+            )
 
         return forecast_rows
 
@@ -304,16 +355,9 @@ class PredictionService:
         for offset in range(1, days + 1):
             target_date = today + timedelta(days=offset)
             rain_mm = rain_by_date.get(target_date.date(), 0.0)
-
-            forecast_rows.append({
-                "date": target_date.strftime("%Y-%m-%d"),
-                "label": target_date.strftime("%b %d, %a"),
-                "predicted_bookings": None,
-                "projected_income": None,
-                "rain_mm": round(rain_mm, 1),
-                "is_peak": target_date.weekday() in (0, 4, 5, 6),
-                "model_tier": "weather_only",
-            })
+            forecast_rows.append(
+                cls._make_row(target_date, None, None, rain_mm, "weather_only")
+            )
 
         return forecast_rows
 
@@ -338,8 +382,8 @@ class PredictionService:
                 return cls._forecast_from_shop_model(shop_path, context, days)
 
             if cls.POOLED_MODEL_PATH.exists() and cls.POOLED_MODEL_PATH.stat().st_size > 0:
-                baseline_revenue = cls._get_shop_baseline_revenue(db, shop_id, context["average_ticket"])
-                return cls._forecast_from_pooled_model(context, baseline_revenue, days)
+                baselines = cls._get_shop_baselines(db, shop_id, context["average_ticket"])
+                return cls._forecast_from_pooled_model(context, baselines, days)
 
             return cls._forecast_weather_only(context, days)
         finally:
