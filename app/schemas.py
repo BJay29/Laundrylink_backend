@@ -7,6 +7,9 @@ import uuid as uuid_lib
 # Mga valid na time window label (Flexible Booking)
 ALLOWED_TIME_WINDOWS = {"morning", "afternoon", "evening", "anytime"}
 
+# Pinakamahabang komento sa isang rating (Rating after order)
+MAX_REVIEW_COMMENT_LENGTH = 300
+
 # NEW (Secure Payment Verification System) — kung ang reference number
 # ay nagsisimula sa prefix na ito, kikilalanin ito ng backend bilang
 # isang Sandbox/Testing Mode submission (see booking_controller.
@@ -1227,6 +1230,15 @@ class BookingResponse(BaseModel):
 
     machine_assignments: List[MachineAssignmentResponse] = []
 
+    # NEW (Rating after order) — computed properties sa Booking model
+    # (see Booking.has_rated / rating / rating_comment sa models.py).
+    # Ginagamit ng mobile app para malaman kung ipapakita pa ang
+    # "Rate your experience" card (kapag Claimed at hindi pa rated) o
+    # ang naka-submit na bituin (kapag rated na).
+    has_rated: bool = False
+    rating: Optional[int] = None
+    rating_comment: Optional[str] = None
+
     @field_validator("washer_number", mode="before")
     @classmethod
     def get_washer_no(cls, v, info):
@@ -1384,6 +1396,57 @@ class BookingDecisionResponse(BaseModel):
     booking_id: int
     status: str
 
+# --- REVIEW / RATING SCHEMAS (NEW — Rating after order) ---
+
+class ReviewCreate(BaseModel):
+    """
+    Schema para sa pag-submit ng rating ng customer (mobile app) sa
+    isang booking na "Claimed" na.
+
+    - `rating`: 1 hanggang 5 na bituin.
+    - `comment`: opsyonal, hanggang MAX_REVIEW_COMMENT_LENGTH (300)
+      characters. Ang blangko o puro space ay itinuturing na walang
+      komento (None).
+
+    Ang mga tseke na kailangan ng database (sa customer ba ang booking,
+    Claimed na ba, nakapag-rate na ba) ay ginagawa sa
+    review_controller.create_review(), hindi dito.
+    """
+    booking_id: int
+    rating: int
+    comment: Optional[str] = None
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating(cls, v):
+        if v < 1 or v > 5:
+            raise ValueError("rating must be between 1 and 5.")
+        return v
+
+    @field_validator("comment")
+    @classmethod
+    def validate_comment(cls, v):
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > MAX_REVIEW_COMMENT_LENGTH:
+            raise ValueError(f"comment must be {MAX_REVIEW_COMMENT_LENGTH} characters or fewer.")
+        return cleaned
+
+
+class ReviewResponse(BaseModel):
+    """Ang naka-save na review — ibinabalik pagkatapos mag-submit."""
+    id: int
+    booking_id: int
+    shop_id: int
+    rating: int
+    comment: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
@@ -1465,6 +1528,14 @@ class ShopPublicResponse(BaseModel):
     # after the initial from_attributes validation.
     active_promos: List[PromoCodePreview] = []
 
+    # NEW (Rating after order) — average na bituin (1.0 hanggang 5.0,
+    # isang decimal) at bilang ng ratings ng shop. average_rating ay
+    # None kapag wala pang rating ang shop. Tulad ng active_promos, HINDI
+    # ito galing sa Shop attribute — kino-compute at itinatakda ito ng
+    # shop_service functions pagkatapos ng model_validate().
+    average_rating: Optional[float] = None
+    rating_count: int = 0
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -1511,6 +1582,10 @@ class ShopDetailResponse(BaseModel):
     accepts_cash: bool = True
     accepts_cod: bool = False
     accepts_online: bool = False
+
+    # NEW (Rating after order) — see ShopPublicResponse sa itaas.
+    average_rating: Optional[float] = None
+    rating_count: int = 0
 
     services: List[ShopServicePreview] = []
     add_ons: List[AddOnPreview] = []

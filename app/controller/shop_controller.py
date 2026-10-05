@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from math import radians, cos, sin, asin, sqrt
 
-from app.models import Shop, ServiceType, AddOn, PromoCode
+from app.models import Shop, ServiceType, AddOn, PromoCode, Review
 from app.schemas import (
     ShopPublicResponse, ShopDetailResponse, ShopServicePreview, AddOnPreview,
     PromoCodePreview,
@@ -17,6 +18,35 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
     c = 2 * asin(sqrt(a))
     return round(6371 * c, 2)  # 6371 = Earth radius sa km
+
+
+def _get_rating_map(db: Session, shop_ids: list[int]) -> dict:
+    """
+    NEW (Rating after order) — {shop_id: (average_rating, rating_count)}
+    para sa mga ibinigay na shop. Isang query lang para sa lahat ng shop
+    (hindi isang query kada shop). Ang shop na walang review ay wala sa
+    resulta — ang tumatawag ang bahalang magbigay ng default (None, 0).
+
+    Ang average ay naka-round sa isang decimal (hal. 4.3).
+    """
+    if not shop_ids:
+        return {}
+
+    rows = (
+        db.query(
+            Review.shop_id,
+            func.avg(Review.rating),
+            func.count(Review.id),
+        )
+        .filter(Review.shop_id.in_(shop_ids))
+        .group_by(Review.shop_id)
+        .all()
+    )
+    return {
+        shop_id: (round(float(avg), 1), int(count))
+        for shop_id, avg, count in rows
+        if avg is not None
+    }
 
 
 def _get_active_promos(shop: Shop) -> list[PromoCode]:
@@ -65,14 +95,23 @@ def get_all_shops(db: Session):
     ang _get_active_promos() sa itaas. Ang mobile app's Home page ang
     bahalang mag-filter (client-side) kung aling shops ang mayroong
     active_promos na hindi blangko para ipakita sa promo carousel.
+
+    UPDATED (Rating after order) — average_rating at rating_count ay
+    kino-compute din ng manu-mano (isang grouped query para sa lahat ng
+    shop, see _get_rating_map()).
     """
     shops = db.query(Shop).filter(Shop.is_published == True).all()
+    rating_map = _get_rating_map(db, [shop.id for shop in shops])
+
     responses = []
     for shop in shops:
         response = ShopPublicResponse.model_validate(shop)
         response.active_promos = [
             PromoCodePreview.model_validate(p) for p in _get_active_promos(shop)
         ]
+        average_rating, rating_count = rating_map.get(shop.id, (None, 0))
+        response.average_rating = average_rating
+        response.rating_count = rating_count
         responses.append(response)
     return responses
 
@@ -109,6 +148,9 @@ def get_shop_detail(db: Session, shop_id: int):
     naka-ON ang toggle AT may QR bago ituring na available ng mobile
     app ang Online Payment — see Shop.acceptsOnline sa shop.dart at
     _onlinePaymentAvailable sa booking_form_page.dart.
+
+    UPDATED (Rating after order) — average_rating at rating_count ay
+    kasama na rin sa manual constructor call sa ibaba.
     """
     shop = (
         db.query(Shop)
@@ -129,6 +171,8 @@ def get_shop_detail(db: Session, shop_id: int):
         .filter(AddOn.shop_id == shop_id, AddOn.is_active == True)
         .all()
     )
+
+    average_rating, rating_count = _get_rating_map(db, [shop.id]).get(shop.id, (None, 0))
 
     return ShopDetailResponse(
         id=shop.id,
@@ -166,6 +210,8 @@ def get_shop_detail(db: Session, shop_id: int):
         accepts_cash=shop.accepts_cash,
         accepts_cod=shop.accepts_cod,
         accepts_online=shop.accepts_online,
+        average_rating=average_rating,
+        rating_count=rating_count,
         services=[ShopServicePreview.model_validate(s) for s in services],
         add_ons=[AddOnPreview.model_validate(a) for a in add_ons],
     )
@@ -184,6 +230,9 @@ def get_nearby_shops(db: Session, latitude: float, longitude: float, radius_km: 
     as get_all_shops() above, kept consistent so a shop's promo badge
     doesn't disappear just because the customer's device has location
     on and this endpoint gets hit instead of the plain listing.
+
+    UPDATED (Rating after order) — same average_rating/rating_count
+    treatment as get_all_shops() above.
     """
     shops = (
         db.query(Shop)
@@ -194,6 +243,7 @@ def get_nearby_shops(db: Session, latitude: float, longitude: float, radius_km: 
         )
         .all()
     )
+    rating_map = _get_rating_map(db, [shop.id for shop in shops])
 
     results = []
     for shop in shops:
@@ -204,6 +254,9 @@ def get_nearby_shops(db: Session, latitude: float, longitude: float, radius_km: 
             response.active_promos = [
                 PromoCodePreview.model_validate(p) for p in _get_active_promos(shop)
             ]
+            average_rating, rating_count = rating_map.get(shop.id, (None, 0))
+            response.average_rating = average_rating
+            response.rating_count = rating_count
             results.append(response)
 
     results.sort(key=lambda s: s.distance_km)

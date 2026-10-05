@@ -1,5 +1,5 @@
 from app.database import Base
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Numeric 
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Numeric, CheckConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone, timedelta
 
@@ -69,6 +69,12 @@ class Shop(Base):
     add_ons = relationship("AddOn", back_populates="shop", cascade="all, delete-orphan")
     promo_codes = relationship("PromoCode", back_populates="shop", cascade="all, delete-orphan")
     activity_logs = relationship("ActivityLog", back_populates="shop", cascade="all, delete-orphan")
+
+    # NEW (Rating after order) — lahat ng reviews ng shop na ito. Ang
+    # average rating at bilang ay kinukuwenta sa shop_service.py (hindi
+    # naka-store sa Shop mismo, para laging tama at walang kailangang
+    # i-sync kapag may bagong review).
+    reviews = relationship("Review", back_populates="shop", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -585,6 +591,12 @@ class Booking(Base):
     `dropoff_datetime` (optional na oras kung kailan balak pumunta ng
     customer sa shop, dropoff bookings lang) at ang dalawang time
     window labels — `dropoff_window` at `pickup_window`.
+
+    NEW (Rating after order): may isang optional na `review` (one-to-one,
+    see Review model sa dulo ng file) — ang rating ng customer pagkatapos
+    maging "Claimed" ang booking. Ang `has_rated`, `rating`, at
+    `rating_comment` ay mga computed property lang (walang bagong column
+    sa bookings table), para awtomatikong lumabas sa BookingResponse.
     """
     __tablename__ = "bookings"
 
@@ -766,9 +778,34 @@ class Booking(Base):
         order_by="BookingMachineAssignment.load_number",
     )
 
+    # NEW (Rating after order) — isang review lang kada booking
+    # (one-to-one; may UNIQUE constraint sa reviews.booking_id).
+    review = relationship(
+        "Review",
+        back_populates="booking",
+        uselist=False,
+        cascade="all, delete-orphan",
+        lazy="joined",
+    )
+
     @property
     def shop_name(self):
         return self.shop.shop_name if self.shop else None
+
+    @property
+    def has_rated(self):
+        """True kapag nakapag-rate na ang customer sa booking na ito."""
+        return self.review is not None
+
+    @property
+    def rating(self):
+        """Ang bituin (1-5) na ibinigay ng customer, o None kung wala pa."""
+        return self.review.rating if self.review else None
+
+    @property
+    def rating_comment(self):
+        """Ang opsyonal na komento ng customer, o None."""
+        return self.review.comment if self.review else None
 
     @property
     def estimated_completion_time(self):
@@ -880,6 +917,10 @@ class Booking(Base):
             "delivery_address_line": self.delivery_address_line,
             "delivery_latitude": self.delivery_latitude,
             "delivery_longitude": self.delivery_longitude,
+            # NEW (Rating after order)
+            "has_rated": self.has_rated,
+            "rating": self.rating,
+            "rating_comment": self.rating_comment,
             "inventory_items_used": [u.to_dict() for u in self.inventory_usages],
             "add_ons_used": [a.to_dict() for a in self.add_ons_used],
             "washer_number": self.washer.machine_number if self.washer else None,
@@ -1100,4 +1141,55 @@ class PaymentAuditLog(Base):
             "previous_status": self.previous_status,
             "current_status": self.current_status,
             "rejection_reason": self.rejection_reason,
+        }
+
+
+class Review(Base):
+    """
+    NEW (Rating after order) — rating ng customer sa isang tapos nang
+    (Claimed) booking.
+
+    - ISANG review lang kada booking: may UNIQUE constraint ang
+      `booking_id` (unique=True), kaya kahit sabay ang dalawang request,
+      isa lang ang makakapasok at hindi na mababago pagkatapos ma-submit.
+    - `shop_id` ay kinopya mula sa booking sa oras ng pag-submit
+      (denormalized) para mabilis kuwentahin ang average rating ng shop
+      nang hindi dumadaan sa bookings table.
+    - `customer_id` ay SET NULL kapag na-delete ang customer account, para
+      manatili ang rating sa shop kahit wala na ang account.
+    - `rating` ay 1 hanggang 5 (CHECK constraint, bukod pa sa schema
+      validation sa schemas.ReviewCreate). `comment` ay opsyonal,
+      hanggang 300 characters.
+
+    Walang kailangang ALTER TABLE — bagong table ito, kaya gagawin
+    awtomatiko ng models.Base.metadata.create_all() sa startup.
+    """
+    __tablename__ = "reviews"
+    __table_args__ = (
+        CheckConstraint("rating >= 1 AND rating <= 5", name="ck_reviews_rating_range"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
+    shop_id = Column(Integer, ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    rating = Column(Integer, nullable=False)
+    comment = Column(String(300), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    booking = relationship("Booking", back_populates="review")
+    customer = relationship("Customer", foreign_keys=[customer_id])
+    shop = relationship("Shop", back_populates="reviews")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "booking_id": self.booking_id,
+            "customer_id": self.customer_id,
+            "shop_id": self.shop_id,
+            "rating": self.rating,
+            "comment": self.comment,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }

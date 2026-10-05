@@ -18,6 +18,7 @@ from app.routes import (
     shop_routes, websocket_routes, addon_routes, promo_routes,
     notification_routes, address_routes,
     webhook_routes,  # NEW — Supabase Auth webhook sync endpoint
+    review_routes,   # NEW — Rating after order (POST /reviews/)
 )
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
@@ -156,6 +157,9 @@ async def lifespan(app: FastAPI):
     
     try:
         # Syncing SQLAlchemy models with the database schema
+        # (kasama na ang bagong "reviews" table para sa Rating feature —
+        # bagong table ito, kaya awtomatikong gagawin dito; walang
+        # kailangang ALTER TABLE.)
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Schema Synchronization: COMPLETE")
         
@@ -293,6 +297,10 @@ app.include_router(address_routes.router)
 # Aiven Postgres (models.Customer o models.User).
 app.include_router(webhook_routes.router)
 
+# NEW (Rating after order) — POST /reviews/ (customer ang nagsa-submit
+# ng rating pagkatapos maging "Claimed" ang booking).
+app.include_router(review_routes.router)
+
 # --- ROOT HEALTH CHECK ---
 
 @app.get("/")
@@ -304,7 +312,7 @@ def read_root():
         "modules_active": [
             "Auth", "CustomerAuth", "Bookings", "Machines", "Settings",
             "Analytics", "Inventory", "Activity", "Shops", "Notifications",
-            "Addresses", "AddOns", "PromoCodes",
+            "Addresses", "AddOns", "PromoCodes", "Reviews",
             "SupabaseAuthWebhook",  # NEW
         ]
     }
