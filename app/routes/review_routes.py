@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -7,7 +7,7 @@ from app.controller import review_controller
 
 # Parehong customer dependency na ginagamit sa address_routes.py at
 # notification_routes.py (naka-login na CUSTOMER mula sa Supabase JWT).
-from app.security import get_current_customer
+from app.security import get_current_customer, get_current_shop_id
 
 router = APIRouter(
     prefix="/reviews",
@@ -40,3 +40,19 @@ def submit_review(
               mahaba ang komento.
     """
     return review_controller.create_review(db, customer, data)
+
+
+@router.get("/shop", response_model=schemas.ShopReviewsResponse)
+def get_my_shop_reviews(
+    limit: int = Query(100, ge=1, le=500),
+    shop_id: int = Depends(get_current_shop_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Owner/staff (web) — mga rating at komento ng SARILING shop ng
+    naka-login (shop_id galing sa JWT, gaya ng ibang /analytics
+    endpoints). Ibinabalik ang buod (average, bilang, bilang ng bawat
+    bituin) at ang pinakabagong `limit` na reviews. Unang pangalan lang
+    ng customer ang kasama.
+    """
+    return review_controller.get_shop_reviews(db, shop_id, limit)

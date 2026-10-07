@@ -1,4 +1,5 @@
 from fastapi import HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -74,3 +75,65 @@ def create_review(db: Session, customer: models.Customer, data: schemas.ReviewCr
         )
     db.refresh(review)
     return review
+
+
+def get_shop_reviews(db: Session, shop_id: int, limit: int = 100) -> dict:
+    """
+    NEW (Rating after order — web) — para sa Reviews page at Dashboard
+    card ng owner/staff. Naka-scope sa shop_id na galing sa JWT ng
+    naka-login (hindi tinatanggap mula sa request), kaya hindi
+    makikita ang reviews ng ibang shop.
+
+    Ibinabalik:
+      - summary: average, kabuuang bilang, at bilang ng bawat bituin
+        (kinukuwenta sa LAHAT ng reviews ng shop, hindi lang sa `limit`)
+      - reviews: pinakabago muna, hanggang `limit`
+
+    Privacy: unang pangalan lang ng customer ang isinasama.
+    """
+    average, count = (
+        db.query(func.avg(models.Review.rating), func.count(models.Review.id))
+        .filter(models.Review.shop_id == shop_id)
+        .one()
+    )
+
+    distribution = {str(star): 0 for star in range(5, 0, -1)}
+    for rating, rating_count in (
+        db.query(models.Review.rating, func.count(models.Review.id))
+        .filter(models.Review.shop_id == shop_id)
+        .group_by(models.Review.rating)
+        .all()
+    ):
+        distribution[str(rating)] = int(rating_count)
+
+    rows = (
+        db.query(models.Review, models.Customer.full_name, models.Booking.service_type)
+        .join(models.Booking, models.Review.booking_id == models.Booking.id)
+        .outerjoin(models.Customer, models.Review.customer_id == models.Customer.id)
+        .filter(models.Review.shop_id == shop_id)
+        .order_by(models.Review.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    reviews = []
+    for review, full_name, service_type in rows:
+        first_name = (full_name or "").strip().split(" ")[0] or None
+        reviews.append({
+            "id": review.id,
+            "booking_id": review.booking_id,
+            "rating": review.rating,
+            "comment": review.comment,
+            "customer_first_name": first_name,
+            "service_type": service_type,
+            "created_at": review.created_at,
+        })
+
+    return {
+        "summary": {
+            "average_rating": round(float(average), 1) if average is not None else None,
+            "rating_count": int(count or 0),
+            "distribution": distribution,
+        },
+        "reviews": reviews,
+    }

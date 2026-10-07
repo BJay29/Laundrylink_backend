@@ -1447,6 +1447,38 @@ class ReviewResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+class ShopReviewItem(BaseModel):
+    """
+    NEW (Rating after order — web) — isang review na ipinapakita sa
+    owner/staff (Reviews page). Unang pangalan lang ng customer ang
+    kasama (privacy) — walang buong pangalan, email, o contact number.
+    """
+    id: int
+    booking_id: int
+    rating: int
+    comment: Optional[str] = None
+    customer_first_name: Optional[str] = None
+    service_type: Optional[str] = None
+    created_at: datetime
+
+
+class ShopReviewSummary(BaseModel):
+    """
+    Buod ng lahat ng reviews ng shop (hindi lang ng mga nasa listahan).
+    `distribution` ay {"5": n, "4": n, "3": n, "2": n, "1": n}.
+    `average_rating` ay None kapag wala pang review.
+    """
+    average_rating: Optional[float] = None
+    rating_count: int = 0
+    distribution: Dict[str, int] = {}
+
+
+class ShopReviewsResponse(BaseModel):
+    """Response ng GET /reviews/shop (owner/staff-facing)."""
+    summary: ShopReviewSummary
+    reviews: List[ShopReviewItem] = []
+
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
