@@ -6,6 +6,12 @@ hinuhulaan na ang DAMI NG BOOKINGS kada araw (hindi na ang kita) mula sa
 trend, araw ng linggo, at ulan. Ang projected income ay kinukuwenta sa
 PredictionService: predicted_bookings x average_ticket.
 
+UPDATED (metrics fix): Ridge regression sa halip na plain
+LinearRegression (mas matatag kapag kaunti ang data), mas malaking
+training split, at baseline comparison. May "reliability" na rin sa
+metrics ("low" kapag kulang ang validation/data) para hindi
+ipakita bilang tiyak na accuracy ang bunga ng kakaunting data.
+
 Run from the project root:
     python -m ml_engine.train                 # trains shop 1's own model
     python -m ml_engine.train --shop-id 3      # trains shop 3's own model
@@ -24,7 +30,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
 
 from ml_engine.data_prep import (
@@ -42,29 +48,43 @@ MODEL_DIR = PROJECT_ROOT / "ml_models"
 REPORT_PATH = MODEL_DIR / "accuracy_report.png"
 METRICS_PATH = MODEL_DIR / "model_metrics.json"
 
-# Each shop gets its OWN artifact file, instead of every shop
-# overwriting the same single "forecast.pkl".
+
 def shop_model_path(shop_id: int) -> Path:
     return MODEL_DIR / f"forecast_shop_{shop_id}.pkl"
 
 
-# The pooled/cold-start model, shared by every shop that doesn't have
-# (or doesn't yet have) enough of its own history to train on.
 POOLED_MODEL_PATH = MODEL_DIR / "forecast_pooled.pkl"
 
-# Kung mas kaunti pa rito ang araw ng data, maingay ang makukuhang epekto
-# ng ulan (babala lang sa log — hindi pinipigilan ang training).
+MIN_TRAINING_DAYS = 14
 RECOMMENDED_MIN_DAYS = 30
 
-# Setup logging for production monitoring
+# Mas mababa rito ang validation days, hindi pa mapagkakatiwalaan ang
+# accuracy/R² (isang maling araw lang ay malaki na ang epekto).
+MIN_RELIABLE_VALIDATION_DAYS = 10
+
+# Gaano karaming araw ang pinakamababa para sa training split.
+MIN_TRAIN_ROWS = 10
+
+# Regularization: pinipigilan ang sobrang laking coefficients kapag
+# kaunti ang data.
+RIDGE_ALPHA = 1.0
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 def _split_validation(frame):
-    """Splits data into training and validation sets."""
-    validation_size = max(7, int(len(frame) * 0.20))
-    validation_size = min(validation_size, len(frame) - 2)
+    """
+    Splits data into training and validation sets (time-ordered).
+
+    UPDATED: sinisiguro na may hindi bababa sa MIN_TRAIN_ROWS na
+    training rows, kahit maliit ang kabuuang data. Dati, sa 14 na araw,
+    7 lang ang natitira para sa training.
+    """
+    total = len(frame)
+    validation_size = max(5, int(total * 0.20))
+    validation_size = min(validation_size, max(2, total - MIN_TRAIN_ROWS))
+    validation_size = min(validation_size, total - 2)
     train_frame = frame.iloc[:-validation_size].copy()
     validation_frame = frame.iloc[-validation_size:].copy()
     return train_frame, validation_frame
@@ -87,25 +107,73 @@ def _save_accuracy_report(validation_frame, predictions) -> None:
 
 
 def _coefficients(model, feature_columns) -> dict:
-    """Mapping ng feature -> coefficient, para makita kung ano ang natutunan ng model."""
     return {column: round(float(coef), 4) for column, coef in zip(feature_columns, model.coef_)}
+
+
+def _evaluate(y_true, y_pred, y_train) -> dict:
+    """
+    Kinukuwenta ang mga sukatan ng kalidad.
+
+    accuracy_percentage = 100 - WAPE (weighted absolute % error),
+    naka-clamp sa 0..100.
+    baseline_mae = error ng simpleng "hulaan ang average ng training".
+    beats_baseline = mas mahusay ba ang model kaysa sa simpleng average.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    mae = float(mean_absolute_error(y_true, y_pred))
+    total_actual = float(np.abs(y_true).sum())
+    if total_actual > 0:
+        accuracy = max(0.0, min(100.0, 100.0 - (np.abs(y_true - y_pred).sum() / total_actual) * 100.0))
+    else:
+        accuracy = 0.0
+
+    # R² ay hindi maaasahan kapag napakaliit ng validation set; ibinabalik
+    # pa rin ang totoong halaga (puwedeng negatibo), at ang controller
+    # ang bahala sa pag-clamp para sa display.
+    try:
+        r2 = float(r2_score(y_true, y_pred))
+    except Exception:
+        r2 = 0.0
+
+    baseline_prediction = float(np.mean(y_train)) if len(y_train) else 0.0
+    baseline_mae = float(np.mean(np.abs(y_true - baseline_prediction)))
+
+    return {
+        "accuracy_percentage": round(accuracy, 2),
+        "mean_absolute_error": round(mae, 2),
+        "r2_score": round(r2, 4),
+        "baseline_mae": round(baseline_mae, 2),
+        "beats_baseline": bool(mae < baseline_mae),
+    }
+
+
+def _reliability(total_days: int, validation_days: int) -> str:
+    """'low' kung kulang ang data para mapagkatiwalaan ang metrics."""
+    if validation_days < MIN_RELIABLE_VALIDATION_DAYS or total_days < RECOMMENDED_MIN_DAYS:
+        return "low"
+    return "ok"
 
 
 def run_training_pipeline(shop_id: int = 1) -> dict:
     """
     Trains a SHOP-SPECIFIC model and saves it to forecast_shop_{shop_id}.pkl.
-    Requires at least 14 days of that shop's own daily booking history.
+    Requires at least MIN_TRAINING_DAYS days of that shop's own daily
+    booking history.
 
     Target: daily booking_count. Features: day_index, day_of_week,
     is_weekend, rain_mm.
     """
     try:
         frame = load_training_data(shop_id=shop_id)
-        if len(frame) < 14:
-            raise ValueError("At least 14 daily booking aggregates are required to train the model.")
+        if len(frame) < MIN_TRAINING_DAYS:
+            raise ValueError(
+                f"At least {MIN_TRAINING_DAYS} daily booking aggregates are required to train the model."
+            )
         if len(frame) < RECOMMENDED_MIN_DAYS:
             logger.warning(
-                "Shop %s has only %d days of data — the learned effect of rain may be noisy "
+                "Shop %s has only %d days of data — metrics will be marked low-reliability "
                 "until there are at least %d days.",
                 shop_id, len(frame), RECOMMENDED_MIN_DAYS,
             )
@@ -113,23 +181,21 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         train_frame, validation_frame = _split_validation(frame)
 
-        # Initialize and train model
-        model = LinearRegression()
+        model = Ridge(alpha=RIDGE_ALPHA)
         model.fit(train_frame[FEATURE_COLUMNS].to_numpy(), train_frame[TARGET_COLUMN].to_numpy())
 
-        # Perform predictions and validation
         validation_predictions = model.predict(validation_frame[FEATURE_COLUMNS].to_numpy())
         validation_predictions = np.maximum(validation_predictions, 0.0)
 
-        # Calculate performance metrics (sa bookings na ngayon)
-        mae = mean_absolute_error(validation_frame[TARGET_COLUMN], validation_predictions)
-        r2 = r2_score(validation_frame[TARGET_COLUMN], validation_predictions)
-        mean_actual = validation_frame[TARGET_COLUMN].mean()
-        accuracy_percentage = max(0.0, 100.0 - ((mae / mean_actual) * 100.0)) if mean_actual else 0.0
+        metrics = _evaluate(
+            validation_frame[TARGET_COLUMN],
+            validation_predictions,
+            train_frame[TARGET_COLUMN],
+        )
+        metrics["validation_days"] = int(len(validation_frame))
+        metrics["training_days"] = int(len(train_frame))
+        metrics["reliability"] = _reliability(len(frame), len(validation_frame))
 
-        # Ano ang natutunan ng model? Ang "rain_mm" ang importante dito:
-        # positibo = mas maraming bookings kapag maulan, negatibo = mas
-        # kaunti. Tingnan ito sa logs pagkatapos mag-retrain.
         coefficients = _coefficients(model, FEATURE_COLUMNS)
         logger.info(
             "Shop %s learned coefficients: %s (intercept %.2f). "
@@ -137,11 +203,6 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
             shop_id, coefficients, float(model.intercept_), coefficients.get("rain_mm", 0.0),
         )
 
-        # prediction_service.py reads average_ticket / last_day_index off
-        # the artifact — computed here from the FULL frame so it reflects
-        # the shop's true pricing and true latest trained day.
-        # average_ticket ang ginagamit pang-convert ng predicted bookings
-        # papuntang projected income.
         total_bookings_all = frame["booking_count"].sum()
         average_ticket = (
             float(frame["total_revenue"].sum() / total_bookings_all)
@@ -158,12 +219,7 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
             "average_ticket": round(average_ticket, 2),
             "last_day_index": last_day_index,
             "coefficients": coefficients,
-            "metrics": {
-                "accuracy_percentage": round(float(accuracy_percentage), 2),
-                "mean_absolute_error": round(float(mae), 2),
-                "r2_score": round(float(r2), 4),
-                "validation_days": int(len(validation_frame)),
-            },
+            "metrics": metrics,
         }
 
         model_path = shop_model_path(shop_id)
@@ -174,15 +230,19 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
         with model_path.open("wb") as model_file:
             pickle.dump(artifact, model_file)
 
-        # Metrics file used by /analytics/accuracy — kept single/global
-        # for now, always reflects whichever shop was trained most recently.
+        # Global metrics file (legacy) — reflects the most recently trained shop.
         with open(METRICS_PATH, "w") as f:
-            json.dump(artifact["metrics"], f, indent=4)
+            json.dump(metrics, f, indent=4)
 
         _save_accuracy_report(validation_frame, validation_predictions)
 
-        logger.info(f"Training complete for shop {shop_id}. Bookings accuracy: {accuracy_percentage:.2f}%")
-        return artifact["metrics"]
+        logger.info(
+            "Training complete for shop %s. Accuracy: %.2f%% (MAE %.2f vs baseline %.2f, "
+            "beats baseline: %s, reliability: %s).",
+            shop_id, metrics["accuracy_percentage"], metrics["mean_absolute_error"],
+            metrics["baseline_mae"], metrics["beats_baseline"], metrics["reliability"],
+        )
+        return metrics
 
     except Exception as e:
         logger.error(f"Error during training pipeline for shop {shop_id}: {str(e)}")
@@ -208,7 +268,7 @@ def run_pooled_training_pipeline() -> dict:
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         train_frame, validation_frame = _split_validation(frame)
 
-        model = LinearRegression()
+        model = Ridge(alpha=RIDGE_ALPHA)
         model.fit(train_frame[POOLED_FEATURE_COLUMNS].to_numpy(), train_frame[POOLED_TARGET_COLUMN].to_numpy())
 
         validation_predictions = model.predict(validation_frame[POOLED_FEATURE_COLUMNS].to_numpy())

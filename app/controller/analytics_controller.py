@@ -26,16 +26,8 @@ class AnalyticsController:
     @staticmethod
     def get_operational_insights(db: Session, shop_id: int):
         """
-        UPDATED: now takes shop_id explicitly, forwarded from the route
-        (which resolves it from the JWT). Previously this had no shop_id
-        parameter at all, meaning insight_engine.generate_operational_insight()
-        had no way to know which shop's data to analyze — it may have been
-        looking at all shops' data combined, or defaulting to shop 1
-        internally. NEEDS VERIFICATION: open app/services/insight_engine.py
-        and confirm generate_operational_insight() accepts and filters by
-        shop_id — if its current signature is generate_operational_insight(db)
-        only, it needs to be updated to generate_operational_insight(db, shop_id)
-        with a Booking.shop_id == shop_id filter added to its queries.
+        NEEDS VERIFICATION: insight_engine.generate_operational_insight()
+        must accept and filter by shop_id.
         """
         return insight_engine.generate_operational_insight(db, shop_id)
 
@@ -48,21 +40,9 @@ class AnalyticsController:
         """
         Calculates aggregate summary statistics including current performance
         (reset based on operational hours), weekly totals, and expenses.
-        shop_id is required (no more default=1) — the route now always
-        supplies it from the authenticated user's JWT.
 
-        UPDATED (Income = paid only): dating iisang query lang ang
-        kumukuha ng revenue AT bookings count nang sabay
-        (today_stats.revenue, today_stats.bookings) — kaya kung
-        idinagdag lang ang payment_status=="paid" filter dito, maaapektuhan
-        din ang "Total Bookings" count (hindi na mabibilang ang mga
-        unpaid bookings, kahit totoong nangyari/tumakbo ang mga ito).
-        Hinati na ito sa DALAWANG hiwalay na query: revenue (paid-only,
-        tumutugma sa "income" logic ng RecordSales.jsx/get_sales_summary())
-        at bookings count (walang filter, totoong operational volume
-        pa rin, hindi income metric).
+        Income = paid only; bookings count = all bookings (operational volume).
         """
-        # 1. Fetch Operational Settings for Auto-Reset Logic
         settings = db.query(models.Setting).filter(
             models.Setting.shop_id == shop_id
         ).first()
@@ -74,11 +54,9 @@ class AnalyticsController:
             hour=op_start_hour, minute=0, second=0, microsecond=0
         )
 
-        # If current time is before the reset time, roll back to yesterday's reset
         if now < today_reset_time:
             today_reset_time -= timedelta(days=1)
 
-        # 2a. Fetch "Today" Revenue — PAID ONLY (see UPDATED note above)
         today_revenue = db.query(
             func.sum(models.Booking.total_price)
         ).filter(
@@ -87,8 +65,6 @@ class AnalyticsController:
             models.Booking.created_at >= today_reset_time
         ).scalar() or 0.0
 
-        # 2b. Fetch "Today" Bookings Count — ALL bookings (operational
-        # volume, not an income figure, so unaffected by payment status).
         today_bookings_count = db.query(
             func.count(models.Booking.id)
         ).filter(
@@ -96,7 +72,6 @@ class AnalyticsController:
             models.Booking.created_at >= today_reset_time
         ).scalar() or 0
 
-        # 3. Fetch Weekly Summary (last 7 days) — Revenue is PAID ONLY.
         seven_days_ago = now - timedelta(days=7)
         weekly_revenue = db.query(
             func.sum(models.Booking.total_price)
@@ -106,11 +81,9 @@ class AnalyticsController:
             models.Booking.created_at >= seven_days_ago
         ).scalar() or 0.0
 
-        # 4. Calculate Expenses
         total_revenue_weekly  = weekly_revenue
         total_expenses_weekly = total_revenue_weekly * 0.35  # 35% operational cost estimate
 
-        # Previous week comparison — Revenue PAID ONLY, Bookings count ALL.
         last_week_start = now - timedelta(days=14)
         last_week_end   = now - timedelta(days=8)
         last_week_revenue = db.query(
@@ -130,7 +103,6 @@ class AnalyticsController:
             models.Booking.created_at <= last_week_end
         ).scalar() or 0
 
-        # 5. Aggregate Service Volumes
         service_counts = db.query(
             models.Booking.service_type,
             func.count(models.Booking.id).label("total")
@@ -140,13 +112,10 @@ class AnalyticsController:
 
         service_map = {item.service_type: item.total for item in service_counts}
 
-        # 6. Total Weight Volume (kg)
         total_kg = db.query(
             func.sum(models.Booking.weight)
         ).filter(models.Booking.shop_id == shop_id).scalar() or 0.0
 
-        # 7. Average Revenue Per Service (all-time) — PAID ONLY, para
-        # tumugma sa parehong "income" logic na ginamit sa buong file.
         total_rev_all_time = db.query(
             func.sum(models.Booking.total_price)
         ).filter(
@@ -166,10 +135,9 @@ class AnalyticsController:
             if total_paid_bookings_all_time > 0 else 0
         )
 
-        # 8. AI Engine Data
         ai = AIEngine()
         predicted_count_today  = ai.get_predicted_bookings(datetime.now())
-        projected_income_today  = ai.calculate_projected_income(predicted_count_today)
+        projected_income_today = ai.calculate_projected_income(predicted_count_today)
 
         active_machines = db.query(models.Machine).filter(
             models.Machine.shop_id == shop_id,
@@ -200,16 +168,7 @@ class AnalyticsController:
 
     @staticmethod
     def get_weekly_history(db: Session, shop_id: int):
-        """
-        Provides historical income data for the last 7 days.
-        shop_id is required — the route always supplies it from the JWT.
-
-        UPDATED (Income = paid only): dating sinusuma ang total_price ng
-        LAHAT ng bookings bawat araw, kahit unpaid pa. Ngayon ay
-        idinagdag ang payment_status=="paid" filter, para tumugma ang
-        historical income chart na ito sa parehong "paid only" na
-        pamantayan ng ibang income figures sa file na ito.
-        """
+        """Historical PAID income for the last 7 days."""
         history_data = []
         for i in range(6, -1, -1):
             target_date   = datetime.now().date() - timedelta(days=i)
@@ -234,17 +193,8 @@ class AnalyticsController:
     @staticmethod
     def get_forecast_data(db: Session, shop_id: int):
         """
-        FIXED: PredictionService.get_revenue_forecast() previously took no
-        shop_id at all, meaning the AI forecast numbers were effectively
-        global/shop-1-only regardless of who was viewing the dashboard —
-        every shop saw the exact same graph. It now takes shop_id and
-        resolves the forecast through a 3-tier fallback (the shop's own
-        trained model → the pooled/cold-start model → a weather-only
-        outlook for brand-new shops), documented in prediction_service.py.
-
-        NOTE: ang predicted_bookings ay hinuhulaan na ng model mula sa
-        weather forecast, at ang projected_income ay predicted_bookings
-        x average_ticket.
+        Resolves the 7-day forecast through the 3-tier fallback
+        (shop model -> pooled model -> weather-only).
         """
         raw_forecast = PredictionService.get_revenue_forecast(shop_id=shop_id, days=7)
         ai_narrative = insight_engine.generate_forecast_insight(raw_forecast)
@@ -279,47 +229,70 @@ class AnalyticsController:
         """
         Retrieves accuracy metrics for the AI Calibration section.
 
-        UPDATED (per-shop): dati ay isang global model_metrics.json ang
-        binabasa — kung sinong shop ang huling na-train, iyon ang
-        accuracy na nakikita ng lahat. Ngayon, kapag may shop_id, binabasa
-        ang metrics na naka-save sa loob ng sariling model file ng
-        shop (forecast_shop_{shop_id}.pkl → artifact["metrics"]).
+        UPDATED (metrics fix):
+          - Hindi na nagbabalik ng imposibleng numero. Ang R² ay
+            naka-clamp sa 0..100 (dati r2 * 100, kaya -2901% kapag
+            negatibo ang R²).
+          - Kapag walang sariling model ang shop (o walang metrics),
+            None ang ibinabalik (hindi 0), para maipakita ng UI ang
+            "Not enough data yet" sa halip na 0%.
+          - May "reliability" ("low"/"ok") at "beats_baseline" na
+            ibinabalik para makita kung mapagkakatiwalaan ang numero.
 
-        Kung may shop_id pero wala pang sariling model ang shop, "error"
-        ang ibabalik (0% sa UI) — hindi ang accuracy ng ibang shop.
-
-        Kung walang shop_id na ibinigay (lumang pagtawag), ang global
-        model_metrics.json pa rin ang babasahin, gaya ng dati.
-
-        Ang accuracy ay sa DAMI NG BOOKINGS na (hindi na sa kita) para sa
-        mga model na na-retrain na pagkatapos ng weather-driven update.
+        Mga key na ibinabalik:
+          demand_forecasting_model: accuracy % (0..100) o None
+          utility_telemetry_model:  model-fit (R² clamped 0..100) o None
+                                    (pangalan ng key ay iniwan para sa
+                                    compatibility sa frontend)
         """
         data: Optional[Dict[str, Any]] = None
 
         if shop_id is not None:
             shop_model_path = PredictionService.MODEL_DIR / f"forecast_shop_{shop_id}.pkl"
             if not shop_model_path.exists() or shop_model_path.stat().st_size == 0:
-                return {"status": "error", "message": "No trained model for this shop yet"}
+                return AnalyticsController._empty_metrics("No trained model for this shop yet")
             try:
                 with shop_model_path.open("rb") as model_file:
                     artifact = pickle.load(model_file)
                 data = artifact.get("metrics")
             except Exception as e:
                 print(f"[{datetime.now()}] Could not read metrics for shop {shop_id}: {e}")
-                return {"status": "error", "message": "Could not read model metrics"}
+                return AnalyticsController._empty_metrics("Could not read model metrics")
             if not data:
-                return {"status": "error", "message": "Model has no metrics recorded"}
+                return AnalyticsController._empty_metrics("Model has no metrics recorded")
         else:
             metrics_path = PredictionService.METRICS_PATH
             if not metrics_path.exists():
-                return {"status": "error", "message": "Metrics configuration not found"}
+                return AnalyticsController._empty_metrics("Metrics configuration not found")
             with open(metrics_path, "r") as f:
                 data = json.load(f)
 
+        accuracy = data.get("accuracy_percentage")
+        r2 = data.get("r2_score")
+
+        demand = None if accuracy is None else round(max(0.0, min(100.0, float(accuracy))), 2)
+        model_fit = None if r2 is None else round(max(0.0, min(100.0, float(r2) * 100.0)), 2)
+
         return {
             "status":                   "success",
-            "demand_forecasting_model": data.get("accuracy_percentage", 0.0),
-            "utility_telemetry_model":  data.get("r2_score", 0.0) * 100
+            "demand_forecasting_model": demand,
+            "utility_telemetry_model":  model_fit,
+            "reliability":              data.get("reliability", "unknown"),
+            "beats_baseline":           data.get("beats_baseline"),
+            "validation_days":          data.get("validation_days"),
+        }
+
+    @staticmethod
+    def _empty_metrics(message: str) -> Dict[str, Any]:
+        """Walang magagamit na metrics: None (hindi 0) para tapat ang UI."""
+        return {
+            "status":                   "error",
+            "message":                  message,
+            "demand_forecasting_model": None,
+            "utility_telemetry_model":  None,
+            "reliability":              "none",
+            "beats_baseline":           None,
+            "validation_days":          None,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -329,40 +302,10 @@ class AnalyticsController:
     @staticmethod
     def get_customer_segments(db: Session, shop_id: int) -> List[dict]:
         """
-        Returns a list of customer objects, each annotated with a behavioral
-        segment assigned by the K-Means cluster engine.
-
-        FIXED: shop_id no longer defaults to 1 — the route always supplies
-        the caller's real shop_id from the JWT now.
-
-        Behaviour:
-            - Delegates to AnalyticsService.get_customer_segments() which
-              applies an 18-day rolling window and mock data exclusion before
-              passing data to the cluster engine.
-            - IMPORTANT: this only actually fixes the leak if
-              AnalyticsService.get_customer_segments(shop_id) itself filters
-              its Booking query by shop_id internally. Please share
-              app/services/analytics_service.py so this can be verified —
-              if it queries Booking without a shop_id filter, customers from
-              every shop would still be clustered together regardless of
-              this fix.
-
-        Returns:
-            List[dict] — each item contains:
-                - customer_name   (str)
-                - visit_frequency (int)
-                - total_spent     (float)
-                - avg_per_visit   (float)
-                - segment         (str)   "Occasional" | "Regular" | "VIP"
-                - segment_color   (str)   Tailwind color token for the badge
-                - data_window     (str)   ISO start date of the 18-day window
-
-        Raises:
-            HTTPException 404 — no real bookings in the last 18 days for this shop.
-            HTTPException 422 — input data is malformed or missing columns.
-            HTTPException 500 — unexpected ML or database error.
+        Returns customers annotated with a K-Means behavioral segment.
+        NOTE: verify AnalyticsService.get_customer_segments(shop_id)
+        filters Booking by shop_id internally.
         """
-        # Deferred import to avoid circular dependency between controller and service
         from app.services.analytics_service import AnalyticsService, SEGMENTATION_WINDOW_DAYS
         from fastapi import HTTPException
 
@@ -383,10 +326,8 @@ class AnalyticsController:
             return segments
 
         except HTTPException:
-            # Re-raise FastAPI HTTP exceptions unchanged
             raise
         except ValueError as ve:
-            # Raised by cluster_engine when the DataFrame is malformed
             raise HTTPException(
                 status_code=422,
                 detail=f"Segmentation data error: {str(ve)}"
@@ -403,19 +344,7 @@ class AnalyticsController:
 
     @staticmethod
     def get_sales_summary(db: Session, shop_id: int):
-        """
-        Total income para sa Today / This Week / This Month.
-        Backs ang KPI cards sa Record Sales page.
-
-        "Today" ay ibinabase sa operation_start_hour ng shop (kagaya ng
-        get_dashboard_summary() sa itaas), hindi literal na midnight.
-        "This Week" at "This Month" ay rolling 7-day window at
-        calendar-month-to-date, respectively.
-
-        Income = paid only — lahat ng tatlong queries dito ay may
-        payment_status == "paid" filter, tumutugma sa "paid only" na
-        logic ng RecordSales.jsx (rangeTotalIncome/paidBookingsInRange).
-        """
+        """Total PAID income for Today / This Week / This Month."""
         settings = db.query(models.Setting).filter(
             models.Setting.shop_id == shop_id
         ).first()
