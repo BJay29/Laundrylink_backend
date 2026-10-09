@@ -195,7 +195,7 @@ def fetch_pooled_daily_frame(db: Session) -> pd.DataFrame:
                 ["shop_id", "booking_date", "day_of_week", "is_weekend", "rain_mm", "booking_ratio", "revenue_ratio"]
             ]
         )
-
+    
     if not pooled_rows:
         return pd.DataFrame(
             columns=["shop_id", "booking_date", "day_of_week", "is_weekend", "rain_mm", "booking_ratio", "revenue_ratio"]

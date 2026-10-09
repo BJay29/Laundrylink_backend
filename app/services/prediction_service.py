@@ -386,7 +386,7 @@ class PredictionService:
                 return cls._forecast_from_pooled_model(context, baselines, days)
 
             return cls._forecast_weather_only(context, days)
-        finally:
+        finally: 
             db.close()
 
     @classmethod
