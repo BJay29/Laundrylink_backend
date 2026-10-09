@@ -1,6 +1,10 @@
 {
-    "accuracy_percentage": 92.49,
-    "mean_absolute_error": 368.37,
-    "r2_score": 0.8928,
-    "validation_days": 18
+    "accuracy_percentage": 58.68,
+    "mean_absolute_error": 0.66,
+    "r2_score": 0.0459,
+    "baseline_mae": 1.01,
+    "beats_baseline": true,
+    "validation_days": 5,
+    "training_days": 14,
+    "reliability": "low"
 }
