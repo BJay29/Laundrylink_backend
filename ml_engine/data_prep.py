@@ -1,14 +1,16 @@
 """
 Database-to-feature preparation for LaundryLink forecasting.
 
-UPDATED (weather-driven bookings forecast): ang model ay hinuhulaan na
-ang DAMI NG BOOKINGS (hindi na ang kita) mula sa araw ng linggo, trend,
-at ulan (rain_mm). Ang income ay kinukuwenta na lang pagkatapos:
-predicted_bookings x average_ticket (see PredictionService).
+REVERTED (revenue-based forecast): ang per-shop model ay hinuhulaan ulit
+ang KITA (total_revenue) kada araw, gamit ang trend, araw ng linggo,
+ulan, at booking_count/total_loads bilang input.
 
-Dati, kasama sa features ang booking_count at total_loads — pero hindi pa
-alam ang mga iyon sa mga susunod na araw, kaya nilalagyan lang ng
-nakapirming 12/18 sa prediction at halos wala nang epekto ang ulan.
+Ang booking_count at total_loads ay hindi pa alam sa mga susunod na
+araw, kaya sa prediction time (PredictionService) ay ang AVERAGE NG
+SARILING SHOP kada araw ng linggo ang ipinapasok (weekday_profile na
+naka-save sa model artifact), hindi na ang nakapirming 12/18.
+
+Ang pooled (cold-start) model ay booking_ratio pa rin ang target.
 """
 
 from __future__ import annotations
@@ -34,30 +36,26 @@ from app.services import weather_service
 logger = logging.getLogger(__name__)
 
 # Feature columns used by the PER-SHOP machine learning model.
-# UPDATED: tinanggal ang "booking_count" at "total_loads" — ang mga iyon
-# na ang TARGET/kahihinatnan, hindi na input. Ang natira ay mga bagay na
-# alam na nang maaga: trend (day_index), araw ng linggo, at forecast na
-# ulan (rain_mm, matched by date sa real historical weather sa training).
-FEATURE_COLUMNS = ["day_index", "day_of_week", "is_weekend", "rain_mm"]
+FEATURE_COLUMNS = [
+    "day_index",
+    "day_of_week",
+    "is_weekend",
+    "rain_mm",
+    "booking_count",
+    "total_loads",
+]
 
-# Ang hinuhulaan ng per-shop model.
-TARGET_COLUMN = "booking_count"
+# Ang hinuhulaan ng per-shop model: kita kada araw.
+TARGET_COLUMN = "total_revenue"
 
 # Feature columns used by the POOLED (multi-shop, cold-start) model.
-# No day_index here — meaningful lang iyon sa loob ng iisang shop's own
-# trend. Weekday pattern + rain ang mga signal na nagge-generalize sa
-# iba't ibang shop.
 POOLED_FEATURE_COLUMNS = ["day_of_week", "is_weekend", "rain_mm"]
 
-# UPDATED: ang pooled model ay hinuhulaan na ang booking_ratio (bookings
-# ng araw / karaniwang bookings ng shop), hindi na revenue_ratio.
+# Ang pooled model ay booking_ratio ang hinuhulaan.
 POOLED_TARGET_COLUMN = "booking_ratio"
 
 # Minimum number of daily rows a shop must have before its data is
-# folded into the pooled/global training set. Matches the 14-day floor
-# already enforced for training a shop's own model in ml_engine/train.py,
-# so a shop only ever "graduates" from contributing-to-pooled to
-# having-its-own-model, never skips a state.
+# folded into the pooled/global training set.
 MIN_DAYS_FOR_POOLING = 14
 
 
@@ -98,18 +96,11 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     frame["booking_date"] = pd.to_datetime(frame["booking_date"])
     first_date = frame["booking_date"].min()
 
-    # Calculate index, weekday, and weekend status for the AI model
     frame["day_index"] = (frame["booking_date"] - first_date).dt.days.astype(int)
     frame["day_of_week"] = frame["booking_date"].dt.weekday.astype(int)
     frame["is_weekend"] = frame["day_of_week"].isin([5, 6]).astype(int)
 
-    # Attach real historical rainfall for this shop's own location,
-    # matched to each booking date.
-    #
-    # Kung walang latitude/longitude ang shop (NULL sa DB), ang
-    # weather_service na ang gagamit ng Naga City fallback. Ang 0.0 ay
-    # fallback na lang kapag talagang pumalya ang external call, para
-    # hindi masira ang training.
+    # Attach real historical rainfall for this shop's own location.
     shop = db.query(Shop).filter(Shop.id == shop_id).first()
     rain_frame = weather_service.get_historical_rain_mm(
         shop.latitude if shop else None,
@@ -129,8 +120,6 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
     matched_days = int(frame["rain_mm"].notna().sum())
     frame["rain_mm"] = frame["rain_mm"].fillna(0.0)
 
-    # Para madaling ma-verify pagkatapos mag-retrain: dapat hindi 0
-    # ang "rainy days" kung umulan talaga sa panahong iyon.
     logger.info(
         "Shop %s: weather matched for %d/%d training days, %d day(s) with rain > 0 mm.",
         shop_id, matched_days, len(frame), int((frame["rain_mm"] > 0).sum()),
@@ -154,23 +143,10 @@ def fetch_daily_booking_frame(db: Session, shop_id: int = 1) -> pd.DataFrame:
 def fetch_pooled_daily_frame(db: Session) -> pd.DataFrame:
     """
     Builds the multi-shop training set for the pooled/global cold-start
-    model.
+    model. Each shop's daily numbers are converted into RATIOS against
+    that shop's own average so shops of different sizes combine cleanly.
 
-    Each contributing shop's daily booking_count and total_revenue are
-    converted into RATIOS against that shop's own average — this is
-    what lets a tiny shop and a big shop sit in the same training set
-    without the big shop's raw numbers dominating the fit. The pooled
-    model then learns "how much a day's bookings deviate from a shop's
-    own normal, given the day of week and how much it rained" — a
-    coefficient that transfers to a brand-new shop with zero history,
-    scaled by that new shop's own baseline once it has one (see
-    PredictionService._get_shop_baselines).
-
-    UPDATED: ang target ay booking_ratio na (revenue_ratio ay nandito
-    pa rin sa frame pero hindi na ginagamit sa training).
-
-    Shops with fewer than MIN_DAYS_FOR_POOLING days of data are skipped
-    entirely — not enough signal to compute a meaningful average yet.
+    Shops with fewer than MIN_DAYS_FOR_POOLING days of data are skipped.
     """
     shops = db.query(Shop).all()
     pooled_rows = []
@@ -195,7 +171,7 @@ def fetch_pooled_daily_frame(db: Session) -> pd.DataFrame:
                 ["shop_id", "booking_date", "day_of_week", "is_weekend", "rain_mm", "booking_ratio", "revenue_ratio"]
             ]
         )
-    
+
     if not pooled_rows:
         return pd.DataFrame(
             columns=["shop_id", "booking_date", "day_of_week", "is_weekend", "rain_mm", "booking_ratio", "revenue_ratio"]
@@ -205,9 +181,7 @@ def fetch_pooled_daily_frame(db: Session) -> pd.DataFrame:
 
 
 def load_training_data(shop_id: int = 1) -> pd.DataFrame:
-    """
-    Establishes a database session and retrieves the booking data frame.
-    """
+    """Establishes a database session and retrieves the booking data frame."""
     db = SessionLocal()
     try:
         return fetch_daily_booking_frame(db, shop_id=shop_id)
@@ -225,6 +199,18 @@ def load_pooled_training_data() -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    # Test script to print the last 10 entries of processed data
-    df = load_training_data()
-    print(df.tail(10).to_string(index=False) if not df.empty else "No booking data available.")
+    # Usage: python -m ml_engine.data_prep [shop_id]
+    target_shop = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+    df = load_training_data(shop_id=target_shop)
+    if df.empty:
+        print(f"No booking data available for shop {target_shop}.")
+    else:
+        print(f"Shop {target_shop}: {len(df)} days of data")
+        print(df.tail(10).to_string(index=False))
+        print("\nAverage per weekday (0=Mon ... 6=Sun):")
+        print(
+            df.groupby("day_of_week")[["booking_count", "total_loads", "total_revenue"]]
+            .mean()
+            .round(2)
+            .to_string()
+        )

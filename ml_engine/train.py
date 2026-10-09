@@ -1,16 +1,18 @@
 """
 Train the LaundryLink demand forecasting models.
 
-UPDATED (weather-driven bookings forecast): ang per-shop model ay
-hinuhulaan na ang DAMI NG BOOKINGS kada araw (hindi na ang kita) mula sa
-trend, araw ng linggo, at ulan. Ang projected income ay kinukuwenta sa
-PredictionService: predicted_bookings x average_ticket.
+REVERTED (revenue-based forecast): ang per-shop model ay hinuhulaan ulit
+ang KITA kada araw (target = total_revenue) mula sa trend, araw ng
+linggo, ulan, booking_count at total_loads.
 
-UPDATED (metrics fix): Ridge regression sa halip na plain
-LinearRegression (mas matatag kapag kaunti ang data), mas malaking
-training split, at baseline comparison. May "reliability" na rin sa
-metrics ("low" kapag kulang ang validation/data) para hindi
-ipakita bilang tiyak na accuracy ang bunga ng kakaunting data.
+Dahil hindi pa alam ang booking_count/total_loads ng mga susunod na
+araw, sine-save sa artifact ang "weekday_profile": ang average ng
+sariling shop ng bookings at loads para sa bawat araw ng linggo. Ito
+ang ipinapasok ng PredictionService sa prediction (hindi na ang
+nakapirming 12/18).
+
+Ridge regression, baseline comparison, at "reliability" flag ay
+nandito pa rin.
 
 Run from the project root:
     python -m ml_engine.train                 # trains shop 1's own model
@@ -28,6 +30,8 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")  # walang GUI na kailangan (safe sa server)
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.linear_model import Ridge
@@ -59,7 +63,7 @@ MIN_TRAINING_DAYS = 14
 RECOMMENDED_MIN_DAYS = 30
 
 # Mas mababa rito ang validation days, hindi pa mapagkakatiwalaan ang
-# accuracy/R² (isang maling araw lang ay malaki na ang epekto).
+# accuracy/R².
 MIN_RELIABLE_VALIDATION_DAYS = 10
 
 # Gaano karaming araw ang pinakamababa para sa training split.
@@ -76,10 +80,7 @@ logger = logging.getLogger(__name__)
 def _split_validation(frame):
     """
     Splits data into training and validation sets (time-ordered).
-
-    UPDATED: sinisiguro na may hindi bababa sa MIN_TRAIN_ROWS na
-    training rows, kahit maliit ang kabuuang data. Dati, sa 14 na araw,
-    7 lang ang natitira para sa training.
+    Sinisiguro na may hindi bababa sa MIN_TRAIN_ROWS na training rows.
     """
     total = len(frame)
     validation_size = max(5, int(total * 0.20))
@@ -91,13 +92,13 @@ def _split_validation(frame):
 
 
 def _save_accuracy_report(validation_frame, predictions) -> None:
-    """Generates and saves a visual plot comparing actual vs predicted daily bookings."""
+    """Generates and saves a plot comparing actual vs predicted daily revenue."""
     plt.figure(figsize=(10, 5))
     plt.plot(validation_frame["booking_date"], validation_frame[TARGET_COLUMN], marker="o", label="Actual")
     plt.plot(validation_frame["booking_date"], predictions, marker="x", label="Predicted")
-    plt.title("LaundryLink Forecast Validation: Actual vs Predicted Daily Bookings")
+    plt.title("LaundryLink Forecast Validation: Actual vs Predicted Daily Revenue")
     plt.xlabel("Date")
-    plt.ylabel("Daily Bookings")
+    plt.ylabel("Daily Revenue (PHP)")
     plt.xticks(rotation=35, ha="right")
     plt.grid(True, alpha=0.25)
     plt.legend()
@@ -112,10 +113,7 @@ def _coefficients(model, feature_columns) -> dict:
 
 def _evaluate(y_true, y_pred, y_train) -> dict:
     """
-    Kinukuwenta ang mga sukatan ng kalidad.
-
-    accuracy_percentage = 100 - WAPE (weighted absolute % error),
-    naka-clamp sa 0..100.
+    accuracy_percentage = 100 - WAPE, naka-clamp sa 0..100.
     baseline_mae = error ng simpleng "hulaan ang average ng training".
     beats_baseline = mas mahusay ba ang model kaysa sa simpleng average.
     """
@@ -129,9 +127,6 @@ def _evaluate(y_true, y_pred, y_train) -> dict:
     else:
         accuracy = 0.0
 
-    # R² ay hindi maaasahan kapag napakaliit ng validation set; ibinabalik
-    # pa rin ang totoong halaga (puwedeng negatibo), at ang controller
-    # ang bahala sa pag-clamp para sa display.
     try:
         r2 = float(r2_score(y_true, y_pred))
     except Exception:
@@ -156,14 +151,36 @@ def _reliability(total_days: int, validation_days: int) -> str:
     return "ok"
 
 
+def _build_weekday_profile(frame) -> dict:
+    """
+    Average ng bookings at loads ng shop para sa bawat araw ng linggo
+    (0=Lunes ... 6=Linggo). Kapag may araw ng linggo na walang data,
+    gagamitin ang overall average ng shop.
+    """
+    overall_bookings = float(frame["booking_count"].mean())
+    overall_loads = float(frame["total_loads"].mean())
+
+    profile = {}
+    for dow in range(7):
+        group = frame[frame["day_of_week"] == dow]
+        if len(group) > 0:
+            profile[dow] = {
+                "bookings": float(group["booking_count"].mean()),
+                "loads": float(group["total_loads"].mean()),
+            }
+        else:
+            profile[dow] = {"bookings": overall_bookings, "loads": overall_loads}
+    return profile
+
+
 def run_training_pipeline(shop_id: int = 1) -> dict:
     """
     Trains a SHOP-SPECIFIC model and saves it to forecast_shop_{shop_id}.pkl.
     Requires at least MIN_TRAINING_DAYS days of that shop's own daily
     booking history.
 
-    Target: daily booking_count. Features: day_index, day_of_week,
-    is_weekend, rain_mm.
+    Target: daily total_revenue. Features: day_index, day_of_week,
+    is_weekend, rain_mm, booking_count, total_loads.
     """
     try:
         frame = load_training_data(shop_id=shop_id)
@@ -199,16 +216,21 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
         coefficients = _coefficients(model, FEATURE_COLUMNS)
         logger.info(
             "Shop %s learned coefficients: %s (intercept %.2f). "
-            "rain_mm = %+.4f bookings per extra mm of rain.",
+            "rain_mm = %+.4f PHP per extra mm of rain.",
             shop_id, coefficients, float(model.intercept_), coefficients.get("rain_mm", 0.0),
         )
 
-        total_bookings_all = frame["booking_count"].sum()
+        total_bookings_all = float(frame["booking_count"].sum())
+        total_loads_all = float(frame["total_loads"].sum())
         average_ticket = (
             float(frame["total_revenue"].sum() / total_bookings_all)
             if total_bookings_all > 0 else 150.0
         )
+        average_loads_per_booking = (
+            total_loads_all / total_bookings_all if total_bookings_all > 0 else 1.0
+        )
         last_day_index = int(frame["day_index"].max())
+        weekday_profile = _build_weekday_profile(frame)
 
         artifact = {
             "model": model,
@@ -217,6 +239,8 @@ def run_training_pipeline(shop_id: int = 1) -> dict:
             "trained_at": datetime.now(timezone.utc).isoformat(),
             "shop_id": shop_id,
             "average_ticket": round(average_ticket, 2),
+            "average_loads_per_booking": round(average_loads_per_booking, 3),
+            "weekday_profile": weekday_profile,
             "last_day_index": last_day_index,
             "coefficients": coefficients,
             "metrics": metrics,
@@ -254,8 +278,7 @@ def run_pooled_training_pipeline() -> dict:
     Trains the pooled/global cold-start model across every shop that has
     at least MIN_DAYS_FOR_POOLING days of history. Target is
     booking_ratio (each shop's day normalized against its own average
-    daily bookings), not raw counts, so shops of different sizes combine
-    cleanly.
+    daily bookings).
     """
     try:
         frame = load_pooled_training_data()

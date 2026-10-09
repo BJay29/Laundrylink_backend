@@ -2,44 +2,29 @@
 Weather data access for LaundryLink forecasting.
 
 Uses Open-Meteo — free, no API key required. Two endpoints:
-  - Archive API: real historical weather, used to build TRAINING data
-    (paired with each shop's actual past booking dates).
-  - Forecast API: upcoming weather, used at PREDICTION time for the
-    next N days.
+  - Archive API: real historical weather, used to build TRAINING data.
+  - Forecast API: upcoming weather, used at PREDICTION time.
 
-Both use `precipitation_sum` (total daily rainfall in mm) as the single
-feature — this variable is available under the same name on both
-endpoints, so training and prediction stay consistent (no mismatch
-between "probability" at forecast time vs "actual mm" at training time).
+Both use `precipitation_sum` (total daily rainfall in mm).
 
-UPDATED (Naga City fallback): dati, kapag walang latitude/longitude ang
-shop (Shop.latitude/longitude ay nullable), nagre-return agad ng empty
-DataFrame ang mga function dito — kaya laging rain_mm = 0.0 ang lumalabas
-sa Weather Outlook strip. Ngayon, kapag walang coordinates ang shop,
-gagamitin ang DEFAULT_LATITUDE/DEFAULT_LONGITUDE (Naga City, Camarines
-Sur) para totoong weather pa rin ang makuha.
+Naga City fallback: kapag walang latitude/longitude ang shop, gagamitin
+ang DEFAULT_LATITUDE/DEFAULT_LONGITUDE.
 
-UPDATED (logging): hindi na tahimik na nilalamon ang mga error — may
-warning log na kapag pumalya ang Open-Meteo call, para makita sa Render
-logs kung bakit walang weather data.
+Cache: 30 minuto para sa successful forecast results.
 
-UPDATED (short cache): ang FinancialForecast at Dashboard ay nag-poll
-bawat 60 segundo, kaya may maliit na in-memory cache (30 minuto) para
-hindi paulit-ulit na tumama sa Open-Meteo. Success results lang ang
-kina-cache — hindi kina-cache ang pagkabigo.
+UPDATED (429 fix): dati, hindi kina-cache ang pagkabigo, kaya kapag
+nag-429 (Too Many Requests) ang Open-Meteo, tinatamaan ulit ito sa
+bawat poll (60s) at lalo lang nagtatagal ang limit. Ngayon:
+  - Pagkatapos pumalya, may COOLDOWN (5 minuto) bago sumubok ulit.
+  - Habang pumapalya, ibinabalik ang LUMANG cache (stale) kung meron,
+    para hindi biglang 0.0 ang rain_mm.
 
-UPDATED (recent days sa training data): ang Archive API ay may ilang
-araw na delay — ang pinakabagong mga araw ay `null` ang precipitation_sum.
-Dati, ginagawang 0.0 ang mga null na iyon, kaya ang mga pinakabagong
-booking days ay "tuyo" ang turing sa training kahit umulan. Ngayon,
-ang mga null na araw ay pinupunan muna mula sa Forecast API (past_days,
-hanggang 92 araw pabalik), at saka lang 0.0 ang gagamitin kung wala
-talagang data.
+UPDATED (recent days sa training data): ang mga null na araw sa Archive
+API ay pinupunan muna mula sa Forecast API (past_days), at saka lang
+0.0 kung wala talagang data.
 
-If the external call still fails for any reason, functions here return
-an empty DataFrame rather than raising — callers treat missing weather
-as rain_mm = 0.0 so a network hiccup never breaks the forecast graph
-entirely.
+Kapag pumalya pa rin ang external call, empty DataFrame ang ibinabalik
+(hindi nagra-raise); ang callers ay gumagamit ng rain_mm = 0.0.
 """
 
 from __future__ import annotations
@@ -59,8 +44,7 @@ ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_PAST_DAYS = 92  # limit ng Forecast API para sa past_days
 
-# Fallback location: Naga City, Camarines Sur — ginagamit kapag walang
-# latitude/longitude ang shop sa database.
+# Fallback location: Naga City, Camarines Sur
 DEFAULT_LATITUDE = 13.6192
 DEFAULT_LONGITUDE = 123.1814
 
@@ -69,6 +53,10 @@ MANILA_TZ = timezone(timedelta(hours=8))
 # Cache ng forecast results: {key: (timestamp, DataFrame)}
 _FORECAST_CACHE: Dict[Tuple[float, float, int], Tuple[float, pd.DataFrame]] = {}
 FORECAST_CACHE_TTL_SECONDS = 30 * 60
+
+# Cooldown pagkatapos pumalya ang forecast request: {key: unix_time_hanggang_kailan}
+FORECAST_FAIL_COOLDOWN_SECONDS = 5 * 60
+_FORECAST_FAIL_UNTIL: Dict[Tuple[float, float, int], float] = {}
 
 
 def _empty_frame() -> pd.DataFrame:
@@ -172,7 +160,6 @@ def get_historical_rain_mm(
         response.raise_for_status()
         frame = _parse_daily(response.json(), keep_missing=True)
     except Exception as exc:
-        # Network failure, bad coordinates, etc. — degrade gracefully.
         logger.warning("Open-Meteo archive request failed: %s", exc)
         return _empty_frame()
 
@@ -192,13 +179,22 @@ def get_forecast_rain_mm(
     """
     Upcoming daily rainfall forecast (mm) for a shop's location, used at
     prediction time. Returns columns: booking_date, rain_mm.
+
+    May cache (30 min), cooldown pagkatapos pumalya (5 min), at
+    stale-cache fallback para hindi biglang 0.0 ang rain_mm.
     """
     latitude, longitude = _resolve_coords(latitude, longitude)
 
     cache_key = (round(latitude, 3), round(longitude, 3), days)
+    now = time.time()
+
     cached = _FORECAST_CACHE.get(cache_key)
-    if cached and (time.time() - cached[0]) < FORECAST_CACHE_TTL_SECONDS:
+    if cached and (now - cached[0]) < FORECAST_CACHE_TTL_SECONDS:
         return cached[1].copy()
+
+    # Kamakailan lang pumalya: huwag munang tumama ulit sa Open-Meteo.
+    if now < _FORECAST_FAIL_UNTIL.get(cache_key, 0.0):
+        return cached[1].copy() if cached else _empty_frame()
 
     params = {
         "latitude": latitude,
@@ -212,8 +208,14 @@ def get_forecast_rain_mm(
         response.raise_for_status()
         frame = _parse_daily(response.json())
         if not frame.empty:
-            _FORECAST_CACHE[cache_key] = (time.time(), frame)
+            _FORECAST_CACHE[cache_key] = (now, frame)
+        _FORECAST_FAIL_UNTIL.pop(cache_key, None)
         return frame.copy()
     except Exception as exc:
-        logger.warning("Open-Meteo forecast request failed: %s", exc)
-        return _empty_frame()
+        logger.warning(
+            "Open-Meteo forecast request failed: %s (cooldown %d s)",
+            exc, FORECAST_FAIL_COOLDOWN_SECONDS,
+        )
+        _FORECAST_FAIL_UNTIL[cache_key] = now + FORECAST_FAIL_COOLDOWN_SECONDS
+        # Mas mabuti ang lumang (stale) cache kaysa 0.0 na ulan.
+        return cached[1].copy() if cached else _empty_frame()

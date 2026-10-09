@@ -1,8 +1,8 @@
 {
-    "accuracy_percentage": 58.68,
-    "mean_absolute_error": 0.66,
-    "r2_score": 0.0459,
-    "baseline_mae": 1.01,
+    "accuracy_percentage": 79.06,
+    "mean_absolute_error": 113.1,
+    "r2_score": 0.8577,
+    "baseline_mae": 291.79,
     "beats_baseline": true,
     "validation_days": 5,
     "training_days": 14,
