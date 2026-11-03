@@ -20,15 +20,23 @@ MAX_REVIEW_COMMENT_LENGTH = 300
 TEST_REFERENCE_PREFIX = "TEST-"
 
 # NEW (Secure Payment Verification System) — pangkaraniwang format ng
-# reference number ng mga local payment channel: alphanumeric, walang
-# space, 6-20 characters. Sadyang maluwag ito (hindi eksaktong 13
-# characters lang para sa GCash) dahil iba-ibang klase ng channel ang
-# maaaring tanggapin ng shop (GCash, Maya, bank transfer, atbp.) —
-# ang mas mahigpit na per-channel na format check (hal. eksaktong 13
-# digits) ay ginagawa sa MOBILE APP side bilang UX hint, hindi dito,
-# para hindi ma-block ng backend ang mga totoong legitimate na
-# reference number mula sa ibang channel na hindi pa naisip dito.
+# reference number ng mga local payment channel: alphanumeric, 6-20
+# characters. Sadyang maluwag ito (hindi eksaktong 13 characters lang
+# para sa GCash) dahil iba-ibang klase ng channel ang maaaring tanggapin
+# ng shop (GCash, Maya, bank transfer, atbp.) — ang mas mahigpit na
+# per-channel na format check (hal. eksaktong 13 digits) ay ginagawa sa
+# MOBILE APP side bilang UX hint, hindi dito, para hindi ma-block ng
+# backend ang mga totoong legitimate na reference number mula sa ibang
+# channel na hindi pa naisip dito.
+#
+# UPDATED: ang pattern na ito ay ina-apply PAGKATAPOS tanggalin ang mga
+# espasyo, tuldok, at underscore (see BookingSubmitPaymentProofRequest.
+# validate_reference_number), kaya tinatanggap na ang input na naka-group
+# gaya ng GCash na "1234 567 890123".
 REFERENCE_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9-]{6,20}$")
+
+# Mga karakter na tinatanggal sa reference number bago i-validate/i-save.
+_REFERENCE_SEPARATORS = re.compile(r"[\s._]+")
 
 
 # --- AUTHENTICATION & OWNER SCHEMAS ---
@@ -937,6 +945,13 @@ class BookingSubmitPaymentProofRequest(BaseModel):
     ang mas mahigpit na per-channel na format check, hal. eksaktong 13
     digits para sa GCash, ay ginagawa sa MOBILE APP bilang UX hint
     lang, hindi dito).
+
+    UPDATED (reference number na may espasyo): tinatanggap na ang input
+    na may espasyo, tuldok, o underscore (hal. GCash na
+    "1234 567 890123") — tinatanggal ang mga ito BAGO i-validate at
+    i-save, kaya iisa ang anyo ng reference sa database at tama ang
+    unique check. Pinapanatili ang dash dahil kailangan ito sa "TEST-"
+    prefix ng Sandbox Mode.
     """
     proof_of_payment_url: str
     reference_number: str
@@ -952,7 +967,7 @@ class BookingSubmitPaymentProofRequest(BaseModel):
     @field_validator("reference_number")
     @classmethod
     def validate_reference_number(cls, v):
-        cleaned = v.strip().upper()
+        cleaned = _REFERENCE_SEPARATORS.sub("", (v or "")).upper()
         if not cleaned:
             raise ValueError("reference_number cannot be empty.")
         if not REFERENCE_NUMBER_PATTERN.match(cleaned):
