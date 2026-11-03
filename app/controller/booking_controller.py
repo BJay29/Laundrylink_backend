@@ -1513,7 +1513,9 @@ async def submit_payment_proof(
     # butas sa production.
     is_sandbox_submission = (
         _is_development_env()
-        and TEST_REFERENCE_PREFIX in proof_data.reference_number
+        # Hindi na mahalaga kung may dash o wala ("TEST-0001" o "TEST0001"
+        # o "DP-TEST-20261103-0001" o "DPTEST202611030001").
+        and TEST_REFERENCE_PREFIX.rstrip("-") in proof_data.reference_number.replace("-", "")
     )
 
     if is_sandbox_submission:
@@ -1530,17 +1532,39 @@ async def submit_payment_proof(
         )
     else:
         # --- 3. Live Production OCR verification ---
+        # UPDATED (lenient mode): HINDI na hinaharang ng OCR ang
+        # pagsumite. Dati, kapag hindi nahanap ng OCR ang reference sa
+        # larawan (malabo, may watermark, iba ang layout, o nag-error
+        # ang OCR service), ni-reject agad ang customer ng "Fraud Alert"
+        # — kahit totoong reference at totoong resibo. Ngayon:
+        #   - nahanap ng OCR  -> is_verified_by_ocr = True
+        #   - hindi nahanap / nag-error ang OCR -> tinatanggap pa rin,
+        #     pero is_verified_by_ocr = False, kaya makikita ng staff na
+        #     kailangan nilang i-check nang mano-mano bago i-approve.
+        # Ang staff pa rin ang huling nagpapasya (Approve/Reject).
+        #
+        # Para ibalik ang dating mahigpit na ugali, itakda ang env var
+        # OCR_STRICT_MODE=true sa Render.
+        strict_mode = os.getenv("OCR_STRICT_MODE", "false").strip().lower() == "true"
+
+        ocr_result = None
+        ocr_error = None
         try:
             ocr_result = await ocr_service.verify_payment_receipt(
                 proof_data.proof_of_payment_url, proof_data.reference_number
             )
         except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Could not verify the receipt right now. Please try again shortly. ({str(e)})",
-            )
+            ocr_error = str(e)
+            print(f"[OCR] verification unavailable: {ocr_error}")
 
-        if not ocr_result["matched"]:
+        matched = bool(ocr_result and ocr_result.get("matched"))
+
+        if strict_mode and not matched:
+            if ocr_error is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Could not verify the receipt right now. Please try again shortly. ({ocr_error})",
+                )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
@@ -1549,8 +1573,15 @@ async def submit_payment_proof(
                 ),
             )
 
-        booking.is_verified_by_ocr = True
-        booking.extracted_amount = ocr_result["extracted_amount"]
+        booking.is_verified_by_ocr = matched
+        booking.extracted_amount = ocr_result.get("extracted_amount") if ocr_result else None
+
+        if matched:
+            verification_note = "OCR-verified"
+        elif ocr_error is not None:
+            verification_note = "OCR unavailable - needs manual check"
+        else:
+            verification_note = "reference NOT found by OCR - needs manual check"
 
         log_activity(
             db, booking.shop_id,
@@ -1559,7 +1590,7 @@ async def submit_payment_proof(
             description=(
                 f"Customer submitted payment proof for their booking - "
                 f"{booking.service_type} (ref: {proof_data.reference_number}, "
-                f"OCR-verified)"
+                f"{verification_note})"
             )
         )
 
