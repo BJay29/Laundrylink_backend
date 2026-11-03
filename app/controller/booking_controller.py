@@ -1457,10 +1457,11 @@ async def submit_payment_proof(
          error message than a raw IntegrityError from the DB's partial
          unique index; see SQL migration for that DB-level guard).
       2. Sandbox/Testing Mode: kapag APP_ENV == "development" AT
-         nagsisimula ang reference_number sa "TEST-", lalaktawan ang
-         OCR validation, awtomatikong ituturing na "verified" ito, at
-         gagawa ng dummy extracted_amount (= booking.final_price) para
-         sa pagsubok ng buong flow nang walang gastos sa totoong OCR API.
+         naglalaman ang reference_number ng "TEST-" (hal. "TEST-0001"
+         o "DP-TEST-20261103-0001"), lalaktawan ang OCR validation,
+         awtomatikong ituturing na "verified" ito, at gagawa ng dummy
+         extracted_amount (= booking.final_price) para sa pagsubok ng
+         buong flow nang walang gastos sa totoong OCR API.
       3. Live Production OCR: kung hindi sandbox, tatawagin ang
          OCR.space (see app/services/ocr_service.py) — dapat lumabas
          ang reference_number sa loob ng extracted text mula sa
@@ -1506,9 +1507,13 @@ async def submit_payment_proof(
         )
 
     # --- 2. Sandbox/Testing Mode bypass ---
+    # UPDATED: `in` na sa halip na `startswith`, para tanggapin din ang
+    # mga test reference na may prefix (hal. "DP-TEST-20261103-0001").
+    # Gumagana lang ito kapag APP_ENV == "development", kaya hindi ito
+    # butas sa production.
     is_sandbox_submission = (
         _is_development_env()
-        and proof_data.reference_number.startswith(TEST_REFERENCE_PREFIX)
+        and TEST_REFERENCE_PREFIX in proof_data.reference_number
     )
 
     if is_sandbox_submission:

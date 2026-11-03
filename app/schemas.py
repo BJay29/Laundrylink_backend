@@ -20,7 +20,7 @@ MAX_REVIEW_COMMENT_LENGTH = 300
 TEST_REFERENCE_PREFIX = "TEST-"
 
 # NEW (Secure Payment Verification System) — pangkaraniwang format ng
-# reference number ng mga local payment channel: alphanumeric, 6-20
+# reference number ng mga local payment channel: alphanumeric, 6-30
 # characters. Sadyang maluwag ito (hindi eksaktong 13 characters lang
 # para sa GCash) dahil iba-ibang klase ng channel ang maaaring tanggapin
 # ng shop (GCash, Maya, bank transfer, atbp.) — ang mas mahigpit na
@@ -33,7 +33,7 @@ TEST_REFERENCE_PREFIX = "TEST-"
 # espasyo, tuldok, at underscore (see BookingSubmitPaymentProofRequest.
 # validate_reference_number), kaya tinatanggap na ang input na naka-group
 # gaya ng GCash na "1234 567 890123".
-REFERENCE_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9-]{6,20}$")
+REFERENCE_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9-]{6,30}$")
 
 # Mga karakter na tinatanggal sa reference number bago i-validate/i-save.
 _REFERENCE_SEPARATORS = re.compile(r"[\s._]+")
@@ -941,7 +941,7 @@ class BookingSubmitPaymentProofRequest(BaseModel):
          mula sa resibo mismo, kundi ma-reject ang submission (400,
          "Fraud Alert").
 
-    Format: alphanumeric + dash, 6-20 characters (maluwag na pattern —
+    Format: alphanumeric + dash, 6-30 characters (maluwag na pattern —
     ang mas mahigpit na per-channel na format check, hal. eksaktong 13
     digits para sa GCash, ay ginagawa sa MOBILE APP bilang UX hint
     lang, hindi dito).
@@ -972,7 +972,7 @@ class BookingSubmitPaymentProofRequest(BaseModel):
             raise ValueError("reference_number cannot be empty.")
         if not REFERENCE_NUMBER_PATTERN.match(cleaned):
             raise ValueError(
-                "reference_number must be 6-20 characters, letters/numbers/dashes only."
+                "reference_number must be 6-30 characters, letters/numbers/dashes only."
             )
         return cleaned
 
