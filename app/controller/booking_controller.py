@@ -18,6 +18,7 @@ from app.services.ws_manager import (
 from app.controller import inventory_controller
 from app.controller import notification_controller
 from app.controller.activity_controller import log_activity
+from app.controller.blocked_date_controller import assert_date_not_blocked
 from app import models
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
@@ -2135,6 +2136,15 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             detail="This shop is currently closed and cannot accept new bookings. Please try again once the shop is open."
         )
 
+    # NEW (Fully Booked dates) — tanggihan kapag fully booked ang petsa
+    # ng pickup (delivery) o ng preferred drop-off (dropoff). Optional
+    # ang drop-off date: kapag None, walang susuriin. Ang mga bookings
+    # na pumasok na dati ay hindi apektado.
+    if booking_data.fulfillment_mode == "delivery":
+        assert_date_not_blocked(db, booking_data.shop_id, booking_data.pickup_datetime)
+    else:
+        assert_date_not_blocked(db, booking_data.shop_id, booking_data.dropoff_datetime)
+
     service_type_record = (
         db.query(ServiceType)
         .filter(
@@ -2663,6 +2673,15 @@ async def update_customer_booking(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A pickup date and time is required for delivery bookings."
         )
+
+    # NEW (Fully Booked dates) — tanggihan lang kung BAGONG petsa ang
+    # ipinadala at fully booked ito. Kung hindi binago ang petsa (hal.
+    # special instructions lang ang ine-edit), huwag i-block, para hindi
+    # ma-stuck ang customer sa booking na nauna nang pumasok.
+    for date_field in ("pickup_datetime", "dropoff_datetime"):
+        if date_field in changes and changes[date_field] is not None:
+            if changes[date_field] != getattr(booking, date_field):
+                assert_date_not_blocked(db, booking.shop_id, changes[date_field])
 
     # --- Payment method validation ---
     if "payment_method" in changes:

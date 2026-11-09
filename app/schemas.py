@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, date
 import re
 import uuid as uuid_lib
 
@@ -37,6 +37,52 @@ REFERENCE_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9-]{6,30}$")
 
 # Mga karakter na tinatanggal sa reference number bago i-validate/i-save.
 _REFERENCE_SEPARATORS = re.compile(r"[\s._]+")
+
+# NEW (Payment Settings) — mga tinatanggap na Payment Channel ng shop.
+ALLOWED_PAYMENT_CHANNELS = {"GCash", "Maya", "Bank Transfer", "Others"}
+
+# Account/mobile number: digits, may optional na "+" sa umpisa, 6-25 chars
+# pagkatapos tanggalin ang espasyo/dash.
+_ACCOUNT_NUMBER_PATTERN = re.compile(r"^\+?\d{6,25}$")
+
+
+def _clean_payment_channel(v):
+    if v is None:
+        return None
+    v = v.strip()
+    if v == "":
+        return None
+    # case-insensitive match pabalik sa canonical na spelling
+    for ch in ALLOWED_PAYMENT_CHANNELS:
+        if ch.lower() == v.lower():
+            return ch
+    raise ValueError(
+        "payment_channel must be one of: GCash, Maya, Bank Transfer, Others."
+    )
+
+
+def _clean_payment_account_name(v):
+    if v is None:
+        return None
+    v = re.sub(r"\s+", " ", v).strip()
+    if v == "":
+        return None
+    if len(v) > 100:
+        raise ValueError("payment_account_name must be at most 100 characters.")
+    return v
+
+
+def _clean_payment_account_number(v):
+    if v is None:
+        return None
+    v = re.sub(r"[\s-]+", "", v)
+    if v == "":
+        return None
+    if not _ACCOUNT_NUMBER_PATTERN.match(v):
+        raise ValueError(
+            "payment_account_number must contain only digits (6-25 digits)."
+        )
+    return v
 
 
 # --- AUTHENTICATION & OWNER SCHEMAS ---
@@ -1494,6 +1540,60 @@ class ShopReviewsResponse(BaseModel):
     summary: ShopReviewSummary
     reviews: List[ShopReviewItem] = []
 
+# --- BLOCKED DATES ("Fully Booked") SCHEMAS ---
+
+MAX_BLOCKED_DATE_REASON_LENGTH = 200
+
+
+class BlockedDateCreate(BaseModel):
+    """
+    Schema para sa pagmamarka ng petsa bilang "fully booked" (web —
+    owner/staff). `blocked_date` ay kalendaryong petsa (YYYY-MM-DD) sa
+    oras ng Pilipinas. Ang `reason` ay opsyonal, hanggang 200 chars.
+    Ang tseke na "hindi pwede ang nakaraang petsa" at "may duplicate na"
+    ay ginagawa sa blocked_date_controller.add_blocked_date().
+    """
+    blocked_date: date
+    reason: Optional[str] = None
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, v):
+        if v is None:
+            return None
+        cleaned = re.sub(r"\s+", " ", v).strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > MAX_BLOCKED_DATE_REASON_LENGTH:
+            raise ValueError(
+                f"reason must be {MAX_BLOCKED_DATE_REASON_LENGTH} characters or fewer."
+            )
+        return cleaned
+
+
+class BlockedDateResponse(BaseModel):
+    """Isang fully-booked na petsa — owner/staff view (web)."""
+    id: int
+    shop_id: int
+    blocked_date: date
+    reason: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BlockedDatePublic(BaseModel):
+    """
+    Safe, public view para sa customer (mobile app): petsa + opsyonal na
+    dahilan lang — walang created_by o internal id.
+    """
+    blocked_date: date
+    reason: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # --- DASHBOARD & ANALYTICS SCHEMAS ---
 
 class DashboardStats(BaseModel):
@@ -1625,6 +1725,11 @@ class ShopDetailResponse(BaseModel):
     # schemas.py na pumipigil sa pagsisimula ng buong backend.
     qr_code_url: Optional[str] = None
 
+    # NEW (Payment Settings) — text fallback ng QR.
+    payment_channel: Optional[str] = None
+    payment_account_name: Optional[str] = None
+    payment_account_number: Optional[str] = None
+
     # FIXED (Online Payment toggle bug) — see docstring sa itaas.
     accepts_cash: bool = True
     accepts_cod: bool = False
@@ -1653,7 +1758,12 @@ class ShopProfileUpdate(BaseModel):
 
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None
-    qr_code_url: Optional[str] = None 
+    qr_code_url: Optional[str] = None
+
+    # NEW (Payment Settings) — text fallback ng QR.
+    payment_channel: Optional[str] = None
+    payment_account_name: Optional[str] = None
+    payment_account_number: Optional[str] = None
 
     # FIXED (Payment Methods feature): dati WALA ang tatlong field na
     # ito, kaya tahimik na inaalis ng Pydantic ang accepts_* na
@@ -1663,6 +1773,21 @@ class ShopProfileUpdate(BaseModel):
     accepts_cash: Optional[bool] = None
     accepts_cod: Optional[bool] = None
     accepts_online: Optional[bool] = None
+
+    @field_validator("payment_channel")
+    @classmethod
+    def validate_payment_channel(cls, v):
+        return _clean_payment_channel(v)
+
+    @field_validator("payment_account_name")
+    @classmethod
+    def validate_payment_account_name(cls, v):
+        return _clean_payment_account_name(v)
+
+    @field_validator("payment_account_number")
+    @classmethod
+    def validate_payment_account_number(cls, v):
+        return _clean_payment_account_number(v)
 
     @field_validator("delivery_fee")
     @classmethod
@@ -1698,6 +1823,12 @@ class ShopProfileResponse(BaseModel):
 
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None
+    qr_code_url: Optional[str] = None
+
+    # NEW (Payment Settings) — text fallback ng QR.
+    payment_channel: Optional[str] = None
+    payment_account_name: Optional[str] = None
+    payment_account_number: Optional[str] = None
 
     # FIXED (Payment Methods feature): dati WALA ang tatlong field na
     # ito, kaya hindi bumabalik sa frontend ang naka-save na payment

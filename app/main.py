@@ -19,6 +19,7 @@ from app.routes import (
     notification_routes, address_routes,
     webhook_routes,  # NEW — Supabase Auth webhook sync endpoint
     review_routes,   # NEW — Rating after order (POST /reviews/)
+    blocked_date_routes,  # NEW — "Fully Booked" dates (shop marks, customer can't pick)
 )
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
@@ -157,9 +158,10 @@ async def lifespan(app: FastAPI):
     
     try:
         # Syncing SQLAlchemy models with the database schema
-        # (kasama na ang bagong "reviews" table para sa Rating feature —
-        # bagong table ito, kaya awtomatikong gagawin dito; walang
-        # kailangang ALTER TABLE.)
+        # (kasama na ang bagong "reviews" table para sa Rating feature
+        # at ang bagong "blocked_dates" table para sa Fully Booked
+        # feature — bagong tables ito, kaya awtomatikong gagawin dito;
+        # walang kailangang ALTER TABLE.)
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Schema Synchronization: COMPLETE")
         
@@ -301,6 +303,11 @@ app.include_router(webhook_routes.router)
 # ng rating pagkatapos maging "Claimed" ang booking).
 app.include_router(review_routes.router)
 
+# NEW (Fully Booked dates) — GET/POST/DELETE /blocked-dates/ para sa
+# shop (owner/staff), at GET /blocked-dates/shop/{shop_id} para sa
+# customer sa mobile app.
+app.include_router(blocked_date_routes.router)
+
 # --- ROOT HEALTH CHECK ---
 
 @app.get("/")
@@ -312,7 +319,7 @@ def read_root():
         "modules_active": [
             "Auth", "CustomerAuth", "Bookings", "Machines", "Settings",
             "Analytics", "Inventory", "Activity", "Shops", "Notifications",
-            "Addresses", "AddOns", "PromoCodes", "Reviews",
+            "Addresses", "AddOns", "PromoCodes", "Reviews", "BlockedDates",
             "SupabaseAuthWebhook",  # NEW
         ]
     }

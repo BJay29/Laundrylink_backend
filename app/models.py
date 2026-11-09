@@ -1,5 +1,8 @@
 from app.database import Base
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Numeric, CheckConstraint
+from sqlalchemy import (
+    Column, Integer, String, Float, Boolean, DateTime, Date, ForeignKey,
+    Numeric, CheckConstraint, UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone, timedelta
 
@@ -41,6 +44,13 @@ class Shop(Base):
     paymaya_qr_url = Column(String, nullable=True)
     qr_code_url = Column(String, nullable=True)
 
+    # NEW (Payment Settings): text fallback para sa customer kapag hindi
+    # ma-scan / hindi mag-load ang QR image. Lahat nullable para hindi
+    # masira ang mga existing na shop.
+    payment_channel = Column(String(30), nullable=True)         # GCash | Maya | Bank Transfer | Others
+    payment_account_name = Column(String(100), nullable=True)   # Account / Merchant name
+    payment_account_number = Column(String(30), nullable=True)  # Mobile / account number
+
     # (Payment Methods feature) — anong payment methods ang tinatanggap
     # ng shop. Kinokontrol ng "Payment Methods" section sa Optimization
     # Settings (accepts_cash / accepts_cod / accepts_online).
@@ -76,6 +86,10 @@ class Shop(Base):
     # i-sync kapag may bagong review).
     reviews = relationship("Review", back_populates="shop", cascade="all, delete-orphan")
 
+    # NEW (Fully Booked dates) — mga petsang minarkahan ng shop na
+    # fully booked na (see BlockedDate sa dulo ng file).
+    blocked_dates = relationship("BlockedDate", back_populates="shop", cascade="all, delete-orphan")
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -90,6 +104,9 @@ class Shop(Base):
             "gcash_qr_url": self.gcash_qr_url,
             "paymaya_qr_url": self.paymaya_qr_url,
             "qr_code_url": self.qr_code_url,
+            "payment_channel": self.payment_channel,
+            "payment_account_name": self.payment_account_name,
+            "payment_account_number": self.payment_account_number,
             "accepts_cash": self.accepts_cash,
             "accepts_cod": self.accepts_cod,
             "accepts_online": self.accepts_online,
@@ -1191,5 +1208,49 @@ class Review(Base):
             "shop_id": self.shop_id,
             "rating": self.rating,
             "comment": self.comment,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class BlockedDate(Base):
+    """
+    NEW (Fully Booked dates) — isang petsang minarkahan ng shop na
+    "fully booked" na. Hindi na makakapili ng petsang ito ang customer
+    sa mobile (booking form at edit booking), at tinatanggihan din ito
+    ng backend (see booking_controller + blocked_date_controller).
+
+    - `blocked_date` ay isang kalendaryong petsa (walang oras) sa oras
+      ng Pilipinas (Asia/Manila) — plain DATE column, hindi timestamp,
+      kaya walang timezone na kailangang intindihin sa database mismo.
+    - ISANG row lang kada (shop, petsa): may UNIQUE constraint.
+    - `reason` ay opsyonal (hal. "Holiday rush"), hanggang 200 chars.
+    - `created_by` ay pangalan o email ng nag-mark, para sa pagsubaybay.
+
+    Walang kailangang ALTER TABLE — bagong table ito, kaya gagawin
+    awtomatiko ng models.Base.metadata.create_all() sa startup.
+    """
+    __tablename__ = "blocked_dates"
+    __table_args__ = (
+        UniqueConstraint("shop_id", "blocked_date", name="uq_blocked_dates_shop_date"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    shop_id = Column(Integer, ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    blocked_date = Column(Date, nullable=False, index=True)
+    reason = Column(String(200), nullable=True)
+    created_by = Column(String, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    shop = relationship("Shop", back_populates="blocked_dates")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "shop_id": self.shop_id,
+            "blocked_date": self.blocked_date.isoformat() if self.blocked_date else None,
+            "reason": self.reason,
+            "created_by": self.created_by,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
