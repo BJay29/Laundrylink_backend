@@ -2822,7 +2822,7 @@ async def request_delivery(
     booking = (
         db.query(Booking)
         .filter(Booking.id == booking_id, Booking.customer_id == customer.id)
-        .with_for_update()
+        .with_for_update(of=Booking)
         .first()
     )
     if not booking:
