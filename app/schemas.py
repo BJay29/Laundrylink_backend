@@ -1451,6 +1451,31 @@ class CustomerBookingUpdate(BaseModel):
         return v
 
 
+class DeliveryRequestInput(BaseModel):
+    """
+    NEW (Switch to Delivery) — ipinapadala ng customer para gawing
+    "delivery" ang isang drop-off booking na nasa shop na ang laundry
+    (hal. tapos na ang laba at gusto na lang nilang ipahatid).
+
+    - address_id: REQUIRED, isa sa mga saved Address ng customer.
+    - delivery_datetime: OPTIONAL na preferred na petsa/oras ng
+      hatid. Chine-check laban sa Fully Booked dates ng shop.
+    - delivery_window: tinatanggap pero hindi pa naka-save (walang
+      column pa); nakasama na para hindi na magbago ang API kapag
+      nagdagdag ng column.
+    """
+    address_id: int
+    delivery_datetime: Optional[datetime] = None
+    delivery_window: Optional[str] = None
+
+    @field_validator("delivery_window")
+    @classmethod
+    def validate_delivery_window(cls, v):
+        if v is not None and v not in ALLOWED_TIME_WINDOWS:
+            raise ValueError(f"time window must be one of: {', '.join(sorted(ALLOWED_TIME_WINDOWS))}")
+        return v
+
+
 class BookingDecisionResponse(BaseModel):
     """Simple response para sa accept/decline endpoints."""
     message: str

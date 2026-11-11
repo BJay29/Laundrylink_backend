@@ -8,7 +8,7 @@ from app.schemas import (
     PaymentStatusUpdate, MachineAssignmentInput, MoveLoadToDryerInput,
     PaymentRejectRequest, BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
     RiderAssignmentInput, PromoPreviewRequest, PromoPreviewResponse,
-    PaymentAuditLogResponse,
+    PaymentAuditLogResponse, DeliveryRequestInput,
 )
 from app.controller import booking_controller
 from app import models
@@ -444,6 +444,29 @@ async def update_my_booking(
     """
     return await booking_controller.update_customer_booking(
         db, booking_id, current_customer, update_data
+    )
+
+
+@router.post("/customer/{booking_id}/request-delivery", response_model=BookingResponse)
+async def request_delivery(
+    booking_id: int,
+    delivery_data: DeliveryRequestInput,
+    current_customer: models.Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db)
+):
+    """
+    NEW (Switch to Delivery) — customer gawing "delivery" ang sarili
+    niyang drop-off booking habang Pending / In Progress / Ready pa
+    (hal. tapos na ang laba, gusto nang ipahatid). One-way. Idinaragdag
+    ang delivery fee ng shop, sine-save ang address snapshot, at
+    nagpapadala ng live 'booking_switched_to_delivery' event sa shop
+    para makapag-assign sila ng rider.
+
+    NOTE: POST ito kaya hindi ito natatamaan ng generic PATCH
+    '/{booking_id}' sa ibaba.
+    """
+    return await booking_controller.request_delivery(
+        db, booking_id, current_customer, delivery_data
     )
 
 

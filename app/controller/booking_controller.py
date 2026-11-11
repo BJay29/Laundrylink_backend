@@ -5,7 +5,7 @@ from app.schemas import (
     BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
     MachineAssignmentInput, MoveLoadToDryerInput, PaymentRejectRequest,
     BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
-    RiderAssignmentInput, CustomerBookingUpdate, TEST_REFERENCE_PREFIX,
+    RiderAssignmentInput, CustomerBookingUpdate, DeliveryRequestInput, TEST_REFERENCE_PREFIX,
 )
 from app.services.prediction_service import PredictionService
 from app.services import ocr_service
@@ -2786,4 +2786,177 @@ async def update_customer_booking(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating booking: {str(e)}"
+        )
+
+
+# Mga status kung saan puwede pang gawing delivery ang drop-off
+# booking: nasa shop na ang laundry at tapos na ang pricing. Hindi
+# kasama ang Awaiting Approval/Weighing/Payment (hindi pa pinal ang
+# presyo/bayad) at Claimed/Cancelled/Declined (tapos na).
+SWITCHABLE_TO_DELIVERY_STATUSES = ("Pending", "In Progress", "Ready")
+
+
+async def request_delivery(
+    db: Session,
+    booking_id: int,
+    customer: models.Customer,
+    data: DeliveryRequestInput,
+):
+    """
+    NEW (Switch to Delivery) — ginagawang "delivery" ng CUSTOMER ang
+    sarili niyang drop-off booking pagkatapos nitong ma-accept at ma-price.
+
+    Mga patakaran:
+      - Drop-off lang; one-way (walang balik sa drop-off).
+      - Status: Pending / In Progress / Ready lang.
+      - Kailangang may delivery ang shop (has_delivery).
+      - Hindi puwede habang pending_verification ang bayad (nasa
+        review pa ang halagang binayaran).
+      - Idinaragdag ang shop.delivery_fee sa total_price/final_price
+        kung HINDI pa bayad. Kung bayad na, hindi gagalawin ang
+        total — ang fee ay sisingilin nang hiwalay (cash sa rider).
+      - cash -> cod kung hindi pa bayad.
+      - Walang pickup_datetime: nasa shop na ang laundry.
+      - Chine-check ang Fully Booked dates kung may delivery_datetime.
+    """
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id, Booking.customer_id == customer.id)
+        .with_for_update()
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.fulfillment_mode == "delivery":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This booking is already set for delivery."
+        )
+
+    if booking.status not in SWITCHABLE_TO_DELIVERY_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Delivery can't be requested for a booking with status "
+                f"'{booking.status}'. It can be changed while the laundry is "
+                "Pending, In Progress, or Ready. Please contact the shop."
+            )
+        )
+
+    if booking.payment_status == "pending_verification":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Your payment is still being verified. Please try again once the shop confirms it."
+        )
+
+    shop = db.query(models.Shop).filter(models.Shop.id == booking.shop_id).first()
+    if not shop or not shop.has_delivery:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This shop does not offer delivery."
+        )
+
+    address = (
+        db.query(Address)
+        .filter(Address.id == data.address_id, Address.customer_id == customer.id)
+        .first()
+    )
+    if not address:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Selected delivery address was not found in your saved addresses."
+        )
+
+    if data.delivery_datetime is not None:
+        assert_date_not_blocked(db, booking.shop_id, data.delivery_datetime)
+
+    delivery_fee = round(shop.delivery_fee or 0.0, 2)
+    is_paid = booking.payment_status == "paid"
+
+    booking.fulfillment_mode = "delivery"
+    booking.delivery_address_id = address.id
+    booking.delivery_address_line = address.address_line
+    booking.delivery_latitude = address.latitude
+    booking.delivery_longitude = address.longitude
+    booking.delivery_datetime = data.delivery_datetime
+    booking.delivery_fee_charged = delivery_fee
+
+    fee_note = ""
+    if delivery_fee > 0:
+        if is_paid:
+            fee_note = f" Delivery fee of ₱{delivery_fee:,.2f} will be collected by the rider."
+        else:
+            booking.total_price = round((booking.total_price or 0.0) + delivery_fee, 2)
+            if booking.final_price is not None:
+                booking.final_price = round(booking.final_price + delivery_fee, 2)
+
+    if not is_paid and booking.payment_method == "cash":
+        booking.payment_method = "cod"
+
+    try:
+        log_activity(
+            db, booking.shop_id,
+            actor_name=customer.full_name,
+            actor_role="customer",
+            description=(
+                f"Customer switched booking #{booking.id} ({booking.service_type}) "
+                f"from drop-off to delivery - {address.address_line}"
+            )
+        )
+
+        notification_controller.create_notification(
+            db,
+            customer_id=customer.id,
+            notif_type="booking_switched_to_delivery",
+            title="Delivery Requested",
+            message=(
+                f"Your {booking.service_type} order at {booking.shop_name or 'the shop'} "
+                f"will be delivered to {address.address_line}.{fee_note}"
+            ),
+            booking_id=booking.id
+        )
+
+        db.commit()
+        db.refresh(booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+
+        # Live push sa shop dashboard — kailangang mag-assign ng rider.
+        await manager.broadcast(booking.shop_id, {
+            "type": "booking_switched_to_delivery",
+            "booking_id": reloaded.id,
+            "customer_name": reloaded.customer_name,
+            "service_type": reloaded.service_type,
+            "status": reloaded.status,
+            "delivery_address_line": reloaded.delivery_address_line,
+        })
+
+        await customer_manager.send_to_customer(customer.id, {
+            "type": EVENT_BOOKING_UPDATED,
+            "booking_id": reloaded.id,
+            "status": reloaded.status,
+            "fulfillment_mode": reloaded.fulfillment_mode,
+        })
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error requesting delivery: {str(e)}"
         )
