@@ -970,9 +970,21 @@ def _get_status_notification_content(new_status: str, booking: Booking):
             f"Your {booking.service_type} booking at {shop_label} is now in progress."
         ),
         "Ready": (
-            "status_ready",
-            "Ready for Pickup",
-            f"Your laundry at {shop_label} is ready for pickup!"
+            ("status_ready", "Ready for Delivery",
+             f"Your laundry at {shop_label} is ready and will be delivered to you soon.")
+            if booking.fulfillment_mode == "delivery"
+            else ("status_ready", "Ready for Pickup",
+                  f"Your laundry at {shop_label} is ready for pickup!")
+        ),
+        "Out for Delivery": (
+            "status_out_for_delivery",
+            "Laundry On The Way",
+            (
+                f"{booking.delivery_rider_name} ({booking.delivery_rider_contact}) is on the way "
+                f"to deliver your clean laundry from {shop_label}."
+                if booking.delivery_rider_name
+                else f"Your clean laundry from {shop_label} is on the way."
+            )
         ),
         "Claimed": (
             "status_claimed",
@@ -1024,6 +1036,25 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
             detail="Transaction record not found."
         )
 
+    # NEW (Out for Delivery) — delivery bookings lang, galing sa Ready,
+    # at kailangang may naka-assign nang rider.
+    if new_status == "Out for Delivery":
+        if booking.fulfillment_mode != "delivery":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only delivery bookings can be set to Out for Delivery."
+            )
+        if booking.status != "Ready":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The laundry must be Ready before it can go out for delivery."
+            )
+        if not booking.delivery_rider_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Assign a delivery rider first."
+            )
+
     old_status = booking.status
     booking.status = new_status
 
@@ -1033,6 +1064,8 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
     # transition, same pattern as started_at elsewhere in this file.
     if new_status == "Ready" and not booking.ready_at:
         booking.ready_at = now
+    if new_status == "Out for Delivery" and not booking.out_for_delivery_at:
+        booking.out_for_delivery_at = now
     if new_status == "Claimed" and not booking.completed_at:
         booking.completed_at = now
 
@@ -1122,6 +1155,7 @@ async def update_booking_status(db: Session, booking_id: int, new_status: str, c
                 "status": reloaded.status,
                 "payment_status": reloaded.payment_status,
                 "ready_at": reloaded.ready_at.isoformat() if reloaded.ready_at else None,
+                "out_for_delivery_at": reloaded.out_for_delivery_at.isoformat() if reloaded.out_for_delivery_at else None,
                 "completed_at": reloaded.completed_at.isoformat() if reloaded.completed_at else None,
             })
 
@@ -1952,13 +1986,13 @@ async def assign_delivery_rider(
             detail="Rider assignment only applies to delivery bookings, not drop-off."
         )
 
-    assignable_statuses = ["In Progress", "Ready"]
+    assignable_statuses = ["In Progress", "Ready", "Out for Delivery"]
     if booking.status not in assignable_statuses:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"Cannot assign a delivery rider to a booking with status "
-                f"'{booking.status}'. The laundry must be In Progress or Ready first."
+                f"'{booking.status}'. The laundry must be In Progress, Ready, or Out for Delivery."
             )
         )
 
@@ -1982,10 +2016,18 @@ async def assign_delivery_rider(
                 db,
                 customer_id=booking.customer_id,
                 notif_type="delivery_rider_assigned",
-                title="Laundry On The Way",
+                title="Delivery Rider Assigned",
                 message=(
-                    f"{rider_data.rider_name} ({rider_data.rider_contact}) is on the way "
-                    f"to deliver your clean laundry from {booking.shop_name or 'the shop'}."
+                    f"{rider_data.rider_name} ({rider_data.rider_contact}) will deliver your "
+                    f"laundry from {booking.shop_name or 'the shop'}"
+                    + (
+                        ". They're on the way now."
+                        if booking.status == "Out for Delivery"
+                        else (
+                            " shortly." if booking.status == "Ready"
+                            else " once it's ready. We'll let you know when it's done."
+                        )
+                    )
                 ),
                 booking_id=booking.id
             )
@@ -2884,6 +2926,7 @@ async def request_delivery(
     booking.delivery_longitude = address.longitude
     booking.delivery_datetime = data.delivery_datetime
     booking.delivery_fee_charged = delivery_fee
+    booking.switched_to_delivery_at = datetime.now(timezone.utc)
 
     fee_note = ""
     if delivery_fee > 0:

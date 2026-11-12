@@ -1227,6 +1227,8 @@ class BookingResponse(BaseModel):
 
     delivery_datetime: Optional[datetime] = None
     delivery_fee_charged: Optional[float] = 0.0
+    switched_to_delivery_at: Optional[datetime] = None
+    out_for_delivery_at: Optional[datetime] = None
     promo_code: Optional[str] = None
     discount_amount: Optional[float] = 0.0
 

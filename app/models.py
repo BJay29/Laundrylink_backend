@@ -663,6 +663,14 @@ class Booking(Base):
 
     delivery_fee_charged = Column(Float, default=0.0)
 
+    # NEW (Switch to Delivery) — kailan ginawang "delivery" ng customer ang
+    # dating drop-off booking. NULL = orihinal na delivery (o drop-off pa rin).
+    switched_to_delivery_at = Column(DateTime(timezone=True), nullable=True)
+
+    # NEW (Out for Delivery) — kailan umalis ang rider dala ang laundry
+    # (status "Out for Delivery"). Delivery bookings lang.
+    out_for_delivery_at = Column(DateTime(timezone=True), nullable=True)
+
     promo_code = Column(String, nullable=True)
     discount_amount = Column(Float, default=0.0)
 
@@ -899,6 +907,8 @@ class Booking(Base):
             "pickup_window": self.pickup_window,
             "delivery_datetime": self.delivery_datetime.isoformat() if self.delivery_datetime else None,
             "delivery_fee_charged": self.delivery_fee_charged,
+            "switched_to_delivery_at": self.switched_to_delivery_at.isoformat() if self.switched_to_delivery_at else None,
+            "out_for_delivery_at": self.out_for_delivery_at.isoformat() if self.out_for_delivery_at else None,
             "promo_code": self.promo_code,
             "discount_amount": self.discount_amount,
             "decline_reason": self.decline_reason,
