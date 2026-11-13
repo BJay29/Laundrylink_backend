@@ -5,10 +5,12 @@ from app.schemas import (
     BookingCreate, BookingAssignMachine, CustomerBookingCreate, PaymentStatusUpdate,
     MachineAssignmentInput, MoveLoadToDryerInput, PaymentRejectRequest,
     BookingFinalizePricingRequest, BookingSubmitPaymentProofRequest,
-    RiderAssignmentInput, CustomerBookingUpdate, DeliveryRequestInput, TEST_REFERENCE_PREFIX,
+    RiderAssignmentInput, CustomerBookingUpdate, DeliveryRequestInput, DropoffRequestInput,
+    TEST_REFERENCE_PREFIX,
 )
 from app.services.prediction_service import PredictionService
 from app.services import ocr_service
+from app.services.shop_status import compute_shop_status
 from app.services.ws_manager import (
     manager,
     EVENT_NEW_BOOKING_REQUEST,
@@ -2172,10 +2174,13 @@ async def create_customer_booking(db: Session, customer: models.Customer, bookin
             detail="Shop not found."
         )
 
-    if not shop.is_online:
+    # UPDATED (Shop Status) — manual toggle + operating hours + terminal
+    # heartbeat (may grace period), hindi na lang ang raw is_online.
+    shop_status = compute_shop_status(shop)
+    if not shop_status.is_open:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This shop is currently closed and cannot accept new bookings. Please try again once the shop is open."
+            detail=shop_status.message or "This shop is currently closed and cannot accept new bookings."
         )
 
     # NEW (Fully Booked dates) — tanggihan kapag fully booked ang petsa
@@ -2849,7 +2854,7 @@ async def request_delivery(
     sarili niyang drop-off booking pagkatapos nitong ma-accept at ma-price.
 
     Mga patakaran:
-      - Drop-off lang; one-way (walang balik sa drop-off).
+      - Drop-off lang. Puwede itong ibalik sa drop-off (see request_dropoff).
       - Status: Pending / In Progress / Ready lang.
       - Kailangang may delivery ang shop (has_delivery).
       - Hindi puwede habang pending_verification ang bayad (nasa
@@ -3002,4 +3007,170 @@ async def request_delivery(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error requesting delivery: {str(e)}"
+        )
+
+
+async def request_dropoff(
+    db: Session,
+    booking_id: int,
+    customer: models.Customer,
+    data: DropoffRequestInput,
+):
+    """
+    NEW (Switch back to Drop-off) — ibinabalik ng CUSTOMER sa "drop-off"
+    ang sarili niyang delivery booking (kukunin na lang niya ang laundry
+    sa shop).
+
+    Mga patakaran:
+      - Delivery lang; "Out for Delivery" at mga status na hindi pa
+        nasa shop ang laundry (Awaiting ...) ay hindi puwede. Parehong
+        status gate ng request_delivery: Pending / In Progress / Ready.
+      - Kapag bayad na (o vine-verify) at may delivery fee, hindi
+        puwede — nasa bayad na ang fee at hindi ito kayang i-refund ng
+        system; makipag-ugnayan sa shop.
+      - Kung hindi pa bayad: binabawas ang delivery fee sa total_price
+        (at final_price), cod -> cash.
+      - Nililinis ang delivery address snapshot, delivery_datetime,
+        delivery fee, delivery rider (kung meron nang naka-assign —
+        nire-record sa activity log), switched_to_delivery_at at
+        out_for_delivery_at. Pickup leg fields (kung orihinal na
+        delivery) ay iniiwan bilang history.
+      - Chine-check ang Fully Booked dates kung may dropoff_datetime.
+    """
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id, Booking.customer_id == customer.id)
+        .with_for_update(of=Booking)
+        .first()
+    )
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found."
+        )
+
+    if booking.fulfillment_mode != "delivery":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This booking is already a drop-off."
+        )
+
+    if booking.status not in SWITCHABLE_TO_DELIVERY_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"This booking can't be changed to drop-off while it is "
+                f"'{booking.status}'. It can be changed while the laundry is "
+                "Pending, In Progress, or Ready. Please contact the shop."
+            )
+        )
+
+    delivery_fee = round(booking.delivery_fee_charged or 0.0, 2)
+    is_settled = booking.payment_status in ("paid", "pending_verification")
+
+    if is_settled and delivery_fee > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This order is already paid and includes a delivery fee, so it can't be "
+                "changed to drop-off. Please contact the shop."
+            )
+        )
+
+    if data.dropoff_datetime is not None:
+        assert_date_not_blocked(db, booking.shop_id, data.dropoff_datetime)
+
+    had_rider = booking.delivery_rider_name
+    was_switched = booking.switched_to_delivery_at is not None
+
+    # --- Presyo: tanggalin ang delivery fee kung hindi pa bayad ---
+    if not is_settled and delivery_fee > 0:
+        booking.total_price = max(0.0, round((booking.total_price or 0.0) - delivery_fee, 2))
+        if booking.final_price is not None:
+            booking.final_price = max(0.0, round(booking.final_price - delivery_fee, 2))
+
+    if not is_settled and booking.payment_method == "cod":
+        booking.payment_method = "cash"
+
+    # --- I-reset ang delivery fields ---
+    booking.fulfillment_mode = "dropoff"
+    booking.delivery_fee_charged = 0.0
+    booking.delivery_address_id = None
+    booking.delivery_address_line = None
+    booking.delivery_latitude = None
+    booking.delivery_longitude = None
+    booking.delivery_datetime = None
+    booking.delivery_rider_name = None
+    booking.delivery_rider_contact = None
+    booking.delivery_rider_assigned_at = None
+    booking.switched_to_delivery_at = None
+    booking.out_for_delivery_at = None
+
+    booking.dropoff_datetime = data.dropoff_datetime
+    booking.dropoff_window = data.dropoff_window
+
+    try:
+        log_activity(
+            db, booking.shop_id,
+            actor_name=customer.full_name,
+            actor_role="customer",
+            description=(
+                f"Customer changed booking #{booking.id} ({booking.service_type}) "
+                f"from delivery back to drop-off"
+                + (" (was a switched drop-off)" if was_switched else "")
+                + (f" - delivery rider {had_rider} was unassigned" if had_rider else "")
+            )
+        )
+
+        notification_controller.create_notification(
+            db,
+            customer_id=customer.id,
+            notif_type="booking_switched_to_dropoff",
+            title="Changed to Drop-off",
+            message=(
+                f"Your {booking.service_type} order at {booking.shop_name or 'the shop'} "
+                "is now set for pickup at the shop."
+                + (f" The delivery fee of ₱{delivery_fee:,.2f} was removed." if delivery_fee > 0 and not is_settled else "")
+            ),
+            booking_id=booking.id
+        )
+
+        db.commit()
+        db.refresh(booking)
+
+        reloaded = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.washer),
+                joinedload(Booking.dryer),
+                joinedload(Booking.inventory_usages),
+                joinedload(Booking.add_ons_used),
+                joinedload(Booking.machine_assignments),
+            )
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+
+        await manager.broadcast(booking.shop_id, {
+            "type": "booking_switched_to_dropoff",
+            "booking_id": reloaded.id,
+            "customer_name": reloaded.customer_name,
+            "service_type": reloaded.service_type,
+            "status": reloaded.status,
+            "rider_unassigned": bool(had_rider),
+        })
+
+        await customer_manager.send_to_customer(customer.id, {
+            "type": EVENT_BOOKING_UPDATED,
+            "booking_id": reloaded.id,
+            "status": reloaded.status,
+            "fulfillment_mode": reloaded.fulfillment_mode,
+        })
+
+        return reloaded
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error changing to drop-off: {str(e)}"
         )

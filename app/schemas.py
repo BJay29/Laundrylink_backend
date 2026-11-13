@@ -1506,6 +1506,48 @@ class DropoffRequestInput(BaseModel):
         return v
 
 
+# --- SHOP STATUS (accepting toggle + operating hours) ---
+
+_HHMM_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class ShopStatusUpdate(BaseModel):
+    """
+    PATCH /shop-status — partial update (exclude_unset). Lahat optional:
+      accepting_bookings: manual na toggle.
+      opening_time / closing_time: "HH:MM" (24h, Asia/Manila). Ipadala
+      ang PAREHONG `null` para tanggalin ang operating hours; hindi
+      puwedeng isa lang ang may laman.
+    """
+    accepting_bookings: Optional[bool] = None
+    opening_time: Optional[str] = None
+    closing_time: Optional[str] = None
+
+    @field_validator("opening_time", "closing_time")
+    @classmethod
+    def validate_hhmm(cls, v):
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not _HHMM_PATTERN.match(v):
+            raise ValueError("Time must be in HH:MM (24-hour) format, e.g. 08:00.")
+        return v
+
+
+class ShopStatusResponse(BaseModel):
+    accepting_bookings: bool
+    opening_time: Optional[str] = None
+    closing_time: Optional[str] = None
+    is_open: bool
+    closed_reason: Optional[str] = None
+    reason_code: Optional[str] = None
+    terminal_connected: bool
+    within_hours: bool
+    last_seen_at: Optional[datetime] = None
+
+
 class BookingDecisionResponse(BaseModel):
     """Simple response para sa accept/decline endpoints."""
     message: str
@@ -1718,6 +1760,16 @@ class ShopPublicResponse(BaseModel):
     delivery_fee: float = 0.0
     is_online: bool = False
 
+    # NEW (Shop Status) — effective status (manual toggle + operating
+    # hours + terminal heartbeat). Galing sa Shop.is_open/closed_reason
+    # properties (from_attributes). Gamitin ito ng mobile sa halip na
+    # `is_online` lang.
+    is_open: bool = False
+    closed_reason: Optional[str] = None
+    accepting_bookings: bool = True
+    opening_time: Optional[str] = None
+    closing_time: Optional[str] = None
+
     # NEW (Home page promo carousel) — currently-ACTIVE promo codes for
     # this shop (is_active, not expired, not past max_uses — the
     # filtering itself happens in shop_service.get_all_shops() /
@@ -1773,6 +1825,13 @@ class ShopDetailResponse(BaseModel):
     has_delivery: bool = False
     delivery_fee: float = 0.0
     is_online: bool = False
+
+    # NEW (Shop Status) — see ShopPublicResponse.
+    is_open: bool = False
+    closed_reason: Optional[str] = None
+    accepting_bookings: bool = True
+    opening_time: Optional[str] = None
+    closing_time: Optional[str] = None
 
     gcash_qr_url: Optional[str] = None
     paymaya_qr_url: Optional[str] = None

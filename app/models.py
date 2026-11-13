@@ -27,6 +27,15 @@ class Shop(Base):
 
     is_online = Column(Boolean, default=False, nullable=False, server_default="false")
 
+    # NEW (Shop Status) — see app/services/shop_status.py. Bukas lang ang
+    # shop kapag accepting_bookings AND nasa operating hours AND konektado
+    # ang terminal (heartbeat/last_seen_at, o ang dating is_online).
+    accepting_bookings = Column(Boolean, default=True, nullable=False, server_default="true")
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    # "HH:MM" (24h, Asia/Manila). Parehong null = walang itinakdang oras.
+    opening_time = Column(String(5), nullable=True)
+    closing_time = Column(String(5), nullable=True)
+
     # (Online Payment feature) — public URLs (Supabase Storage, bucket
     # "payment-qr-codes") ng QR code ng shop para sa GCash at PayMaya.
     # Ang binary na larawan mismo ay NASA Supabase Storage, hindi dito —
@@ -90,6 +99,18 @@ class Shop(Base):
     # fully booked na (see BlockedDate sa dulo ng file).
     blocked_dates = relationship("BlockedDate", back_populates="shop", cascade="all, delete-orphan")
 
+    @property
+    def is_open(self) -> bool:
+        """NEW (Shop Status) — effective na bukas ba para sa mobile bookings."""
+        from app.services.shop_status import compute_shop_status
+        return compute_shop_status(self).is_open
+
+    @property
+    def closed_reason(self):
+        """NEW (Shop Status) — customer-facing na dahilan kung sarado; None kung bukas."""
+        from app.services.shop_status import compute_shop_status
+        return compute_shop_status(self).message
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -101,6 +122,11 @@ class Shop(Base):
             "has_delivery": self.has_delivery,
             "delivery_fee": self.delivery_fee,
             "is_online": self.is_online,
+            "accepting_bookings": self.accepting_bookings,
+            "opening_time": self.opening_time,
+            "closing_time": self.closing_time,
+            "is_open": self.is_open,
+            "closed_reason": self.closed_reason,
             "gcash_qr_url": self.gcash_qr_url,
             "paymaya_qr_url": self.paymaya_qr_url,
             "qr_code_url": self.qr_code_url,

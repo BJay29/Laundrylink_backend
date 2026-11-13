@@ -26,6 +26,9 @@ from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from app.services.prediction_service import PredictionService
 from app.routes import upload_routes
+from app.routes import shop_status_routes
+from app.controller import shop_status_controller
+
 
 
 # Minimum na bilang ng ARAW na may bookings bago i-train ang sariling
@@ -161,12 +164,27 @@ async def lifespan(app: FastAPI):
         # (kasama na ang bagong "reviews" table para sa Rating feature
         # at ang bagong "blocked_dates" table para sa Fully Booked
         # feature — bagong tables ito, kaya awtomatikong gagawin dito;
-        # walang kailangang ALTER TABLE.)
+        # walang kailangang ALTER TABLE. PERO ang mga bagong COLUMN sa
+        # existing na "shops"/"bookings" table (shop status, switched/out
+        # for delivery) ay HINDI idinadagdag ng create_all — kailangan ng
+        # ALTER TABLE, see documentation.)
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Schema Synchronization: COMPLETE")
         
         # Trigger data seeding
         seed_hardware_and_inventory()
+
+        # NEW (Shop Status) — linisin ang naiwang "online" flag mula sa
+        # nakaraang run (nag-crash/nag-redeploy ang server). Mag-o-online
+        # ulit ang shop sa unang heartbeat ng web dashboard (~60s).
+        _db = SessionLocal()
+        try:
+            shop_status_controller.reset_stale_online_flags(_db)
+        except Exception as e:
+            _db.rollback()
+            print(f"Shop status reset skipped: {e}")
+        finally:
+            _db.close()
 
         # Initialize Automated 24-hour Retraining Scheduler
         #
@@ -285,6 +303,7 @@ app.include_router(websocket_routes.router)
 app.include_router(addon_routes.router)
 app.include_router(promo_routes.router)
 app.include_router(upload_routes.router)
+app.include_router(shop_status_routes.router)
 # NEW — notification bell/page endpoints (GET /notifications/mine,
 # GET /notifications/unread-count, PATCH /notifications/{id}/read,
 # PATCH /notifications/mark-all-read).
@@ -319,7 +338,7 @@ def read_root():
         "modules_active": [
             "Auth", "CustomerAuth", "Bookings", "Machines", "Settings",
             "Analytics", "Inventory", "Activity", "Shops", "Notifications",
-            "Addresses", "AddOns", "PromoCodes", "Reviews", "BlockedDates",
+            "Addresses", "AddOns", "PromoCodes", "Reviews", "BlockedDates", "ShopStatus",
             "SupabaseAuthWebhook",  # NEW
         ]
     }
