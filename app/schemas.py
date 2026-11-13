@@ -1103,10 +1103,20 @@ class RiderAssignmentInput(BaseModel):
     @field_validator("rider_contact")
     @classmethod
     def validate_rider_contact(cls, v):
-        cleaned = v.strip()
-        if not cleaned:
+        """
+        PH mobile number lang: eksaktong 11 digits na nagsisimula sa 09,
+        o +63 / 63 na katumbas nito (puwedeng may espasyo/gitling).
+        Laging naka-save bilang 09XXXXXXXXX.
+        """
+        compact = re.sub(r"[\s\-().]", "", (v or "").strip())
+        if not compact:
             raise ValueError("Rider contact number cannot be empty.")
-        return cleaned
+        match = re.fullmatch(r"(?:\+63|63|0)(9\d{9})", compact)
+        if not match:
+            raise ValueError(
+                "Enter a valid PH mobile number (11 digits, e.g. 09171234567 or +639171234567)."
+            )
+        return "0" + match.group(1)
 
 
 # --- BOOKING SCHEMAS ---
@@ -1473,6 +1483,24 @@ class DeliveryRequestInput(BaseModel):
     @field_validator("delivery_window")
     @classmethod
     def validate_delivery_window(cls, v):
+        if v is not None and v not in ALLOWED_TIME_WINDOWS:
+            raise ValueError(f"time window must be one of: {', '.join(sorted(ALLOWED_TIME_WINDOWS))}")
+        return v
+
+
+class DropoffRequestInput(BaseModel):
+    """
+    NEW (Switch back to Drop-off) — ipinapadala ng customer para ibalik
+    sa "drop-off" ang isang delivery booking (siya na lang ang kukuha
+    ng laundry sa shop). Lahat optional: ang dropoff_datetime ay heads-up
+    lang kung kailan siya pupunta (chine-check sa Fully Booked dates).
+    """
+    dropoff_datetime: Optional[datetime] = None
+    dropoff_window: Optional[str] = None
+
+    @field_validator("dropoff_window")
+    @classmethod
+    def validate_dropoff_window(cls, v):
         if v is not None and v not in ALLOWED_TIME_WINDOWS:
             raise ValueError(f"time window must be one of: {', '.join(sorted(ALLOWED_TIME_WINDOWS))}")
         return v
