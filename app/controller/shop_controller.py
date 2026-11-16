@@ -183,6 +183,16 @@ def get_shop_detail(db: Session, shop_id: int):
         has_delivery=shop.has_delivery,
         delivery_fee=shop.delivery_fee,
         is_online=shop.is_online,  # FIX: dati'y nawawala, kaya default False palagi
+        # FIX (Open sa listing, pero Closed sa Shop Detail): ang effective
+        # status (accepting_bookings + operating hours + heartbeat) ay hindi
+        # dating pinapasa dito, kaya laging default na False ang is_open.
+        # Galing ang mga ito sa Shop.is_open / closed_reason (compute_shop_status),
+        # parehong source ng listing (model_validate).
+        is_open=shop.is_open,
+        closed_reason=shop.closed_reason,
+        accepting_bookings=True if shop.accepting_bookings is None else bool(shop.accepting_bookings),
+        opening_time=shop.opening_time,
+        closing_time=shop.closing_time,
         # FIX (Online Payment toggle bug): dati'y nawawala rin ang tatlong
         # ito, kaya laging null ang QR sa mobile app kahit na-upload na.
         gcash_qr_url=shop.gcash_qr_url,
