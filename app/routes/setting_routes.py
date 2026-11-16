@@ -48,6 +48,12 @@ def _build_shop_profile_response(shop: models.Shop, user: models.User) -> schema
         longitude=shop.longitude,
         gcash_qr_url=shop.gcash_qr_url,
         paymaya_qr_url=shop.paymaya_qr_url,
+        # FIXED: dati hindi kasama ang tatlong ito kaya laging null
+        # pagkatapos mag-refresh ang QR preview at payment details.
+        qr_code_url=shop.qr_code_url,
+        payment_channel=shop.payment_channel,
+        payment_account_name=shop.payment_account_name,
+        payment_account_number=shop.payment_account_number,
         accepts_cash=True if shop.accepts_cash is None else bool(shop.accepts_cash),
         accepts_cod=bool(shop.accepts_cod),
         accepts_online=bool(shop.accepts_online),
