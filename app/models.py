@@ -380,6 +380,11 @@ class User(Base):
 
     supabase_uid = Column(String(36), unique=True, index=True, nullable=True)
 
+    # NEW (Rider accounts) — contact number ng rider (PH mobile,
+    # 09XXXXXXXXX). Ginagamit ito ng staff sa pag-assign ng rider at
+    # ipinapakita sa customer. Nullable para hindi masira ang lumang rows.
+    mobile_number = Column(String(20), nullable=True)
+
     shop_id = Column(Integer, ForeignKey("shops.id"), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -391,6 +396,7 @@ class User(Base):
             "id": self.id,
             "email": self.email,
             "full_name": self.full_name,
+            "mobile_number": self.mobile_number,
             "role": self.role,
             "shop_id": self.shop_id,
             "is_active": self.is_active
@@ -786,6 +792,18 @@ class Booking(Base):
     delivery_rider_contact = Column(String, nullable=True)
     delivery_rider_assigned_at = Column(DateTime(timezone=True), nullable=True)
 
+    # NEW (Rider accounts) — link ng booking papunta sa naka-login na
+    # rider account (users.id, role="rider"). NULL = manual-entry na
+    # rider (pangalan/contact lang, walang account) gaya ng dati. Ito ang
+    # ginagamit ng Rider page para malaman kung "akin" ang isang job.
+    # SET NULL kapag na-delete ang rider account — nananatili ang pangalan.
+    pickup_rider_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    delivery_rider_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    # NEW (Rider accounts) — kailan pinindot ng pickup rider ang
+    # "Picked up" (nakuha na ang maruming damit sa customer).
+    picked_up_at = Column(DateTime(timezone=True), nullable=True)
+
     # --- NEW (Delivery Address feature) ---
     # Snapshot ng saved address na pinili ng customer sa checkout — see
     # docstring ng klase sa itaas para sa buong paliwanag kung bakit
@@ -962,6 +980,9 @@ class Booking(Base):
             "pickup_rider_name": self.pickup_rider_name,
             "pickup_rider_contact": self.pickup_rider_contact,
             "pickup_rider_assigned_at": self.pickup_rider_assigned_at.isoformat() if self.pickup_rider_assigned_at else None,
+            "pickup_rider_id": self.pickup_rider_id,
+            "delivery_rider_id": self.delivery_rider_id,
+            "picked_up_at": self.picked_up_at.isoformat() if self.picked_up_at else None,
             "delivery_rider_name": self.delivery_rider_name,
             "delivery_rider_contact": self.delivery_rider_contact,
             "delivery_rider_assigned_at": self.delivery_rider_assigned_at.isoformat() if self.delivery_rider_assigned_at else None,

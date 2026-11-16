@@ -20,6 +20,7 @@ from app.routes import (
     webhook_routes,  # NEW — Supabase Auth webhook sync endpoint
     review_routes,   # NEW — Rating after order (POST /reviews/)
     blocked_date_routes,  # NEW — "Fully Booked" dates (shop marks, customer can't pick)
+    rider_routes,         # NEW — Rider page endpoints (GET /rider/jobs, ...)
 )
 from sqlalchemy.orm import Session
 # Imports for 24-hour automated retraining
@@ -27,7 +28,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app.services.prediction_service import PredictionService
 from app.routes import upload_routes
 from app.routes import shop_status_routes
-from app.controller import shop_status_controller
 
 
 
@@ -164,27 +164,12 @@ async def lifespan(app: FastAPI):
         # (kasama na ang bagong "reviews" table para sa Rating feature
         # at ang bagong "blocked_dates" table para sa Fully Booked
         # feature — bagong tables ito, kaya awtomatikong gagawin dito;
-        # walang kailangang ALTER TABLE. PERO ang mga bagong COLUMN sa
-        # existing na "shops"/"bookings" table (shop status, switched/out
-        # for delivery) ay HINDI idinadagdag ng create_all — kailangan ng
-        # ALTER TABLE, see documentation.)
+        # walang kailangang ALTER TABLE.)
         models.Base.metadata.create_all(bind=engine)
         print("PostgreSQL Schema Synchronization: COMPLETE")
         
         # Trigger data seeding
         seed_hardware_and_inventory()
-
-        # NEW (Shop Status) — linisin ang naiwang "online" flag mula sa
-        # nakaraang run (nag-crash/nag-redeploy ang server). Mag-o-online
-        # ulit ang shop sa unang heartbeat ng web dashboard (~60s).
-        _db = SessionLocal()
-        try:
-            shop_status_controller.reset_stale_online_flags(_db)
-        except Exception as e:
-            _db.rollback()
-            print(f"Shop status reset skipped: {e}")
-        finally:
-            _db.close()
 
         # Initialize Automated 24-hour Retraining Scheduler
         #
@@ -327,6 +312,10 @@ app.include_router(review_routes.router)
 # customer sa mobile app.
 app.include_router(blocked_date_routes.router)
 
+# NEW (Rider accounts) — GET /rider/jobs, POST /rider/jobs/{id}/picked-up,
+# /start-delivery, /delivered. Para sa naka-login na rider lang.
+app.include_router(rider_routes.router)
+
 # --- ROOT HEALTH CHECK ---
 
 @app.get("/")
@@ -338,7 +327,7 @@ def read_root():
         "modules_active": [
             "Auth", "CustomerAuth", "Bookings", "Machines", "Settings",
             "Analytics", "Inventory", "Activity", "Shops", "Notifications",
-            "Addresses", "AddOns", "PromoCodes", "Reviews", "BlockedDates", "ShopStatus",
+            "Addresses", "AddOns", "PromoCodes", "Reviews", "BlockedDates",
             "SupabaseAuthWebhook",  # NEW
         ]
     }

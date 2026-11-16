@@ -186,6 +186,7 @@ def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
 
     user.role = staff_data.role
     user.full_name = staff_data.full_name
+    user.mobile_number = staff_data.mobile_number
     user.shop_id = shop_id
     user.supabase_uid = supabase_uid
     user.is_active = True
@@ -204,6 +205,7 @@ def create_staff(db: Session, staff_data: schemas.StaffCreate, shop_id: int):
             )
         user.role = staff_data.role
         user.full_name = staff_data.full_name
+        user.mobile_number = staff_data.mobile_number
         user.shop_id = shop_id
         user.supabase_uid = supabase_uid
         user.is_active = True
@@ -225,6 +227,20 @@ def list_staff(db: Session, shop_id: int):
             models.User.is_active == True,
         )
         .order_by(models.User.created_at.desc())
+        .all()
+    )
+
+
+def list_riders(db: Session, shop_id: int):
+    """Mga active na rider account ng shop — para sa dropdown ng pag-assign."""
+    return (
+        db.query(models.User)
+        .filter(
+            models.User.shop_id == shop_id,
+            models.User.role == "rider",
+            models.User.is_active == True,
+        )
+        .order_by(models.User.full_name.asc())
         .all()
     )
 

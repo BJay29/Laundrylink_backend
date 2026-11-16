@@ -59,6 +59,15 @@ def list_staff(
     return auth_controller.list_staff(db, current_user.shop_id)
 
 
+@router.get("/riders", response_model=List[schemas.RiderOption])
+def list_riders(
+    current_user: models.User = Depends(require_role("owner", "manager", "staff")),
+    db: Session = Depends(get_db)
+):
+    """NEW: mga rider account ng shop — pinipili ni staff sa Assign Rider modal."""
+    return auth_controller.list_riders(db, current_user.shop_id)
+
+
 @router.delete("/staff/{user_id}")
 def delete_staff(
     user_id: int,

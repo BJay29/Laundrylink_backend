@@ -2,7 +2,7 @@ import os
 
 import jwt
 from jwt import PyJWKClient
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
@@ -56,7 +56,16 @@ def decode_supabase_token(token: str) -> dict:
 # DEPENDENCIES — SHOP OWNER / STAFF (models.User)
 # =========================================================
 
+# NEW (Rider accounts) — ang tanging mga path na puwedeng gamitin ng
+# naka-login na rider. Lahat ng ibang endpoint na gumagamit ng
+# get_current_user() ay otomatikong 403 para sa rider, kaya hindi niya
+# mababasa ang sales, inventory, settings, o ibang booking ng shop kahit
+# i-type pa niya ang URL.
+RIDER_ALLOWED_PREFIXES = ("/rider", "/auth/profile")
+
+
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> models.User:
@@ -74,6 +83,12 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found, inactive, or not yet synced. Please try again in a moment.",
+        )
+
+    if user.role == "rider" and not request.url.path.startswith(RIDER_ALLOWED_PREFIXES):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Rider accounts can only access the rider page.",
         )
 
     return user

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
+from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 import re
@@ -123,7 +123,13 @@ class StaffCreate(BaseModel):
     """
     full_name: str
     email: EmailStr
-    role: str = "staff"  # "staff" or "manager"
+    role: str = "staff"  # "staff", "manager", o "rider"
+    # Temporary password na itinakda ng owner. Ginagamit sa paggawa ng
+    # tunay na Supabase Auth account (naka-verify na agad ang email).
+    password: str = Field(..., min_length=6)
+    # NEW (Rider accounts) — PH mobile number. REQUIRED para sa "rider"
+    # (ito ang ipinapakita sa customer at kay staff), opsyonal sa iba.
+    mobile_number: Optional[str] = None
 
     @field_validator("full_name")
     @classmethod
@@ -136,10 +142,29 @@ class StaffCreate(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v):
-        allowed_roles = {"staff", "manager"}
+        allowed_roles = {"staff", "manager", "rider"}
         if v not in allowed_roles:
             raise ValueError(f"role must be one of: {', '.join(sorted(allowed_roles))}")
         return v
+
+    @field_validator("mobile_number")
+    @classmethod
+    def validate_mobile_number(cls, v):
+        if v is None or not v.strip():
+            return None
+        compact = re.sub(r"[\s\-().]", "", v.strip())
+        match = re.fullmatch(r"(?:\+63|63|0)(9\d{9})", compact)
+        if not match:
+            raise ValueError(
+                "Enter a valid PH mobile number (11 digits, e.g. 09171234567 or +639171234567)."
+            )
+        return "0" + match.group(1)
+
+    @model_validator(mode="after")
+    def rider_needs_mobile(self):
+        if self.role == "rider" and not self.mobile_number:
+            raise ValueError("A contact number is required for delivery riders.")
+        return self
 
 class StaffResponse(BaseModel):
     """Profile data returned after successfully creating a staff/manager account."""
@@ -147,8 +172,19 @@ class StaffResponse(BaseModel):
     full_name: Optional[str] = None
     email: str
     role: str
+    mobile_number: Optional[str] = None
     shop_id: Optional[int] = None
     is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RiderOption(BaseModel):
+    """Rider account na puwedeng piliin ng staff sa pag-assign (dropdown)."""
+    id: int
+    full_name: Optional[str] = None
+    email: str
+    mobile_number: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1085,16 +1121,24 @@ class UploadResponse(BaseModel):
 
 class RiderAssignmentInput(BaseModel):
     """
-    Schema para sa pag-assign ng rider (pickup o delivery leg) sa
-    Service Terminal — staff mismo ang nagta-type ng pangalan at
-    contact number, walang naka-catalog na listahan ng riders.
+    Schema para sa pag-assign ng rider (pickup o delivery leg).
+
+    UPDATED (Rider accounts): dalawang paraan na ngayon —
+      1. `rider_id` (users.id ng isang rider account): kinukuha ng
+         backend ang pangalan at contact mula sa account mismo, at
+         nali-link ang booking sa account para makita ng rider ang job
+         sa sarili niyang page.
+      2. Manual (rider_name + rider_contact) gaya ng dati, walang account.
     """
-    rider_name: str
-    rider_contact: str
+    rider_id: Optional[int] = None
+    rider_name: Optional[str] = None
+    rider_contact: Optional[str] = None
 
     @field_validator("rider_name")
     @classmethod
     def validate_rider_name(cls, v):
+        if v is None:
+            return None
         cleaned = v.strip()
         if not cleaned:
             raise ValueError("Rider name cannot be empty.")
@@ -1108,15 +1152,66 @@ class RiderAssignmentInput(BaseModel):
         o +63 / 63 na katumbas nito (puwedeng may espasyo/gitling).
         Laging naka-save bilang 09XXXXXXXXX.
         """
-        compact = re.sub(r"[\s\-().]", "", (v or "").strip())
-        if not compact:
-            raise ValueError("Rider contact number cannot be empty.")
+        if v is None or not v.strip():
+            return None
+        compact = re.sub(r"[\s\-().]", "", v.strip())
         match = re.fullmatch(r"(?:\+63|63|0)(9\d{9})", compact)
         if not match:
             raise ValueError(
                 "Enter a valid PH mobile number (11 digits, e.g. 09171234567 or +639171234567)."
             )
         return "0" + match.group(1)
+
+    @model_validator(mode="after")
+    def need_account_or_manual(self):
+        if self.rider_id is None:
+            if not self.rider_name:
+                raise ValueError("Rider name cannot be empty.")
+            if not self.rider_contact:
+                raise ValueError("Rider contact number cannot be empty.")
+        return self
+
+
+class RiderDeliveredInput(BaseModel):
+    """Body ng "Delivered" ng rider. cash_collected=True kapag nakuha na ang bayad (COD/cash)."""
+    cash_collected: bool = False
+
+
+class RiderJobResponse(BaseModel):
+    """
+    Isang trabaho ng rider (isang leg ng isang delivery booking). Slim
+    na hugis para sa phone.
+
+    leg:    "pickup" | "delivery"
+    stage:  "pickup_pending" | "picked_up" | "waiting" | "ready" |
+            "on_the_way" | "done"
+    action: ang susunod na puwedeng gawin ng rider — "picked_up" |
+            "start_delivery" | "delivered" | None (wala pang magagawa)
+    """
+    booking_id: int
+    leg: str
+    stage: str
+    action: Optional[str] = None
+    status: str
+    customer_name: str
+    customer_phone: Optional[str] = None
+    service_type: str
+    loads: Optional[int] = None
+    weight: Optional[float] = None
+    address_line: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    special_instructions: Optional[str] = None
+    payment_method: Optional[str] = None
+    payment_status: Optional[str] = None
+    collect_amount: float = 0.0
+    pickup_datetime: Optional[datetime] = None
+    pickup_window: Optional[str] = None
+    delivery_datetime: Optional[datetime] = None
+    picked_up_at: Optional[datetime] = None
+    out_for_delivery_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    shop_name: Optional[str] = None
 
 
 # --- BOOKING SCHEMAS ---
@@ -1280,6 +1375,9 @@ class BookingResponse(BaseModel):
     pickup_rider_name: Optional[str] = None
     pickup_rider_contact: Optional[str] = None
     pickup_rider_assigned_at: Optional[datetime] = None
+    pickup_rider_id: Optional[int] = None
+    delivery_rider_id: Optional[int] = None
+    picked_up_at: Optional[datetime] = None
     delivery_rider_name: Optional[str] = None
     delivery_rider_contact: Optional[str] = None
     delivery_rider_assigned_at: Optional[datetime] = None

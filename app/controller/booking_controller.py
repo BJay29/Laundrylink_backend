@@ -1857,6 +1857,38 @@ async def finalize_booking_pricing(
 # RIDER ASSIGNMENT FUNCTIONS
 # =========================================================
 
+def _resolve_rider(db: Session, shop_id: int, rider_data: RiderAssignmentInput):
+    """
+    NEW (Rider accounts) — nagbabalik ng (rider_id, name, contact).
+
+    May rider_id → kinukuha ang pangalan at contact mula sa rider
+    account mismo (dapat role="rider", active, at sa parehong shop).
+    Walang rider_id → manual entry gaya ng dati (rider_id=None).
+    """
+    if rider_data.rider_id is None:
+        return None, rider_data.rider_name, rider_data.rider_contact
+
+    rider = db.query(models.User).filter(
+        models.User.id == rider_data.rider_id,
+        models.User.shop_id == shop_id,
+        models.User.role == "rider",
+        models.User.is_active == True,
+    ).first()
+    if not rider:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rider account not found."
+        )
+
+    contact = rider.mobile_number or rider_data.rider_contact
+    if not contact:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This rider account has no contact number yet."
+        )
+    return rider.id, (rider.full_name or rider.email), contact
+
+
 async def assign_pickup_rider(
     db: Session,
     booking_id: int,
@@ -1896,8 +1928,16 @@ async def assign_pickup_rider(
             detail=f"Cannot assign a pickup rider to a booking with status '{booking.status}'."
         )
 
-    booking.pickup_rider_name = rider_data.rider_name
-    booking.pickup_rider_contact = rider_data.rider_contact
+    rider_id, rider_name, rider_contact = _resolve_rider(db, shop_id, rider_data)
+
+    # Kapag ibang rider na ang naka-assign, i-reset ang "picked up" para
+    # ang bagong rider ang magkumpirma.
+    if booking.pickup_rider_id != rider_id:
+        booking.picked_up_at = None
+
+    booking.pickup_rider_id = rider_id
+    booking.pickup_rider_name = rider_name
+    booking.pickup_rider_contact = rider_contact
     booking.pickup_rider_assigned_at = datetime.now(timezone.utc)
 
     try:
@@ -1906,8 +1946,8 @@ async def assign_pickup_rider(
             actor_name=current_user.full_name or current_user.email,
             actor_role=current_user.role,
             description=(
-                f"Assigned pickup rider {rider_data.rider_name} "
-                f"({rider_data.rider_contact}) to {booking.customer_name}'s booking"
+                f"Assigned pickup rider {rider_name} "
+                f"({rider_contact}) to {booking.customer_name}'s booking"
             )
         )
 
@@ -1918,7 +1958,7 @@ async def assign_pickup_rider(
                 notif_type="pickup_rider_assigned",
                 title="Rider On The Way",
                 message=(
-                    f"{rider_data.rider_name} ({rider_data.rider_contact}) is on the way "
+                    f"{rider_name} ({rider_contact}) is on the way "
                     f"to pick up your laundry for your booking at "
                     f"{booking.shop_name or 'the shop'}."
                 ),
@@ -1998,8 +2038,11 @@ async def assign_delivery_rider(
             )
         )
 
-    booking.delivery_rider_name = rider_data.rider_name
-    booking.delivery_rider_contact = rider_data.rider_contact
+    rider_id, rider_name, rider_contact = _resolve_rider(db, shop_id, rider_data)
+
+    booking.delivery_rider_id = rider_id
+    booking.delivery_rider_name = rider_name
+    booking.delivery_rider_contact = rider_contact
     booking.delivery_rider_assigned_at = datetime.now(timezone.utc)
 
     try:
@@ -2008,8 +2051,8 @@ async def assign_delivery_rider(
             actor_name=current_user.full_name or current_user.role,
             actor_role=current_user.role,
             description=(
-                f"Assigned delivery rider {rider_data.rider_name} "
-                f"({rider_data.rider_contact}) to {booking.customer_name}'s booking"
+                f"Assigned delivery rider {rider_name} "
+                f"({rider_contact}) to {booking.customer_name}'s booking"
             )
         )
 
@@ -2020,7 +2063,7 @@ async def assign_delivery_rider(
                 notif_type="delivery_rider_assigned",
                 title="Delivery Rider Assigned",
                 message=(
-                    f"{rider_data.rider_name} ({rider_data.rider_contact}) will deliver your "
+                    f"{rider_name} ({rider_contact}) will deliver your "
                     f"laundry from {booking.shop_name or 'the shop'}"
                     + (
                         ". They're on the way now."
