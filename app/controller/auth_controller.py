@@ -1,4 +1,6 @@
 from fastapi import HTTPException, status
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app import models, schemas
 from app.services import weather_service
@@ -41,14 +43,34 @@ def register_shop_for_owner(db: Session, shop_data: schemas.OwnerCreate, current
             detail="This account is already linked to a shop."
         )
 
+    shop_name = (shop_data.shop_name or "").strip()
+    name_taken_error = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Shop name already taken. Please choose a different name.",
+    )
+
+    # Friendly pre-check (hindi case-sensitive). Ang unique constraint sa DB
+    # (shops_shop_name_key) ang huling proteksyon kapag sabay ang dalawang request.
+    existing_shop = (
+        db.query(models.Shop)
+        .filter(func.lower(models.Shop.shop_name) == shop_name.lower())
+        .first()
+    )
+    if existing_shop:
+        raise name_taken_error
+
     new_shop = models.Shop(
-        shop_name=shop_data.shop_name,
+        shop_name=shop_name,
         address=shop_data.address,
         latitude=weather_service.DEFAULT_LATITUDE,
         longitude=weather_service.DEFAULT_LONGITUDE,
     )
-    db.add(new_shop)
-    db.commit()
+    try:
+        db.add(new_shop)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise name_taken_error
     db.refresh(new_shop)
 
     current_user.shop_id = new_shop.id
