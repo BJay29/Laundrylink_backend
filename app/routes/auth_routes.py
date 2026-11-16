@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, status
+from typing import List
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app import schemas, models
@@ -33,7 +34,7 @@ def register_shop(
     return auth_controller.register_shop_for_owner(db, shop_data, current_user)
 
 
-# --- STAFF/MANAGER INVITATION (Owner-only) ---
+# --- STAFF / MANAGER / RIDER ACCOUNTS (Owner-only) ---
 @router.post("/register/staff", response_model=schemas.StaffResponse, status_code=status.HTTP_201_CREATED)
 def register_staff(
     staff_data: schemas.StaffCreate,
@@ -41,13 +42,31 @@ def register_staff(
     db: Session = Depends(get_db)
 ):
     """
-    Gumagawa ng "invitation" record para sa bagong staff/manager UNDER
-    THE LOGGED-IN OWNER'S OWN SHOP. Hindi pa ito kumpletong account —
-    kailangan pang mag-sign-up mismo ang staff member sa Supabase Auth
-    gamit ang PAREHONG email para makumpleto ang kanilang access
-    (see auth_controller.create_staff docstring).
+    UPDATED: gumagawa na ng TUNAY na Supabase login account (naka-verify
+    na ang email, walang OTP) at User row sa shop ng owner. Roles:
+    staff, manager, rider. Makaka-login agad ang bagong account gamit
+    ang email at temporary password.
     """
     return auth_controller.create_staff(db, staff_data, shop_id=current_user.shop_id)
+
+
+@router.get("/staff", response_model=List[schemas.StaffResponse])
+def list_staff(
+    current_user: models.User = Depends(require_role("owner")),
+    db: Session = Depends(get_db)
+):
+    """NEW: listahan ng staff/manager/rider ng shop ng owner."""
+    return auth_controller.list_staff(db, current_user.shop_id)
+
+
+@router.delete("/staff/{user_id}")
+def delete_staff(
+    user_id: int,
+    current_user: models.User = Depends(require_role("owner")),
+    db: Session = Depends(get_db)
+):
+    """NEW: binubura ng owner ang isang team member (Supabase login + row)."""
+    return auth_controller.delete_staff(db, user_id, current_user)
 
 
 # --- SESSION DATA FETCHING (PROTECTED, SELF ONLY) ---
@@ -56,8 +75,6 @@ def get_my_profile(current_user: models.User = Depends(get_current_user)):
     """
     Retrieves session details of the CURRENTLY LOGGED-IN user only,
     based on the Supabase JWT sent in the Authorization header.
-    Walang binago dito — parehong gumagana ito kasama ng bagong
-    get_current_user() sa security.py.
     """
     return {
         "email": current_user.email,
@@ -69,10 +86,5 @@ def get_my_profile(current_user: models.User = Depends(get_current_user)):
     }
 
 
-# REMOVED: POST /auth/login — hindi na FastAPI ang nagbibigay ng JWT.
-# Sa frontend, gagamitin na lang ang Supabase Auth SDK mismo:
-#   supabase.auth.signInWithPassword({ email, password })
-# at ang ibinabalik na session.access_token ang ipapasa bilang
-# "Authorization: Bearer <token>" papunta sa lahat ng protected
-# FastAPI endpoints (kasama na ang /auth/profile at /auth/register-shop
-# sa itaas).
+# REMOVED: POST /auth/login — Supabase Auth SDK na ang humahawak ng login
+# (supabase.auth.signInWithPassword) sa frontend.
